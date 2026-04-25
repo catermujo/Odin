@@ -463,6 +463,7 @@ enum BuildFlagKind {
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
+	BuildFlag_EmitDowncastAssert,
 	BuildFlag_NoBoundsCheck,
 	BuildFlag_WebkitSwitchWorkaround,
 	BuildFlag_NoTypeAssert,
@@ -724,6 +725,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_EmitDowncastAssert,      str_lit("emit-downcast-assert"),      BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoBoundsCheck,           str_lit("no-bounds-check"),           BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_WebkitSwitchWorkaround,  str_lit("webkit-switch-workaround"),  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoTypeAssert,            str_lit("no-type-assert"),            BuildFlagParam_None,    Command__does_check);
@@ -1418,6 +1420,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						case BuildFlag_DisableAssert:
 							build_context.ODIN_DISABLE_ASSERT = true;
+							break;
+						case BuildFlag_EmitDowncastAssert:
+							build_context.emit_downcast_assert = true;
 							break;
 						case BuildFlag_NoBoundsCheck:
 							build_context.no_bounds_check = true;
@@ -2973,6 +2978,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	if (run_or_build) {
 		if (print_flag("-dynamic-map-calls")) {
 			print_usage_line(2, "Uses dynamic map calls to minimize code generation at the cost of runtime execution.");
+		}
+
+		if (print_flag("-emit-downcast-assert")) {
+			print_usage_line(2, "Emits runtime checks for explicit integer casts that narrow bit width,");
+			print_usage_line(2, "or convert between signed and unsigned integers of the same width.");
 		}
 	}
 

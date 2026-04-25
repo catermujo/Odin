@@ -5120,7 +5120,9 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 	AddressingMode proc_mode = proc_tv.mode;
 	if (proc_mode == Addressing_Type) {
 		GB_ASSERT(ce->args.count == 1);
+		TokenPos pos = ast_token(expr).pos;
 		lbValue x = lb_build_expr(p, ce->args[0]);
+		lb_emit_downcast_assert(p, x, tv.type, pos);
 		lbValue y = lb_emit_conv(p, x, tv.type);
 		y.type = tv.type;
 		return y;
@@ -5421,4 +5423,3 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst);
 	}
 }
-

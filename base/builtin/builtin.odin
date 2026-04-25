@@ -81,6 +81,12 @@ ODIN_ENDIAN_STRING              :: ODIN_ENDIAN_STRING
 ODIN_ERROR_POS_STYLE            :: ODIN_ERROR_POS_STYLE
 
 /*
+	`true` if the `-emit-downcast-assert` command line switch is passed, which enables runtime checks
+	for explicit integer casts that narrow bit width or switch signedness at the same width.
+*/
+ODIN_EMIT_DOWNCAST_ASSERT       :: ODIN_EMIT_DOWNCAST_ASSERT
+
+/*
 	`true` if the `-foreign-error-procedures` command line switch is passed,
 	which inhibits generation of runtime error procedures, so that they can be in a separate compilation unit.
 */

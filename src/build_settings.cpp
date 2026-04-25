@@ -548,6 +548,7 @@ struct BuildContext {
 	bool   show_system_calls;
 	bool   keep_temp_files;
 	bool   ignore_unknown_attributes;
+	bool   emit_downcast_assert;
 	bool   no_bounds_check;
 	bool   no_type_assert;
 	bool   dynamic_literals;  // Opt-in to `#+feature dynamic-literals` project-wide.
