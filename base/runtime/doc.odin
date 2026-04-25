@@ -67,6 +67,14 @@ specified.
 * `type_assertion_check2_contextless` (takes in typeid)
 * `type_assertion_check2_with_context` (takes in typeid)
 
+### Downcast assertion check
+
+These procedures are called for explicit integer casts when
+`-emit-downcast-assert` is specified and the cast narrows bit width or switches
+signedness at the same width.
+
+* `downcast_assertion_check`
+
 ### Bounds checking procedures
 
 These procedures are called every time index or slicing expression are used in

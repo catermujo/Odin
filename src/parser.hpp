@@ -318,6 +318,8 @@ enum ProcTag {
 	ProcTag_require_results = 1<<4,
 	ProcTag_optional_ok     = 1<<5,
 	ProcTag_optional_allocator_error = 1<<6,
+	ProcTag_downcast_assert    = 1<<7,
+	ProcTag_no_downcast_assert = 1<<8,
 };
 
 enum ProcCallingConvention : i32 {
@@ -370,11 +372,13 @@ gb_internal ProcCallingConvention default_calling_convention(void) {
 	return ProcCC_Odin;
 }
 
-enum StateFlag : u8 {
+enum StateFlag : u16 {
 	StateFlag_bounds_check    = 1<<0,
 	StateFlag_no_bounds_check = 1<<1,
 	StateFlag_type_assert     = 1<<2,
 	StateFlag_no_type_assert  = 1<<3,
+	StateFlag_downcast_assert    = 1<<8,
+	StateFlag_no_downcast_assert = 1<<9,
 
 	StateFlag_bounds_check_proven = 1<<4, // the bounds check of this index or slice expression itself passes, see check_escape.cpp
 
@@ -972,7 +976,7 @@ gb_global isize const ast_variant_sizes[] = {
 
 struct AstCommonStuff {
 	AstKind         kind; // u16
-	u8              state_flags;
+	u16             state_flags;
 	std::atomic<u8> viral_state_flags;
 	i32             file_id;
 	AstTypeAndValue tav;
@@ -980,7 +984,7 @@ struct AstCommonStuff {
 
 struct Ast {
 	AstKind         kind; // u16
-	u8              state_flags;
+	u16             state_flags;
 	std::atomic<u8> viral_state_flags;
 	i32             file_id;
 	AstTypeAndValue tav;

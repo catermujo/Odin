@@ -1499,6 +1499,7 @@ gb_internal void init_universal(void) {
 	add_global_bool_constant("ODIN_DEBUG",                      bc->ODIN_DEBUG);
 	add_global_bool_constant("ODIN_DISABLE_ASSERT",             bc->ODIN_DISABLE_ASSERT);
 	add_global_bool_constant("ODIN_DEFAULT_TO_NIL_ALLOCATOR",   bc->ODIN_DEFAULT_TO_NIL_ALLOCATOR);
+	add_global_bool_constant("ODIN_EMIT_DOWNCAST_ASSERT",       bc->emit_downcast_assert);
 	add_global_bool_constant("ODIN_NO_BOUNDS_CHECK",            build_context.no_bounds_check);
 	add_global_bool_constant("ODIN_NO_TYPE_ASSERT",             build_context.no_type_assert);
 	add_global_bool_constant("ODIN_DEFAULT_TO_PANIC_ALLOCATOR", bc->ODIN_DEFAULT_TO_PANIC_ALLOCATOR);
@@ -3599,7 +3600,6 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		str_lit("object_getClass"),
 	);
 
-
 	{ // init min dep basic equal procs
 		struct { BasicKind kind; char const *name; } const procs[] = {
 			{Basic_complex32,     "complex32_eq"},
@@ -3620,7 +3620,11 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		}
 	}
 
-
+	FORCE_ADD_RUNTIME_ENTITIES(true,
+		// Explicit integer downcast checking related procedures
+		str_lit("downcast_assertion_check_with_context"),
+		str_lit("downcast_assertion_check_contextless"),
+	);
 	add_dependency_to_set(c, c->info.instrumentation_enter_entity);
 	add_dependency_to_set(c, c->info.instrumentation_exit_entity);
 
@@ -7061,6 +7065,8 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 
 	bool type_assert    = (pi->tags & ProcTag_type_assert)    != 0;
 	bool no_type_assert = (pi->tags & ProcTag_no_type_assert) != 0;
+	bool downcast_assert    = (pi->tags & ProcTag_downcast_assert)    != 0;
+	bool no_downcast_assert = (pi->tags & ProcTag_no_downcast_assert) != 0;
 
 	if (bounds_check) {
 		ctx.state_flags |= StateFlag_bounds_check;
@@ -7080,6 +7086,14 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 
 	ErrorInstantiations prev_instantiations = global_error_context.instantiations;
 	global_error_context.instantiations = {pi->generated_from_polymorphic ? pi : pi->poly_parent, nullptr};
+	if (downcast_assert) {
+		ctx.state_flags |= StateFlag_downcast_assert;
+		ctx.state_flags &= ~StateFlag_no_downcast_assert;
+	} else if (no_downcast_assert) {
+		ctx.state_flags |= StateFlag_no_downcast_assert;
+		ctx.state_flags &= ~StateFlag_downcast_assert;
+	}
+
 	bool body_was_checked = check_proc_body(&ctx, pi->token, pi->decl, pi->type, pi->body);
 	global_error_context.instantiations = prev_instantiations;
 

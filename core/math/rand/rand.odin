@@ -112,7 +112,7 @@ Possible Output:
 
 */
 @(require_results)
-uint32 :: proc(gen := context.random_generator) -> (val: u32) {return u32(uint64(gen))}
+uint32 :: proc(gen := context.random_generator) -> (val: u32) {#no_downcast_assert return u32(uint64(gen))}
 
 /*
 Generates a random 64 bit value using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -911,7 +911,7 @@ Possible Output:
 	0.511
 
 */
-@(require_results) float32 :: proc(gen := context.random_generator) -> (val: f32) { return f32(int31_max(1<<24, gen)) / (1 << 24) }
+@(require_results) float32 :: proc(gen := context.random_generator) -> (val: f32) {#no_downcast_assert return f32(int31_max(1<<24, gen)) / (1 << 24) }
 
 /*
 Generates a random double floating point value in the range `[low, high)` using the provided random number generator. If no generator is provided the global random number generator will be used.
