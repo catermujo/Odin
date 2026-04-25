@@ -22,6 +22,17 @@ type_assertion_trap_contextless :: proc "contextless" () -> ! {
 	}
 }
 
+@(no_instrumentation)
+downcast_assertion_trap_contextless :: proc "contextless" () -> ! {
+	when ODIN_OS == .Windows {
+		windows_trap_type_assertion()
+	} else when ODIN_OS == .Orca {
+		abort_ext("", "", 0, "downcast assertion trap")
+	} else {
+		trap()
+	}
+}
+
 
 @(disabled=ODIN_NO_BOUNDS_CHECK)
 bounds_check_error :: proc "contextless" (file: string, line, column: i32, index, count: int) {
@@ -137,6 +148,34 @@ matrix_bounds_check_error :: proc "contextless" (file: string, line, column: i32
 
 
 when ODIN_NO_RTTI {
+	downcast_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
+		if ok {
+			return
+		}
+		@(cold, no_instrumentation)
+		handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
+			p := context.assertion_failure_proc
+			if p == nil {
+				p = default_assertion_failure_proc
+			}
+			p("downcast assertion", "Invalid downcast", Source_Code_Location{file, line, column, ""})
+		}
+		handle_error(file, line, column)
+	}
+
+	downcast_assertion_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32) {
+		if ok {
+			return
+		}
+		@(cold, no_instrumentation)
+		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
+			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_string(" Invalid downcast\n")
+			downcast_assertion_trap_contextless()
+		}
+		handle_error(file, line, column)
+	}
+
 	type_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
 		if ok {
 			return
@@ -196,6 +235,146 @@ when ODIN_NO_RTTI {
 } else {
 	@(private="file")
 	TYPE_ASSERTION_BUFFER_SIZE :: 1024
+
+	@(private="file")
+	@(require_results)
+	write_u128 :: proc "contextless" (j: ^int, dst: []byte, x: u128) -> bool {
+		if j^ < len(dst) {
+			b :: u128(10)
+			digits := "0123456789"
+			u := x
+
+			a: [129]byte
+			i := len(a)
+			for u >= b {
+				i -= 1
+				a[i] = digits[int(u % b)]
+				u /= b
+			}
+			i -= 1
+			a[i] = digits[int(u % b)]
+
+			return write_string(j, dst, string(a[i:]))
+		}
+		return false
+	}
+
+	@(private="file")
+	@(require_results)
+	write_i128 :: proc "contextless" (j: ^int, dst: []byte, x: i128) -> bool {
+		if j^ < len(dst) {
+			b :: u128(10)
+			digits := "0123456789"
+			neg := x < 0
+			u := cast(u128)x
+			if neg {
+				u = (~u) + 1
+			}
+
+			a: [129]byte
+			i := len(a)
+			for u >= b {
+				i -= 1
+				a[i] = digits[int(u % b)]
+				u /= b
+			}
+			i -= 1
+			a[i] = digits[int(u % b)]
+			if neg {
+				i -= 1
+				a[i] = '-'
+			}
+
+			return write_string(j, dst, string(a[i:]))
+		}
+		return false
+	}
+
+	@(private="file")
+	@(require_results)
+	downcast_assertion_write_value :: proc "contextless" (i: ^int, buf: []byte, from: typeid, value_lo, value_hi: u64) -> bool {
+		write_string(i, buf, " (value: ") or_return
+
+		value := (u128(value_hi) << u128(64)) | u128(value_lo)
+		is_signed := false
+		bit_count := 64
+		if from != nil {
+			if ti := type_info_core(type_info_of(from)); ti != nil {
+				bit_count = int(8 * ti.size)
+				#partial switch v in ti.variant {
+				case Type_Info_Integer:
+					is_signed = v.signed
+				case Type_Info_Rune:
+					is_signed = true
+				}
+			}
+		}
+
+		if is_signed {
+			if 0 < bit_count && bit_count < 128 {
+				sign_bit := u128(1) << u128(bit_count-1)
+				if value & sign_bit != 0 {
+					mask := (~u128(0)) << u128(bit_count)
+					value |= mask
+				}
+			}
+			write_i128(i, buf, cast(i128)value) or_return
+		} else {
+			write_u128(i, buf, value) or_return
+		}
+
+		write_byte(i, buf, ')') or_return
+		return true
+	}
+
+	@(private="file")
+	@(require_results)
+	downcast_assertion_write_message :: proc "contextless" (i: ^int, buf: []byte, from, to: typeid, value_lo, value_hi: u64) -> bool {
+		write_string(i, buf, "Invalid downcast from ")     or_return
+		write_typeid(i, buf, from)                         or_return
+		write_string(i, buf, " to ")                       or_return
+		write_typeid(i, buf, to)                           or_return
+		downcast_assertion_write_value(i, buf, from, value_lo, value_hi) or_return
+		return true
+	}
+
+	downcast_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) {
+		if ok {
+			return
+		}
+		@(cold, no_instrumentation)
+		handle_error :: proc "odin" (file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) -> ! {
+			buf: [TYPE_ASSERTION_BUFFER_SIZE]byte
+			i := 0
+			_ = downcast_assertion_write_message(&i, buf[:], from, to, value_lo, value_hi)
+
+			p := context.assertion_failure_proc
+			if p == nil {
+				p = default_assertion_failure_proc
+			}
+			p("downcast assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		}
+		handle_error(file, line, column, from, to, value_lo, value_hi)
+	}
+
+	downcast_assertion_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) {
+		if ok {
+			return
+		}
+		@(cold, no_instrumentation)
+		handle_error :: proc "contextless" (file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) -> ! {
+			buf: [TYPE_ASSERTION_BUFFER_SIZE]byte
+			i := 0
+			_ = downcast_assertion_write_message(&i, buf[:], from, to, value_lo, value_hi)
+
+			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_string(" ")
+			print_string(string(buf[:i]))
+			print_byte('\n')
+			downcast_assertion_trap_contextless()
+		}
+		handle_error(file, line, column, from, to, value_lo, value_hi)
+	}
 
 	type_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32, from, to: typeid) {
 		if ok {

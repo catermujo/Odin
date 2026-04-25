@@ -2265,6 +2265,207 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 	return {};
 }
 
+gb_internal bool lb_integer_conversion_needs_downcast_assert(Type *src_type, Type *dst_type) {
+	Type *src = core_type(src_type);
+	Type *dst = core_type(dst_type);
+	if (!is_type_integer(src) || !is_type_integer(dst)) {
+		return false;
+	}
+
+	i64 src_bits = 8*type_size_of(default_type(src));
+	i64 dst_bits = 8*type_size_of(default_type(dst));
+	if (dst_bits < src_bits) {
+		return true;
+	}
+	return dst_bits == src_bits && is_type_unsigned(src) != is_type_unsigned(dst);
+}
+
+gb_internal Type *lb_downcast_assert_integer_type(Type *t) {
+	t = core_type(t);
+	if (t->kind == Type_Enum) {
+		t = core_type(t->Enum.base_type);
+	}
+	return t;
+}
+
+gb_internal bool lb_is_downcast_assert_enabled(lbProcedure *p) {
+	if ((p->state_flags & StateFlag_downcast_assert) != 0) {
+		return true;
+	}
+	if ((p->state_flags & StateFlag_no_downcast_assert) != 0) {
+		return false;
+	}
+	return build_context.emit_downcast_assert;
+}
+
+gb_internal void lb_emit_bit_field_downcast_assert(lbProcedure *p, lbValue value, Type *field_type, u64 bit_size, TokenPos pos) {
+	if (!lb_is_downcast_assert_enabled(p) || lb_is_const(value)) {
+		return;
+	}
+	if (bit_size == 0) {
+		return;
+	}
+
+	Type *src_type = value.type;
+	Type *src = lb_downcast_assert_integer_type(src_type);
+	Type *dst = lb_downcast_assert_integer_type(field_type);
+	if (!(is_type_integer(src) || is_type_boolean(src))) {
+		return;
+	}
+	if (!(is_type_integer(dst) || is_type_boolean(dst))) {
+		return;
+	}
+
+	i64 src_bits = 8*type_size_of(default_type(src));
+	if (bit_size >= cast(u64)src_bits) {
+		return;
+	}
+	i64 shift_amount = src_bits - cast(i64)bit_size;
+	GB_ASSERT(shift_amount > 0);
+
+	lbModule *m = p->module;
+	lbValue check_value = value;
+	if (is_type_different_to_arch_endianness(src)) {
+		Type *platform_src_type = integer_endian_type_to_platform_type(src);
+		check_value = lb_emit_byte_swap(p, check_value, platform_src_type);
+	}
+
+	Type *check_src_type = lb_downcast_assert_integer_type(check_value.type);
+	LLVMTypeRef llvm_src_type = lb_type(m, check_src_type);
+	LLVMValueRef shift = LLVMConstInt(llvm_src_type, cast(unsigned long long)shift_amount, false);
+
+	LLVMValueRef shifted = LLVMBuildShl(p->builder, check_value.value, shift, "");
+	bool dst_unsigned = is_type_unsigned(dst) || is_type_boolean(dst);
+	LLVMValueRef roundtrip = dst_unsigned ?
+		LLVMBuildLShr(p->builder, shifted, shift, "") :
+		LLVMBuildAShr(p->builder, shifted, shift, "");
+	LLVMValueRef ok_value = LLVMBuildICmp(p->builder, LLVMIntEQ, check_value.value, roundtrip, "");
+	lbValue ok = {ok_value, t_llvm_bool};
+
+	isize arg_count = 8;
+	if (build_context.no_rtti) {
+		arg_count = 4;
+	}
+
+	auto args = array_make<lbValue>(permanent_allocator(), arg_count);
+	args[0] = lb_emit_conv(p, ok, t_bool);
+	lb_set_file_line_col(p, array_slice(args, 1, args.count), pos);
+
+	if (!build_context.no_rtti) {
+		LLVMTypeRef u64_type = lb_type(m, t_u64);
+		LLVMValueRef raw_value_lo = check_value.value;
+		if (src_bits < 64) {
+			raw_value_lo = LLVMBuildZExt(p->builder, raw_value_lo, u64_type, "");
+		} else if (src_bits > 64) {
+			raw_value_lo = LLVMBuildTrunc(p->builder, raw_value_lo, u64_type, "");
+		}
+
+		LLVMValueRef raw_value_hi = LLVMConstNull(u64_type);
+		if (src_bits > 64) {
+			LLVMValueRef shift = LLVMConstInt(lb_type(m, check_src_type), 64, false);
+			LLVMValueRef shifted = LLVMBuildLShr(p->builder, check_value.value, shift, "");
+			raw_value_hi = LLVMBuildTrunc(p->builder, shifted, u64_type, "");
+		}
+
+		args[4] = lb_typeid(m, src_type);
+		args[5] = lb_typeid(m, field_type);
+		args[6] = {raw_value_lo, t_u64};
+		args[7] = {raw_value_hi, t_u64};
+	}
+
+	char const *name = "downcast_assertion_check_contextless";
+	if (p->context_stack.count > 0) {
+		name = "downcast_assertion_check_with_context";
+	}
+	lb_emit_runtime_call(p, name, args);
+}
+
+gb_internal void lb_emit_downcast_assert(lbProcedure *p, lbValue value, Type *t, TokenPos pos) {
+	if (!lb_is_downcast_assert_enabled(p) || lb_is_const(value)) {
+		return;
+	}
+
+	Type *src_type = value.type;
+	Type *src = core_type(src_type);
+	Type *dst = core_type(t);
+	if (!lb_integer_conversion_needs_downcast_assert(src_type, t)) {
+		return;
+	}
+
+	lbModule *m = p->module;
+	lbValue check_value = value;
+	if (is_type_different_to_arch_endianness(src)) {
+		Type *platform_src_type = integer_endian_type_to_platform_type(src);
+		check_value = lb_emit_byte_swap(p, check_value, platform_src_type);
+	}
+
+	Type *check_src_type = core_type(check_value.type);
+	Type *check_dst_type = dst;
+	if (is_type_different_to_arch_endianness(dst)) {
+		check_dst_type = integer_endian_type_to_platform_type(dst);
+	}
+
+	i64 src_bits = 8*type_size_of(default_type(src));
+	i64 dst_bits = 8*type_size_of(default_type(dst));
+	bool src_unsigned = is_type_unsigned(src);
+	bool dst_unsigned = is_type_unsigned(dst);
+
+	LLVMValueRef ok_value = nullptr;
+	if (dst_bits < src_bits) {
+		LLVMValueRef truncated = LLVMBuildTrunc(p->builder, check_value.value, lb_type(m, check_dst_type), "");
+		LLVMValueRef roundtrip = LLVMBuildIntCast2(p->builder, truncated, lb_type(m, check_src_type), !dst_unsigned, "");
+		ok_value = LLVMBuildICmp(p->builder, LLVMIntEQ, check_value.value, roundtrip, "");
+	} else {
+		GB_ASSERT(dst_bits == src_bits);
+		if (src_unsigned) {
+			LLVMValueRef shift = LLVMConstInt(lb_type(m, check_src_type), cast(unsigned long long)(dst_bits-1), false);
+			LLVMValueRef high_bit = LLVMBuildLShr(p->builder, check_value.value, shift, "");
+			ok_value = LLVMBuildICmp(p->builder, LLVMIntEQ, high_bit, LLVMConstNull(lb_type(m, check_src_type)), "");
+		} else {
+			ok_value = LLVMBuildICmp(p->builder, LLVMIntSGE, check_value.value, LLVMConstNull(lb_type(m, check_src_type)), "");
+		}
+	}
+
+	lbValue ok = {ok_value, t_llvm_bool};
+
+	isize arg_count = 8;
+	if (build_context.no_rtti) {
+		arg_count = 4;
+	}
+
+	auto args = array_make<lbValue>(permanent_allocator(), arg_count);
+	args[0] = lb_emit_conv(p, ok, t_bool);
+	lb_set_file_line_col(p, array_slice(args, 1, args.count), pos);
+
+	if (!build_context.no_rtti) {
+		LLVMTypeRef u64_type = lb_type(m, t_u64);
+		LLVMValueRef raw_value_lo = check_value.value;
+		if (src_bits < 64) {
+			raw_value_lo = LLVMBuildZExt(p->builder, raw_value_lo, u64_type, "");
+		} else if (src_bits > 64) {
+			raw_value_lo = LLVMBuildTrunc(p->builder, raw_value_lo, u64_type, "");
+		}
+
+		LLVMValueRef raw_value_hi = LLVMConstNull(u64_type);
+		if (src_bits > 64) {
+			LLVMValueRef shift = LLVMConstInt(lb_type(m, check_src_type), 64, false);
+			LLVMValueRef shifted = LLVMBuildLShr(p->builder, check_value.value, shift, "");
+			raw_value_hi = LLVMBuildTrunc(p->builder, shifted, u64_type, "");
+		}
+
+		args[4] = lb_typeid(m, src_type);
+		args[5] = lb_typeid(m, t);
+		args[6] = {raw_value_lo, t_u64};
+		args[7] = {raw_value_hi, t_u64};
+	}
+
+	char const *name = "downcast_assertion_check_contextless";
+	if (p->context_stack.count > 0) {
+		name = "downcast_assertion_check_with_context";
+	}
+	lb_emit_runtime_call(p, name, args);
+}
+
 gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 	lbModule *m = p->module;
 	t = reduce_tuple_to_single_type(t);
@@ -4461,6 +4662,14 @@ gb_internal lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 			out &= ~StateFlag_type_assert;
 		}
 
+		if (in & StateFlag_downcast_assert) {
+			out |= StateFlag_downcast_assert;
+			out &= ~StateFlag_no_downcast_assert;
+		} else if (in & StateFlag_no_downcast_assert) {
+			out |= StateFlag_no_downcast_assert;
+			out &= ~StateFlag_downcast_assert;
+		}
+
 		p->state_flags = out;
 	}
 
@@ -6082,6 +6291,7 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 			Type *field_type = sel.entity->type;
 			lbValue field_expr = lb_build_expr(p, fv->value);
 			field_expr = lb_emit_conv(p, field_expr, field_type);
+			lb_emit_bit_field_downcast_assert(p, field_expr, field_type, cast(u64)bit_size, ast_token(fv->value).pos);
 			array_add(&values, field_expr);
 			array_add(&fields, FieldData{field_type, cast(u64)bit_offset, cast(u64)bit_size});
 		}

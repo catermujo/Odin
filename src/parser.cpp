@@ -2226,6 +2226,8 @@ gb_internal void parse_proc_tags(AstFile *f, u64 *tags) {
 		ELSE_IF_ADD_TAG(no_bounds_check)
 		ELSE_IF_ADD_TAG(type_assert)
 		ELSE_IF_ADD_TAG(no_type_assert)
+		ELSE_IF_ADD_TAG(downcast_assert)
+		ELSE_IF_ADD_TAG(no_downcast_assert)
 		else {
 			syntax_error(tag_expr, "Unknown procedure type tag #%.*s", LIT(tag_name));
 		}
@@ -2239,6 +2241,10 @@ gb_internal void parse_proc_tags(AstFile *f, u64 *tags) {
 
 	if ((*tags & ProcTag_type_assert) && (*tags & ProcTag_no_type_assert)) {
 		syntax_error(f->curr_token, "You cannot apply both #type_assert and #no_type_assert to a procedure");
+	}
+
+	if ((*tags & ProcTag_downcast_assert) && (*tags & ProcTag_no_downcast_assert)) {
+		syntax_error(f->curr_token, "You cannot apply both #downcast_assert and #no_downcast_assert to a procedure");
 	}
 }
 
@@ -2406,6 +2412,16 @@ gb_internal Ast *parse_check_directive_for_statement(Ast *s, Token const &tag_to
 			syntax_error(tag_token, "#type_assert and #no_type_assert cannot be applied together");
 		}
 		break;
+	case StateFlag_downcast_assert:
+		if ((s->state_flags & StateFlag_no_downcast_assert) != 0) {
+			syntax_error(tag_token, "#downcast_assert and #no_downcast_assert cannot be applied together");
+		}
+		break;
+	case StateFlag_no_downcast_assert:
+		if ((s->state_flags & StateFlag_downcast_assert) != 0) {
+			syntax_error(tag_token, "#downcast_assert and #no_downcast_assert cannot be applied together");
+		}
+		break;
 	}
 
 	switch (state_flag) {
@@ -2413,6 +2429,8 @@ gb_internal Ast *parse_check_directive_for_statement(Ast *s, Token const &tag_to
 	case StateFlag_no_bounds_check:
 	case StateFlag_type_assert:
 	case StateFlag_no_type_assert:
+	case StateFlag_downcast_assert:
+	case StateFlag_no_downcast_assert:
 		switch (s->kind) {
 		case Ast_BlockStmt:
 		case Ast_IfStmt:
@@ -3140,6 +3158,12 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		} else if (name.string == "no_type_assert") {
 			Ast *operand = parse_expr(f, lhs);
 			return parse_check_directive_for_statement(operand, name, StateFlag_no_type_assert);
+		} else if (name.string == "downcast_assert") {
+			Ast *operand = parse_expr(f, lhs);
+			return parse_check_directive_for_statement(operand, name, StateFlag_downcast_assert);
+		} else if (name.string == "no_downcast_assert") {
+			Ast *operand = parse_expr(f, lhs);
+			return parse_check_directive_for_statement(operand, name, StateFlag_no_downcast_assert);
 		} else if (name.string == "relative") {
 			Ast *tag = ast_basic_directive(f, token, name);
 			if (f->curr_token.kind != Token_OpenParen) {
@@ -3253,6 +3277,12 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			}
 			if (tags & ProcTag_type_assert) {
 				body->state_flags |= StateFlag_type_assert;
+			}
+			if (tags & ProcTag_no_downcast_assert) {
+				body->state_flags |= StateFlag_no_downcast_assert;
+			}
+			if (tags & ProcTag_downcast_assert) {
+				body->state_flags |= StateFlag_downcast_assert;
 			}
 
 			return ast_proc_lit(f, type, body, tags, where_token, where_clauses);
@@ -6112,6 +6142,12 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 		} else if (tag == "no_type_assert") {
 			s = parse_stmt(f);
 			return parse_check_directive_for_statement(s, name, StateFlag_no_type_assert);
+		} else if (tag == "downcast_assert") {
+			s = parse_stmt(f);
+			return parse_check_directive_for_statement(s, name, StateFlag_downcast_assert);
+		} else if (tag == "no_downcast_assert") {
+			s = parse_stmt(f);
+			return parse_check_directive_for_statement(s, name, StateFlag_no_downcast_assert);
 		} else if (tag == "partial") {
 			s = parse_stmt(f);
 			switch (s->kind) {

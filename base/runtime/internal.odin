@@ -1073,7 +1073,7 @@ f32_to_f16 :: proc "contextless" (value: f32) -> __float16 {
 	i, s, e, m: i32
 
 	v.f = value
-	i = i32(v.i)
+	#no_downcast_assert i = cast(i32)v.i
 
 	s =  (i >> 16) & 0x00008000
 	e = ((i >> 23) & 0x000000ff) - (127 - 15)
