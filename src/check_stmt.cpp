@@ -680,6 +680,14 @@ gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
 			out &= ~StateFlag_no_type_assert;
 		}
 
+		if (in & StateFlag_no_downcast_assert) {
+			out |= StateFlag_no_downcast_assert;
+			out &= ~StateFlag_downcast_assert;
+		} else if (in & StateFlag_downcast_assert) {
+			out |= StateFlag_downcast_assert;
+			out &= ~StateFlag_no_downcast_assert;
+		}
+
 		ctx->state_flags = out;
 	}
 

@@ -3169,6 +3169,13 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 			out |= StateFlag_type_assert;
 			out &= ~StateFlag_no_type_assert;
 		}
+		if (in & StateFlag_no_downcast_assert) {
+			out |= StateFlag_no_downcast_assert;
+			out &= ~StateFlag_downcast_assert;
+		} else if (in & StateFlag_downcast_assert) {
+			out |= StateFlag_downcast_assert;
+			out &= ~StateFlag_no_downcast_assert;
+		}
 
 		p->state_flags = out;
 	}

@@ -1106,6 +1106,12 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 	if (addr.kind == lbAddr_BitField) {
 		lbValue dst = addr.addr;
 		lbValue src = {};
+		value = lb_emit_conv(p, value, addr.bitfield.type);
+		TokenPos pos = {};
+		if (p->curr_stmt != nullptr) {
+			pos = ast_token(p->curr_stmt).pos;
+		}
+		lb_emit_bit_field_downcast_assert(p, value, addr.bitfield.type, cast(u64)addr.bitfield.bit_size, pos);
 		if (is_type_endian_big(addr.bitfield.type)) {
 			i64 shift_amount = 8*type_size_of(value.type) - addr.bitfield.bit_size;
 			lbValue shifted_value = value;

@@ -1356,6 +1356,7 @@ gb_internal void init_universal(void) {
 	add_global_bool_constant("ODIN_DEBUG",                      bc->ODIN_DEBUG);
 	add_global_bool_constant("ODIN_DISABLE_ASSERT",             bc->ODIN_DISABLE_ASSERT);
 	add_global_bool_constant("ODIN_DEFAULT_TO_NIL_ALLOCATOR",   bc->ODIN_DEFAULT_TO_NIL_ALLOCATOR);
+	add_global_bool_constant("ODIN_EMIT_DOWNCAST_ASSERT",       bc->emit_downcast_assert);
 	add_global_bool_constant("ODIN_NO_BOUNDS_CHECK",            build_context.no_bounds_check);
 	add_global_bool_constant("ODIN_NO_TYPE_ASSERT",             build_context.no_type_assert);
 	add_global_bool_constant("ODIN_DEFAULT_TO_PANIC_ALLOCATOR", bc->ODIN_DEFAULT_TO_PANIC_ALLOCATOR);
@@ -3199,6 +3200,12 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 		str_lit("slice_expr_error_hi"),
 		str_lit("slice_expr_error_lo_hi"),
 		str_lit("multi_pointer_slice_expr_error"),
+	);
+
+	FORCE_ADD_RUNTIME_ENTITIES(build_context.emit_downcast_assert,
+		// Explicit integer downcast checking related procedures
+		str_lit("downcast_assertion_check_with_context"),
+		str_lit("downcast_assertion_check_contextless"),
 	);
 
 	add_dependency_to_set(c, c->info.instrumentation_enter_entity);
@@ -6577,6 +6584,8 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 
 	bool type_assert    = (pi->tags & ProcTag_type_assert)    != 0;
 	bool no_type_assert = (pi->tags & ProcTag_no_type_assert) != 0;
+	bool downcast_assert    = (pi->tags & ProcTag_downcast_assert)    != 0;
+	bool no_downcast_assert = (pi->tags & ProcTag_no_downcast_assert) != 0;
 
 	if (bounds_check) {
 		ctx.state_flags |= StateFlag_bounds_check;
@@ -6592,6 +6601,14 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 	} else if (no_type_assert) {
 		ctx.state_flags |= StateFlag_no_type_assert;
 		ctx.state_flags &= ~StateFlag_type_assert;
+	}
+
+	if (downcast_assert) {
+		ctx.state_flags |= StateFlag_downcast_assert;
+		ctx.state_flags &= ~StateFlag_no_downcast_assert;
+	} else if (no_downcast_assert) {
+		ctx.state_flags |= StateFlag_no_downcast_assert;
+		ctx.state_flags &= ~StateFlag_downcast_assert;
 	}
 
 	bool body_was_checked = check_proc_body(&ctx, pi->token, pi->decl, pi->type, pi->body);

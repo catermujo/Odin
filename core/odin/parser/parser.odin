@@ -1534,6 +1534,15 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 				stmt.state_flags += {.No_Type_Assert}
 			}
 			return stmt
+		case "downcast_assert", "no_downcast_assert":
+			stmt := parse_stmt(p)
+			switch name {
+			case "downcast_assert":
+				stmt.state_flags += {.Downcast_Assert}
+			case "no_downcast_assert":
+				stmt.state_flags += {.No_Downcast_Assert}
+			}
+			return stmt
 		case "partial":
 			stmt := parse_stmt(p)
 			#partial switch s in stmt.derived_stmt {
@@ -2203,6 +2212,10 @@ parse_proc_tags :: proc(p: ^Parser) -> (tags: ast.Proc_Tags) {
 		switch ident.text {
 		case "bounds_check":    tags += {.Bounds_Check}
 		case "no_bounds_check": tags += {.No_Bounds_Check}
+		case "type_assert":    tags += {.Type_Assert}
+		case "no_type_assert": tags += {.No_Type_Assert}
+		case "downcast_assert":    tags += {.Downcast_Assert}
+		case "no_downcast_assert": tags += {.No_Downcast_Assert}
 		case "optional_ok":     tags += {.Optional_Ok}
 		case "optional_allocator_error": tags += {.Optional_Allocator_Error}
 		case:
@@ -2211,6 +2224,12 @@ parse_proc_tags :: proc(p: ^Parser) -> (tags: ast.Proc_Tags) {
 
 	if .Bounds_Check in tags && .No_Bounds_Check in tags {
 		p.err(p.curr_tok.pos, "#bounds_check and #no_bounds_check applied to the same procedure type")
+	}
+	if .Type_Assert in tags && .No_Type_Assert in tags {
+		p.err(p.curr_tok.pos, "#type_assert and #no_type_assert applied to the same procedure type")
+	}
+	if .Downcast_Assert in tags && .No_Downcast_Assert in tags {
+		p.err(p.curr_tok.pos, "#downcast_assert and #no_downcast_assert applied to the same procedure type")
 	}
 
 	return
@@ -2511,6 +2530,40 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				operand.state_flags += {.No_Bounds_Check}
 				if .Bounds_Check in operand.state_flags {
 					error(p, name.pos, "#bounds_check and #no_bounds_check cannot be applied together")
+				}
+			case: unimplemented()
+			}
+			return operand
+		case "type_assert", "no_type_assert":
+			operand := parse_expr(p, lhs)
+
+			switch name.text {
+			case "type_assert":
+				operand.state_flags += {.Type_Assert}
+				if .No_Type_Assert in operand.state_flags {
+					error(p, name.pos, "#type_assert and #no_type_assert cannot be applied together")
+				}
+			case "no_type_assert":
+				operand.state_flags += {.No_Type_Assert}
+				if .Type_Assert in operand.state_flags {
+					error(p, name.pos, "#type_assert and #no_type_assert cannot be applied together")
+				}
+			case: unimplemented()
+			}
+			return operand
+		case "downcast_assert", "no_downcast_assert":
+			operand := parse_expr(p, lhs)
+
+			switch name.text {
+			case "downcast_assert":
+				operand.state_flags += {.Downcast_Assert}
+				if .No_Downcast_Assert in operand.state_flags {
+					error(p, name.pos, "#downcast_assert and #no_downcast_assert cannot be applied together")
+				}
+			case "no_downcast_assert":
+				operand.state_flags += {.No_Downcast_Assert}
+				if .Downcast_Assert in operand.state_flags {
+					error(p, name.pos, "#downcast_assert and #no_downcast_assert cannot be applied together")
 				}
 			case: unimplemented()
 			}
