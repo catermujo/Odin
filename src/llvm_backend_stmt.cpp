@@ -3044,81 +3044,151 @@ gb_internal bool lb_try_build_assign_stmt_array_broadcast_simd(lbProcedure *p, T
 		return false;
 	}
 	i64 vec_elems = vec_count*lanes;
+	i64 tail_count = count - vec_elems;
 
 	Type *vec_type = alloc_type_simd_vector(lanes, elem_type);
 	Type *vec_ptr_type = alloc_type_pointer(vec_type);
+	Type *elem_ptr_type = alloc_type_pointer(elem_type);
 	LLVMTypeRef llvm_vec_type = lb_type(p->module, vec_type);
+	LLVMTypeRef llvm_vec_ptr_type = lb_type(p->module, vec_ptr_type);
+	LLVMTypeRef llvm_elem_type = lb_type(p->module, elem_type);
+	LLVMTypeRef llvm_int_type = lb_type(p->module, t_int);
 
 	lbValue b_vec = lb_emit_conv(p, b, vec_type);
-	lbValue lanes_value = lb_const_int(p->module, t_i32, lanes);
+	LLVMValueRef one_int = LLVMConstInt(llvm_int_type, 1, false);
 
 	Type *integral_type = base_type(elem_type);
 
-	auto vec_loop = lb_loop_start(p, cast(isize)vec_count, t_i32);
-
-	lbValue elem_idx = lb_emit_arith(p, Token_Mul, vec_loop.idx, lanes_value, t_i32);
-	lbValue a_ptr = lb_emit_array_ep(p, x, elem_idx);
-	lbValue a_vec_ptr = lb_emit_conv(p, a_ptr, vec_ptr_type);
-
-	LLVMValueRef a_vec = OdinLLVMBuildLoadAligned(p, llvm_vec_type, a_vec_ptr.value, 1);
-	LLVMValueRef z = nullptr;
-	if (is_type_float(integral_type)) {
-		switch (op) {
-		case Token_Add: z = LLVMBuildFAdd(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Sub: z = LLVMBuildFSub(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Mul: z = LLVMBuildFMul(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Quo: z = LLVMBuildFDiv(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Mod: z = LLVMBuildFRem(p->builder, a_vec, b_vec.value, ""); break;
-		default: return false;
+	auto build_vec_op = [&](LLVMValueRef a_vec) -> LLVMValueRef {
+		if (is_type_float(integral_type)) {
+			switch (op) {
+			case Token_Add: return LLVMBuildFAdd(p->builder, a_vec, b_vec.value, "");
+			case Token_Sub: return LLVMBuildFSub(p->builder, a_vec, b_vec.value, "");
+			case Token_Mul: return LLVMBuildFMul(p->builder, a_vec, b_vec.value, "");
+			case Token_Quo: return LLVMBuildFDiv(p->builder, a_vec, b_vec.value, "");
+			case Token_Mod: return LLVMBuildFRem(p->builder, a_vec, b_vec.value, "");
+			default: return nullptr;
+			}
 		}
-	} else {
+
 		switch (op) {
-		case Token_Add:    z = LLVMBuildAdd(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Sub:    z = LLVMBuildSub(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Mul:    z = LLVMBuildMul(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Add: return LLVMBuildAdd(p->builder, a_vec, b_vec.value, "");
+		case Token_Sub: return LLVMBuildSub(p->builder, a_vec, b_vec.value, "");
+		case Token_Mul: return LLVMBuildMul(p->builder, a_vec, b_vec.value, "");
 		case Token_Quo: {
 			auto *call = is_type_unsigned(integral_type) ? LLVMBuildUDiv : LLVMBuildSDiv;
-			z = call(p->builder, a_vec, b_vec.value, "");
-		} break;
+			return call(p->builder, a_vec, b_vec.value, "");
+		}
 		case Token_Mod: {
 			auto *call = is_type_unsigned(integral_type) ? LLVMBuildURem : LLVMBuildSRem;
-			z = call(p->builder, a_vec, b_vec.value, "");
-		} break;
+			return call(p->builder, a_vec, b_vec.value, "");
+		}
 		case Token_ModMod:
 			if (is_type_unsigned(integral_type)) {
-				z = LLVMBuildURem(p->builder, a_vec, b_vec.value, "");
+				return LLVMBuildURem(p->builder, a_vec, b_vec.value, "");
 			} else {
 				LLVMValueRef a = LLVMBuildSRem(p->builder, a_vec, b_vec.value, "");
 				LLVMValueRef sum = LLVMBuildAdd(p->builder, a, b_vec.value, "");
-				z = LLVMBuildSRem(p->builder, sum, b_vec.value, "");
+				return LLVMBuildSRem(p->builder, sum, b_vec.value, "");
 			}
-			break;
-		case Token_And:    z = LLVMBuildAnd(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_AndNot: z = LLVMBuildAnd(p->builder, a_vec, LLVMBuildNot(p->builder, b_vec.value, ""), ""); break;
-		case Token_Or:     z = LLVMBuildOr(p->builder, a_vec, b_vec.value, ""); break;
-		case Token_Xor:    z = LLVMBuildXor(p->builder, a_vec, b_vec.value, ""); break;
-		default: return false;
+		case Token_And:    return LLVMBuildAnd(p->builder, a_vec, b_vec.value, "");
+		case Token_AndNot: return LLVMBuildAnd(p->builder, a_vec, LLVMBuildNot(p->builder, b_vec.value, ""), "");
+		case Token_Or:     return LLVMBuildOr(p->builder, a_vec, b_vec.value, "");
+		case Token_Xor:    return LLVMBuildXor(p->builder, a_vec, b_vec.value, "");
+		default: return nullptr;
 		}
+	};
+
+	lbValue base_elem_ptr = lb_emit_array_ep(p, x, lb_const_int(p->module, t_i32, 0));
+	lbValue base_vec_ptr = lb_emit_conv(p, base_elem_ptr, vec_ptr_type);
+	LLVMValueRef vec_ptr_after_main = base_vec_ptr.value;
+
+	i64 vec_unroll = vec_count >= 4 ? 4 : 1;
+	i64 main_vec_count = vec_count / vec_unroll;
+	i64 rem_vec_count = vec_count - main_vec_count*vec_unroll;
+
+	if (main_vec_count > 0) {
+		lbBlock *vec_loop = lb_create_block(p, "array.broadcast.simd.loop");
+		lbBlock *vec_body = lb_create_block(p, "array.broadcast.simd.body");
+		lbBlock *vec_done = lb_create_block(p, "array.broadcast.simd.done");
+
+		LLVMValueRef vec_advance = LLVMConstInt(llvm_int_type, cast(unsigned long long)(main_vec_count*vec_unroll), false);
+		LLVMValueRef vec_step = LLVMConstInt(llvm_int_type, cast(unsigned long long)vec_unroll, false);
+		LLVMValueRef main_vec_end = LLVMBuildGEP2(p->builder, llvm_vec_type, base_vec_ptr.value, &vec_advance, 1, "");
+
+		LLVMBasicBlockRef vec_preheader = p->curr_block->block;
+		lb_emit_jump(p, vec_loop);
+		lb_start_block(p, vec_loop);
+
+		LLVMValueRef vec_ptr_phi = LLVMBuildPhi(p->builder, llvm_vec_ptr_type, "");
+
+		lbValue vec_ptr = {};
+		vec_ptr.type = vec_ptr_type;
+		vec_ptr.value = vec_ptr_phi;
+
+		lbValue vec_end = {};
+		vec_end.type = vec_ptr_type;
+		vec_end.value = main_vec_end;
+
+		lbValue vec_cond = lb_emit_comp(p, Token_NotEq, vec_ptr, vec_end);
+		lb_emit_if(p, vec_cond, vec_body, vec_done);
+		lb_start_block(p, vec_body);
+
+		for (i64 i = 0; i < vec_unroll; i++) {
+			LLVMValueRef vec_ptr_it = vec_ptr_phi;
+			if (i != 0) {
+				LLVMValueRef vec_offset = LLVMConstInt(llvm_int_type, cast(unsigned long long)i, false);
+				vec_ptr_it = LLVMBuildGEP2(p->builder, llvm_vec_type, vec_ptr_phi, &vec_offset, 1, "");
+			}
+			LLVMValueRef a_vec = OdinLLVMBuildLoadAligned(p, llvm_vec_type, vec_ptr_it, 1);
+			LLVMValueRef z = build_vec_op(a_vec);
+			if (z == nullptr) {
+				return false;
+			}
+			LLVMValueRef store = LLVMBuildStore(p->builder, z, vec_ptr_it);
+			LLVMSetAlignment(store, 1);
+		}
+
+		LLVMValueRef vec_ptr_next = LLVMBuildGEP2(p->builder, llvm_vec_type, vec_ptr_phi, &vec_step, 1, "");
+		lb_emit_jump(p, vec_loop);
+
+		LLVMValueRef vec_ptr_incoming_values[2] = {base_vec_ptr.value, vec_ptr_next};
+		LLVMBasicBlockRef vec_ptr_incoming_blocks[2] = {vec_preheader, vec_body->block};
+		LLVMAddIncoming(vec_ptr_phi, vec_ptr_incoming_values, vec_ptr_incoming_blocks, 2);
+
+		lb_start_block(p, vec_done);
+		vec_ptr_after_main = vec_ptr_phi;
 	}
-	GB_ASSERT(z != nullptr);
 
-	LLVMValueRef store = LLVMBuildStore(p->builder, z, a_vec_ptr.value);
-	LLVMSetAlignment(store, 1);
+	lbValue vec_cursor = {};
+	vec_cursor.type = vec_ptr_type;
+	vec_cursor.value = vec_ptr_after_main;
+	for (i64 i = 0; i < rem_vec_count; i++) {
+		LLVMValueRef a_vec = OdinLLVMBuildLoadAligned(p, llvm_vec_type, vec_cursor.value, 1);
+		LLVMValueRef z = build_vec_op(a_vec);
+		if (z == nullptr) {
+			return false;
+		}
+		LLVMValueRef store = LLVMBuildStore(p->builder, z, vec_cursor.value);
+		LLVMSetAlignment(store, 1);
+		vec_cursor.value = LLVMBuildGEP2(p->builder, llvm_vec_type, vec_cursor.value, &one_int, 1, "");
+	}
 
-	lb_loop_end(p, vec_loop);
-
-	i64 tail_count = count - vec_elems;
 	if (tail_count > 0) {
-		lbValue tail_start = lb_const_int(p->module, t_i32, vec_elems);
-		auto tail_loop = lb_loop_start(p, cast(isize)tail_count, t_i32);
-
-		lbValue idx = lb_emit_arith(p, Token_Add, tail_start, tail_loop.idx, t_i32);
-		lbValue tail_ptr = lb_emit_array_ep(p, x, idx);
-		lbValue tail_a = lb_emit_load(p, tail_ptr);
-		lbValue tail_c = lb_emit_arith(p, op, tail_a, b, elem_type);
-		lb_emit_store(p, tail_ptr, tail_c);
-
-		lb_loop_end(p, tail_loop);
+		lbValue tail_base = lb_emit_conv(p, vec_cursor, elem_ptr_type);
+		for (i64 i = 0; i < tail_count; i++) {
+			LLVMValueRef tail_ptr = tail_base.value;
+			if (i != 0) {
+				LLVMValueRef offset = LLVMConstInt(llvm_int_type, cast(unsigned long long)i, false);
+				tail_ptr = LLVMBuildGEP2(p->builder, llvm_elem_type, tail_base.value, &offset, 1, "");
+			}
+			lbValue tail_a = {};
+			tail_a.type = elem_type;
+			tail_a.value = OdinLLVMBuildLoadAligned(p, llvm_elem_type, tail_ptr, 1);
+			lbValue tail_c = lb_emit_arith(p, op, tail_a, b, elem_type);
+			LLVMValueRef tail_store = LLVMBuildStore(p->builder, tail_c.value, tail_ptr);
+			LLVMSetAlignment(tail_store, 1);
+		}
 	}
 
 	return true;
