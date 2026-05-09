@@ -2978,6 +2978,152 @@ gb_internal bool lb_is_same_simple_lhs_expr(Ast *lhs, Ast *rhs) {
 	return false;
 }
 
+gb_internal bool lb_is_vectorizable_broadcast_array_op(TokenKind op, Type *elem_type) {
+	Type *t = base_type(elem_type);
+	if (!is_simd_able_type(t)) {
+		return false;
+	}
+
+	if (is_type_float(t)) {
+		switch (op) {
+		case Token_Add:
+		case Token_Sub:
+		case Token_Mul:
+		case Token_Quo:
+		case Token_Mod:
+			return true;
+		}
+		return false;
+	}
+
+	if (is_type_integer_like(t) || is_type_boolean(t) || is_type_rune(t)) {
+		switch (op) {
+		case Token_Add:
+		case Token_Sub:
+		case Token_Mul:
+		case Token_Quo:
+		case Token_Mod:
+		case Token_ModMod:
+		case Token_And:
+		case Token_AndNot:
+		case Token_Or:
+		case Token_Xor:
+			return true;
+		}
+	}
+	return false;
+}
+
+gb_internal bool lb_try_build_assign_stmt_array_broadcast_simd(lbProcedure *p, TokenKind op, lbValue x, lbValue b, Type *array_type, Type *elem_type, i64 count) {
+	gb_unused(array_type);
+
+	if (!lb_is_vectorizable_broadcast_array_op(op, elem_type)) {
+		return false;
+	}
+
+	i64 elem_size = type_size_of(elem_type);
+	if (elem_size <= 0) {
+		return false;
+	}
+
+	i64 simd_byte_width = cast(i64)build_context.max_simd_align;
+	if (simd_byte_width > 16) {
+		simd_byte_width = 16;
+	}
+	if (simd_byte_width < elem_size*2) {
+		return false;
+	}
+
+	i64 lanes = simd_byte_width / elem_size;
+	if (lanes < 2 || (lanes&(lanes-1)) != 0) {
+		return false;
+	}
+
+	i64 vec_count = count / lanes;
+	if (vec_count <= 0) {
+		return false;
+	}
+	i64 vec_elems = vec_count*lanes;
+
+	Type *vec_type = alloc_type_simd_vector(lanes, elem_type);
+	Type *vec_ptr_type = alloc_type_pointer(vec_type);
+	LLVMTypeRef llvm_vec_type = lb_type(p->module, vec_type);
+
+	lbValue b_vec = lb_emit_conv(p, b, vec_type);
+	lbValue lanes_value = lb_const_int(p->module, t_i32, lanes);
+
+	Type *integral_type = base_type(elem_type);
+
+	auto vec_loop = lb_loop_start(p, cast(isize)vec_count, t_i32);
+
+	lbValue elem_idx = lb_emit_arith(p, Token_Mul, vec_loop.idx, lanes_value, t_i32);
+	lbValue a_ptr = lb_emit_array_ep(p, x, elem_idx);
+	lbValue a_vec_ptr = lb_emit_conv(p, a_ptr, vec_ptr_type);
+
+	LLVMValueRef a_vec = OdinLLVMBuildLoadAligned(p, llvm_vec_type, a_vec_ptr.value, 1);
+	LLVMValueRef z = nullptr;
+	if (is_type_float(integral_type)) {
+		switch (op) {
+		case Token_Add: z = LLVMBuildFAdd(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Sub: z = LLVMBuildFSub(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Mul: z = LLVMBuildFMul(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Quo: z = LLVMBuildFDiv(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Mod: z = LLVMBuildFRem(p->builder, a_vec, b_vec.value, ""); break;
+		default: return false;
+		}
+	} else {
+		switch (op) {
+		case Token_Add:    z = LLVMBuildAdd(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Sub:    z = LLVMBuildSub(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Mul:    z = LLVMBuildMul(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Quo: {
+			auto *call = is_type_unsigned(integral_type) ? LLVMBuildUDiv : LLVMBuildSDiv;
+			z = call(p->builder, a_vec, b_vec.value, "");
+		} break;
+		case Token_Mod: {
+			auto *call = is_type_unsigned(integral_type) ? LLVMBuildURem : LLVMBuildSRem;
+			z = call(p->builder, a_vec, b_vec.value, "");
+		} break;
+		case Token_ModMod:
+			if (is_type_unsigned(integral_type)) {
+				z = LLVMBuildURem(p->builder, a_vec, b_vec.value, "");
+			} else {
+				LLVMValueRef a = LLVMBuildSRem(p->builder, a_vec, b_vec.value, "");
+				LLVMValueRef sum = LLVMBuildAdd(p->builder, a, b_vec.value, "");
+				z = LLVMBuildSRem(p->builder, sum, b_vec.value, "");
+			}
+			break;
+		case Token_And:    z = LLVMBuildAnd(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_AndNot: z = LLVMBuildAnd(p->builder, a_vec, LLVMBuildNot(p->builder, b_vec.value, ""), ""); break;
+		case Token_Or:     z = LLVMBuildOr(p->builder, a_vec, b_vec.value, ""); break;
+		case Token_Xor:    z = LLVMBuildXor(p->builder, a_vec, b_vec.value, ""); break;
+		default: return false;
+		}
+	}
+	GB_ASSERT(z != nullptr);
+
+	LLVMValueRef store = LLVMBuildStore(p->builder, z, a_vec_ptr.value);
+	LLVMSetAlignment(store, 1);
+
+	lb_loop_end(p, vec_loop);
+
+	i64 tail_count = count - vec_elems;
+	if (tail_count > 0) {
+		lbValue tail_start = lb_const_int(p->module, t_i32, vec_elems);
+		auto tail_loop = lb_loop_start(p, cast(isize)tail_count, t_i32);
+
+		lbValue idx = lb_emit_arith(p, Token_Add, tail_start, tail_loop.idx, t_i32);
+		lbValue tail_ptr = lb_emit_array_ep(p, x, idx);
+		lbValue tail_a = lb_emit_load(p, tail_ptr);
+		lbValue tail_c = lb_emit_arith(p, op, tail_a, b, elem_type);
+		lb_emit_store(p, tail_ptr, tail_c);
+
+		lb_loop_end(p, tail_loop);
+	}
+
+	return true;
+}
+
 gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr const &lhs, lbValue const &value, Ast *rhs_expr) {
 	GB_ASSERT(op != Token_Eq);
 
@@ -3137,6 +3283,10 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 			b = lb_const_value(p->module, elem_type, rhs_tav.value);
 		} else {
 			b = lb_emit_conv(p, value, elem_type);
+		}
+
+		if (lb_try_build_assign_stmt_array_broadcast_simd(p, op, x, b, array_type, elem_type, count)) {
+			return;
 		}
 
 		auto loop_data = lb_loop_start(p, cast(isize)count, t_i32);
