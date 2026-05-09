@@ -2915,7 +2915,70 @@ gb_internal void lb_build_for_stmt(lbProcedure *p, Ast *node) {
 	lb_close_scope(p, lbDeferExit_Default, nullptr, node);
 }
 
-gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr const &lhs, lbValue const &value) {
+gb_internal Ast *lb_strip_simple_lhs_expr(Ast *expr) {
+	expr = unparen_expr(expr);
+	for (;;) {
+		if (expr == nullptr) {
+			return expr;
+		}
+
+		switch (expr->kind) {
+		case_ast_node(ac, AutoCast, expr);
+			expr = unparen_expr(ac->expr);
+			continue;
+		case_end;
+
+		case_ast_node(tc, TypeCast, expr);
+			expr = unparen_expr(tc->expr);
+			continue;
+		case_end;
+		}
+		break;
+	}
+	return expr;
+}
+
+gb_internal bool lb_is_same_simple_lhs_expr(Ast *lhs, Ast *rhs) {
+	lhs = lb_strip_simple_lhs_expr(lhs);
+	rhs = lb_strip_simple_lhs_expr(rhs);
+
+	if (lhs == rhs) {
+		return lhs != nullptr;
+	}
+	if (lhs == nullptr || rhs == nullptr || lhs->kind != rhs->kind) {
+		return false;
+	}
+
+	switch (lhs->kind) {
+	case_ast_node(le, Ident, lhs);
+		ast_node(re, Ident, rhs);
+		if (is_blank_ident(lhs) || is_blank_ident(rhs)) {
+			return false;
+		}
+		Entity *lentity = le->entity.load();
+		Entity *rentity = re->entity.load();
+		if (lentity != nullptr || rentity != nullptr) {
+			return lentity == rentity;
+		}
+		return le->hash == re->hash && le->token.string == re->token.string;
+	case_end;
+
+	case_ast_node(le, DerefExpr, lhs);
+		ast_node(re, DerefExpr, rhs);
+		return lb_is_same_simple_lhs_expr(le->expr, re->expr);
+	case_end;
+
+	case_ast_node(le, SelectorExpr, lhs);
+		ast_node(re, SelectorExpr, rhs);
+		return lb_is_same_simple_lhs_expr(le->expr, re->expr) &&
+		       lb_is_same_simple_lhs_expr(le->selector, re->selector);
+	case_end;
+	}
+
+	return false;
+}
+
+gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr const &lhs, lbValue const &value, Ast *rhs_expr) {
 	GB_ASSERT(op != Token_Eq);
 
 	Type *lhs_type = lb_addr_type(lhs);
@@ -2924,13 +2987,21 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 	i64 count = get_array_type_count(array_type);
 	Type *elem_type = base_array_type(array_type);
 
-	lbValue rhs = lb_emit_conv(p, value, lhs_type);
+	Type *rhs_type = base_type(type_deref(value.type));
+	bool rhs_is_array_like = is_type_array_like(rhs_type);
+	TypeAndValue rhs_tav = type_and_value_of_expr(rhs_expr);
+	bool rhs_is_broadcast_constant = rhs_is_array_like &&
+	                                 rhs_tav.mode == Addressing_Constant &&
+	                                 rhs_tav.value.kind != ExactValue_Invalid &&
+	                                 rhs_tav.value.kind != ExactValue_Compound;
+	lbValue rhs = {};
 
 	bool inline_array_arith = lb_can_try_to_inline_array_arith(array_type);
 
 
 	if (lhs.kind == lbAddr_Swizzle) {
 		GB_ASSERT(is_type_array(lhs_type));
+		rhs = lb_emit_conv(p, value, lhs_type);
 
 		struct ValueAndIndex {
 			lbValue value;
@@ -2972,6 +3043,7 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 		return;
 	} else if (lhs.kind == lbAddr_SwizzleLarge) {
 		GB_ASSERT(is_type_array(lhs_type));
+		rhs = lb_emit_conv(p, value, lhs_type);
 
 		struct ValueAndIndex {
 			lbValue value;
@@ -3018,6 +3090,7 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 
 	lbValue x = lb_addr_get_ptr(p, lhs);
 	if (inline_array_arith) {
+		rhs = lb_emit_conv(p, value, lhs_type);
 		unsigned n = cast(unsigned)count;
 
 		auto lhs_ptrs = slice_make<lbValue>(temporary_allocator(), n);
@@ -3041,7 +3114,8 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 		for (unsigned i = 0; i < n; i++) {
 			lb_emit_store(p, lhs_ptrs[i], ops[i]);
 		}
-	} else {
+	} else if (rhs_is_array_like && !rhs_is_broadcast_constant) {
+		rhs = lb_emit_conv(p, value, lhs_type);
 		lbValue y = lb_address_from_load_or_generate_local(p, rhs);
 
 		auto loop_data = lb_loop_start(p, cast(isize)count, t_i32);
@@ -3051,6 +3125,25 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 
 		lbValue a = lb_emit_load(p, a_ptr);
 		lbValue b = lb_emit_load(p, b_ptr);
+		lbValue c = lb_emit_arith(p, op, a, b, elem_type);
+		lb_emit_store(p, a_ptr, c);
+
+		lb_loop_end(p, loop_data);
+	} else {
+		// NOTE: Broadcast scalar RHS directly in-loop to avoid materializing
+		// a huge temporary array on the stack for large array-programming ops.
+		lbValue b = {};
+		if (rhs_is_broadcast_constant) {
+			b = lb_const_value(p->module, elem_type, rhs_tav.value);
+		} else {
+			b = lb_emit_conv(p, value, elem_type);
+		}
+
+		auto loop_data = lb_loop_start(p, cast(isize)count, t_i32);
+
+		lbValue a_ptr = lb_emit_array_ep(p, x, loop_data.idx);
+
+		lbValue a = lb_emit_load(p, a_ptr);
 		lbValue c = lb_emit_arith(p, op, a, b, elem_type);
 		lb_emit_store(p, a_ptr, c);
 
@@ -3072,6 +3165,39 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, AstAssignStmt *as) {
 							return;
 						}
 					}
+				}
+			}
+		}
+
+		if (as->lhs.count == 1 && as->rhs.count == 1 && !is_blank_ident(as->lhs[0])) {
+			Ast *lhs_expr = unparen_expr(as->lhs[0]);
+			Ast *rhs_expr = unparen_expr(as->rhs[0]);
+			Type *lhs_type = type_of_expr(lhs_expr);
+
+			if (is_type_array(lhs_type) && rhs_expr->kind == Ast_BinaryExpr) {
+				ast_node(be, BinaryExpr, rhs_expr);
+				TokenKind op = be->op.kind;
+				bool same_lhs = lb_is_same_simple_lhs_expr(lhs_expr, be->left);
+
+				if (!token_is_comparison(op) &&
+				    op != Token_CmpAnd &&
+				    op != Token_CmpOr &&
+				    same_lhs) {
+					lbAddr lhs = lb_build_addr(p, lhs_expr);
+					lbValue value = lb_build_expr(p, be->right);
+
+					// NOTE: Allow for the weird edge case of:
+					// array = array * matrix
+					if (op == Token_Mul && is_type_matrix(value.type) && is_type_array(lhs_type)) {
+						lbValue old_value = lb_addr_load(p, lhs);
+						Type *type = old_value.type;
+						lbValue new_value = lb_emit_vector_mul_matrix(p, old_value, value, type);
+						lb_addr_store(p, lhs, new_value);
+						return;
+					}
+
+					lb_build_assign_stmt_array(p, op, lhs, value, be->right);
+					return;
 				}
 			}
 		}
@@ -3118,7 +3244,7 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, AstAssignStmt *as) {
 		}
 
 		if (is_type_array(lhs_type)) {
-			lb_build_assign_stmt_array(p, op, lhs, value);
+			lb_build_assign_stmt_array(p, op, lhs, value, as->rhs[0]);
 			return;
 		} else {
 			lbValue old_value = lb_addr_load(p, lhs);
