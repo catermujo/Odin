@@ -1268,6 +1268,129 @@ gb_internal void lb_copy_bits(lbProcedure *p,
 	}
 }
 
+gb_internal bool lb_try_get_bit_field_word_fast_path_info(lbAddr const &addr, Type **backing_type_, Type **backing_unsigned_type_, i64 *backing_bit_size_) {
+	if (addr.kind != lbAddr_BitField || addr.addr.value == nullptr) {
+		return false;
+	}
+
+	Type *bit_field_type = base_type(type_deref(addr.addr.type));
+	if (bit_field_type == nullptr || !is_type_bit_field(bit_field_type)) {
+		return false;
+	}
+
+	Type *backing_type = base_type(bit_field_type->BitField.backing_type);
+	if (backing_type == nullptr || !is_type_integer(backing_type)) {
+		return false;
+	}
+	if (is_type_different_to_arch_endianness(backing_type) || is_type_different_to_arch_endianness(addr.bitfield.type)) {
+		return false;
+	}
+
+	i64 backing_bit_size = 8*type_size_of(backing_type);
+	if (backing_bit_size <= 0 || backing_bit_size > 64) {
+		return false;
+	}
+	if (addr.bitfield.bit_offset < 0 || addr.bitfield.bit_size <= 0) {
+		return false;
+	}
+	if (addr.bitfield.bit_offset + addr.bitfield.bit_size > backing_bit_size) {
+		return false;
+	}
+
+	Type *backing_unsigned_type = type_unsigned_equivalent(backing_type);
+	if (backing_unsigned_type == nullptr) {
+		return false;
+	}
+
+	if (backing_type_) *backing_type_ = backing_type;
+	if (backing_unsigned_type_) *backing_unsigned_type_ = backing_unsigned_type;
+	if (backing_bit_size_) *backing_bit_size_ = backing_bit_size;
+	return true;
+}
+
+gb_internal bool lb_try_store_addr_bit_field_word_fast(lbProcedure *p, lbAddr const &addr, lbValue value) {
+	Type *backing_type = nullptr;
+	Type *backing_unsigned_type = nullptr;
+	i64 backing_bit_size = 0;
+	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, &backing_bit_size)) {
+		return false;
+	}
+
+	GB_ASSERT(addr.bitfield.bit_size >= 1);
+
+	i64 bit_size = addr.bitfield.bit_size;
+	i64 bit_offset = addr.bitfield.bit_offset;
+
+	u64 value_mask_u64 = bit_size == 64 ? ~0ull : ((1ull<<cast(u64)bit_size)-1ull);
+	u64 field_mask_u64 = value_mask_u64;
+	if (bit_offset > 0) {
+		field_mask_u64 <<= cast(u64)bit_offset;
+	}
+	u64 clear_mask_u64 = ~field_mask_u64;
+
+	lbValue backing_ptr = lb_emit_conv(p, addr.addr, alloc_type_pointer(backing_type));
+	lbValue raw = lb_emit_load(p, backing_ptr);
+	lbValue raw_u = lb_emit_conv(p, raw, backing_unsigned_type);
+	lbValue value_u = lb_emit_conv(p, value, backing_unsigned_type);
+
+	lbValue value_mask = lb_const_int(p->module, backing_unsigned_type, value_mask_u64);
+	value_u = lb_emit_arith(p, Token_And, value_u, value_mask, backing_unsigned_type);
+	if (bit_offset > 0) {
+		lbValue shift = lb_const_int(p->module, backing_unsigned_type, bit_offset);
+		value_u = lb_emit_arith(p, Token_Shl, value_u, shift, backing_unsigned_type);
+	}
+
+	lbValue clear_mask = lb_const_int(p->module, backing_unsigned_type, clear_mask_u64);
+	lbValue cleared = lb_emit_arith(p, Token_And, raw_u, clear_mask, backing_unsigned_type);
+	lbValue merged = lb_emit_arith(p, Token_Or, cleared, value_u, backing_unsigned_type);
+	lbValue result = lb_emit_conv(p, merged, backing_type);
+	lb_emit_store(p, backing_ptr, result);
+	return true;
+}
+
+gb_internal bool lb_try_load_addr_bit_field_word_fast(lbProcedure *p, lbAddr const &addr, lbValue *result_) {
+	Type *backing_type = nullptr;
+	Type *backing_unsigned_type = nullptr;
+	i64 backing_bit_size = 0;
+	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, &backing_bit_size)) {
+		return false;
+	}
+
+	GB_ASSERT(addr.bitfield.bit_size >= 1);
+
+	i64 bit_size = addr.bitfield.bit_size;
+	i64 bit_offset = addr.bitfield.bit_offset;
+
+	u64 value_mask_u64 = bit_size == 64 ? ~0ull : ((1ull<<cast(u64)bit_size)-1ull);
+
+	lbValue backing_ptr = lb_emit_conv(p, addr.addr, alloc_type_pointer(backing_type));
+	lbValue raw = lb_emit_load(p, backing_ptr);
+	lbValue raw_u = lb_emit_conv(p, raw, backing_unsigned_type);
+
+	if (bit_offset > 0) {
+		lbValue shift = lb_const_int(p->module, backing_unsigned_type, bit_offset);
+		raw_u = lb_emit_arith(p, Token_Shr, raw_u, shift, backing_unsigned_type);
+	}
+	if (bit_size < backing_bit_size) {
+		lbValue value_mask = lb_const_int(p->module, backing_unsigned_type, value_mask_u64);
+		raw_u = lb_emit_arith(p, Token_And, raw_u, value_mask, backing_unsigned_type);
+	}
+
+	lbValue r = lb_emit_conv(p, raw_u, addr.bitfield.type);
+	Type *ct = core_type(addr.bitfield.type);
+	if (!is_type_unsigned(ct) && !is_type_boolean(ct)) {
+		// Sign extension:
+		// m := 1<<(bit_size-1)
+		// r = (r XOR m) - m
+		lbValue m = lb_const_int(p->module, addr.bitfield.type, 1ull<<(bit_size-1));
+		r = lb_emit_arith(p, Token_Xor, r, m, addr.bitfield.type);
+		r = lb_emit_arith(p, Token_Sub, r, m, addr.bitfield.type);
+	}
+
+	if (result_) *result_ = r;
+	return true;
+}
+
 gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 	if (addr.addr.value == nullptr) {
 		return;
@@ -1292,6 +1415,9 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 			pos = ast_token(p->curr_stmt).pos;
 		}
 		lb_emit_bit_field_downcast_assert(p, value, addr.bitfield.type, cast(u64)addr.bitfield.bit_size, pos);
+		if (lb_try_store_addr_bit_field_word_fast(p, addr, value)) {
+			return;
+		}
 		if (is_type_endian_big(addr.bitfield.type)) {
 			i64 shift_amount = 8*type_size_of(value.type) - addr.bitfield.bit_size;
 			lbValue shifted_value = value;
@@ -1603,6 +1729,11 @@ gb_internal lbValue lb_addr_load(lbProcedure *p, lbAddr const &addr) {
 	GB_ASSERT(addr.addr.value != nullptr);
 
 	if (addr.kind == lbAddr_BitField) {
+		lbValue fast_value = {};
+		if (lb_try_load_addr_bit_field_word_fast(p, addr, &fast_value)) {
+			return fast_value;
+		}
+
 		Type *ct = core_type(addr.bitfield.type);
 		bool do_mask = false;
 		if (is_type_unsigned(ct) || is_type_boolean(ct)) {
