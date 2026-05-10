@@ -55,15 +55,18 @@ to_f64 :: proc "contextless" (x: $T/Fixed($Backing, $Fraction_Width)) -> f64 {
 
 
 @(require_results)
+@(operator="+")
 add :: proc "contextless" (x, y: $T/Fixed) -> T {
 	return {x.i + y.i}
 }
 @(require_results)
+@(operator="-")
 sub :: proc "contextless" (x, y: $T/Fixed) -> T {
 	return {x.i - y.i}
 }
 
 @(require_results)
+@(operator="*")
 mul :: proc "contextless" (x, y: $T/Fixed($Backing, $Fraction_Width)) -> (z: T) {
 	z.i = intrinsics.fixed_point_mul(x.i, y.i, Fraction_Width)
 	return
@@ -75,6 +78,7 @@ mul_sat :: proc "contextless" (x, y: $T/Fixed($Backing, $Fraction_Width)) -> (z:
 }
 
 @(require_results)
+@(operator="/")
 div :: proc "contextless" (x, y: $T/Fixed($Backing, $Fraction_Width)) -> (z: T) {
 	z.i = intrinsics.fixed_point_div(x.i, y.i, Fraction_Width)
 	return

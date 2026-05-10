@@ -124,6 +124,12 @@ at :: proc(s: ^String, i: int, loc := #caller_location) -> (r: rune) {
 	}
 }
 
+@(operator="[]")
+operator_index_get :: proc(s: String, i: int) -> rune {
+	s_copy := s
+	return at(&s_copy, i)
+}
+
 slice :: proc(s: ^String, i, j: int, loc := #caller_location) -> string {
 	runtime.slice_expr_error_lo_hi_loc(loc, i, j, s.rune_count)
 

@@ -120,6 +120,7 @@ This will result in:
 **Returns**
 - the element at the specified position
 */
+@(operator="[]")
 get :: proc "contextless" (a: $A/Small_Array($N, $T), index: int) -> T {
 	return a.data[index]
 }
@@ -253,6 +254,7 @@ Output:
 	[Z, B, X, Y, Z]
 
 */
+@(operator="[]=")
 set :: proc "contextless" (a: ^$A/Small_Array($N, $T), index: int, item: T) {
 	a.data[index] = item
 }
