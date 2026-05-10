@@ -36,7 +36,7 @@ holding another lock, that will cause a trivial case of deadlock. Do not use
 `Mutex` in recursive functions. In case multiple locks by the same thread are
 desired, use `Recursive_Mutex`.
 */
-Mutex :: struct {
+Mutex :: struct #no_copy {
 	impl: _Mutex,
 }
 
@@ -147,7 +147,7 @@ result in broken and unsafe behavior. For this reason, mutexes are marked as
 exclusive lock more than once from the same thread, or an exclusive and shared
 lock on the same thread. Taking a shared lock multiple times is acceptable.
 */
-RW_Mutex :: struct {
+RW_Mutex :: struct #no_copy {
 	impl: _RW_Mutex,
 }
 
@@ -313,7 +313,7 @@ released. Trying to use a copy of the lock at a different memory address will
 result in broken and unsafe behavior. For this reason, mutexes are marked as
 `#no_copy`.
 */
-Recursive_Mutex :: struct {
+Recursive_Mutex :: struct #no_copy {
 	impl: _Recursive_Mutex,
 }
 
@@ -414,7 +414,7 @@ lock has been released. Trying to use a copy of the lock at a different memory
 address will result in broken and unsafe behavior. For this reason, condition
 variables are marked as `#no_copy`.
 */
-Cond :: struct {
+Cond :: struct #no_copy {
 	impl: _Cond,
 }
 
@@ -494,7 +494,7 @@ must watch the same memory address to know when the lock has been released.
 Trying to use a copy of the lock at a different memory address will result in
 broken and unsafe behavior. For this reason, semaphores are marked as `#no_copy`.
 */
-Sema :: struct {
+Sema :: struct #no_copy {
 	impl: _Sema,
 }
 

@@ -18,7 +18,7 @@ Arena_Kind :: enum uint {
 	Static: A single `Memory_Block` allocated with virtual memory.
 	Buffer: A single `Memory_Block` created from a user provided []byte.
 */
-Arena :: struct {
+Arena :: struct #no_copy {
 	kind:                Arena_Kind,
 	curr_block:          ^Memory_Block,
 
