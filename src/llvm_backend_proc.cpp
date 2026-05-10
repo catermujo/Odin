@@ -95,7 +95,6 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 	} else {
 		link_name = lb_get_entity_name(m, entity);
 	}
-
 	MUTEX_GUARD(&m->procedure_mutex);
 	{
 		StringHashKey key = string_hash_string(link_name);
