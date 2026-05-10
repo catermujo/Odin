@@ -1331,6 +1331,118 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		check_decl_attributes(ctx, d->attributes, proc_decl_attribute, &ac);
 	}
 
+	if (ac.has_operator_overload) {
+		bool valid_operator_overload = true;
+		isize required_param_count = pt->param_count;
+		if (pt->params != nullptr) {
+			required_param_count = pt->params->Tuple.variables.count;
+			for (isize i = required_param_count-1; i >= 0; i--) {
+				Entity *param = pt->params->Tuple.variables[i];
+				bool has_default = false;
+				if (param != nullptr) {
+					switch (param->kind) {
+					case Entity_Variable:
+						has_default = param->Variable.param_value.kind != ParameterValue_Invalid;
+						break;
+					case Entity_Constant:
+						has_default = param->Constant.param_value.kind != ParameterValue_Invalid;
+						break;
+					default:
+						has_default = false;
+						break;
+					}
+				}
+				if (!has_default) {
+					break;
+				}
+				required_param_count--;
+			}
+		}
+		if (e->Procedure.is_foreign) {
+			error(e->token, "Procedures with @(operator=\"...\") cannot be foreign");
+			valid_operator_overload = false;
+		}
+		if ((e->scope->flags & (ScopeFlag_File|ScopeFlag_Pkg)) == 0) {
+			error(e->token, "Procedures with @(operator=\"...\") must be declared at file scope");
+			valid_operator_overload = false;
+		}
+		if (pt->variadic) {
+			error(e->token, "Procedures with @(operator=\"...\") cannot be variadic");
+			valid_operator_overload = false;
+		}
+		switch (ac.operator_overload_kind) {
+		case OperatorOverloadKind_Binary:
+		case OperatorOverloadKind_IndexGet:
+			if (pt->param_count < 2 || required_param_count != 2 || pt->result_count < 1) {
+				error(e->token, "Procedures with @(operator=\"...\") for binary operators and '[]' must take two required parameters (additional parameters must have defaults) and at least one result");
+				valid_operator_overload = false;
+			}
+			break;
+		case OperatorOverloadKind_IndexSet:
+			if (pt->param_count < 3 || required_param_count != 3 || pt->result_count != 0) {
+				error(e->token, "Procedures with @(operator=\"[]=\") must take three required parameters (additional parameters must have defaults) and zero results");
+				valid_operator_overload = false;
+			}
+			break;
+		case OperatorOverloadKind_Iterator:
+			if (pt->param_count < 2 || required_param_count != 2 || pt->result_count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must take two required parameters (additional parameters must have defaults) and at least two results (with a trailing boolean)");
+				valid_operator_overload = false;
+				break;
+			}
+
+			if (pt->params == nullptr || pt->params->Tuple.variables.count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must have at least two parameters");
+				valid_operator_overload = false;
+				break;
+			}
+			if (pt->results == nullptr || pt->results->Tuple.variables.count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must have at least two results");
+				valid_operator_overload = false;
+				break;
+			}
+
+			{
+				Type *iter_state = pt->params->Tuple.variables[1]->type;
+				if (!is_type_pointer(iter_state) || !are_types_identical(type_deref(iter_state), t_int)) {
+					error(e->token, "Procedures with @(operator=\"in\") must use '^int' as their second parameter");
+					valid_operator_overload = false;
+				}
+			}
+			{
+				auto result_vars = pt->results->Tuple.variables;
+				Type *final_result = result_vars[result_vars.count-1]->type;
+				if (!is_type_boolean(final_result)) {
+					error(e->token, "Procedures with @(operator=\"in\") must have a trailing boolean result");
+					valid_operator_overload = false;
+				}
+			}
+			break;
+		default:
+			error(e->token, "Invalid internal operator overload kind");
+			valid_operator_overload = false;
+			break;
+		}
+		if (valid_operator_overload) {
+			switch (ac.operator_overload_kind) {
+			case OperatorOverloadKind_Binary:
+				add_operator_overload_proc(ctx, ac.operator_overload_binary_kind, e);
+				break;
+			case OperatorOverloadKind_IndexGet:
+				add_index_get_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_IndexSet:
+				add_index_set_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_Iterator:
+				add_iterator_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_Invalid:
+				break;
+			}
+		}
+	}
+
 	if (ac.test) {
 		e->flags |= EntityFlag_Test;
 	}

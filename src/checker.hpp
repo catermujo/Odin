@@ -115,6 +115,14 @@ enum InstrumentationFlag : i32 {
 	Instrumentation_Disabled = +1,
 };
 
+enum OperatorOverloadKind : u8 {
+	OperatorOverloadKind_Invalid,
+	OperatorOverloadKind_Binary,
+	OperatorOverloadKind_IndexGet,
+	OperatorOverloadKind_IndexSet,
+	OperatorOverloadKind_Iterator,
+};
+
 struct AttributeContext {
 	String  link_name;
 	String  link_prefix;
@@ -126,12 +134,15 @@ struct AttributeContext {
 	String  deprecated_message;
 	String  warning_message;
 	DeferredProcedure deferred_procedure;
+	TokenKind operator_overload_binary_kind;
+	OperatorOverloadKind operator_overload_kind;
 	bool    is_export             : 1;
 	bool    is_static             : 1;
 	bool    require_results       : 1;
 	bool    require_declaration   : 1;
 	bool    has_disabled_proc     : 1;
 	bool    disabled_proc         : 1;
+	bool    has_operator_overload : 1;
 	bool    test                  : 1;
 	bool    init                  : 1;
 	bool    fini                  : 1;
@@ -783,6 +794,20 @@ struct CheckerInfo {
 	BlockingMutex instrumentation_mutex;
 	Entity *instrumentation_enter_entity;
 	Entity *instrumentation_exit_entity;
+
+	BlockingMutex operator_overload_mutex;
+	Array<Entity *> operator_overloads[Token_Count];
+	Array<Entity *> index_operator_get_overloads;
+	Array<Entity *> index_operator_set_overloads;
+	Array<Entity *> iterator_operator_overloads;
+	BlockingMutex overloaded_operator_call_mutex;
+	PtrMap<Ast *, Ast *> overloaded_operator_calls;
+	BlockingMutex assignment_operation_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_operation_expr_map;
+	BlockingMutex assignment_overloaded_call_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_overloaded_call_expr_map;
+	BlockingMutex range_stmt_iterator_overload_state_mutex;
+	PtrMap<Ast *, Entity *> range_stmt_iterator_overload_state_map;
 
 
 	BlockingMutex                       load_directory_mutex;

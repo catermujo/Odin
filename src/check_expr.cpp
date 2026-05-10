@@ -107,6 +107,7 @@ gb_internal Type *make_soa_struct_slice(CheckerContext *ctx, Ast *array_typ_expr
 gb_internal Type *make_soa_struct_dynamic_array(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem);
 
 gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32 id, Type *type_hint);
+gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *call, Ast *proc, Slice<Ast *> const &args, ProcInlining inlining, ProcTailing tailing, Type *type_hint);
 
 gb_internal void check_promote_optional_ok(CheckerContext *c, Operand *x, Type **val_type_, Type **ok_type_, bool change_operand=true);
 
@@ -130,6 +131,14 @@ gb_internal bool check_is_castable_to(CheckerContext *c, Operand *operand, Type 
 gb_internal bool is_exact_value_zero(ExactValue const &v);
 
 gb_internal IntegerDivisionByZeroKind check_for_integer_division_by_zero(CheckerContext *c, Ast *node);
+
+gb_internal bool check_binary_expr_custom_overload(CheckerContext *c, Operand *x, Ast *node, AstBinaryExpr *be, Operand const *lhs, Operand const *rhs);
+gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x, Ast *node, AstIndexExpr *ie, bool prefer_address_overload = false, bool require_address_overload = false);
+gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand *x, Ast *index_expr_node, Ast *value_expr);
+gb_internal Ast *get_overloaded_operator_call_expr(CheckerInfo *info, Ast *expr);
+
+gb_internal bool maybe_has_binary_expr_custom_overload_candidate(CheckerContext *c, TokenKind op, Operand const *lhs, Operand const *rhs);
+gb_internal bool maybe_has_index_expr_custom_overload_candidate(CheckerContext *c, Operand const *expr_operand);
 
 enum LoadDirectiveResult {
 	LoadDirective_Success  = 0,
@@ -4612,6 +4621,10 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 		return;
 	}
 
+	if (check_binary_expr_custom_overload(c, x, node, be, x, y)) {
+		return;
+	}
+
 	if (check_binary_array_expr(c, op, x, y)) {
 		x->mode = Addressing_Value;
 		x->type = x->type;
@@ -7327,6 +7340,745 @@ gb_internal bool check_call_arguments_single(CheckerContext *c, Ast *call, Opera
 	return true;
 }
 
+gb_internal bool check_binary_expr_custom_overload(CheckerContext *c, Operand *x, Ast *node, AstBinaryExpr *be, Operand const *lhs, Operand const *rhs) {
+	if (!token_kind_is_custom_overloadable_binary_operator(be->op.kind)) {
+		return false;
+	}
+
+	if (!maybe_has_binary_expr_custom_overload_candidate(c, be->op.kind, lhs, rhs)) {
+		return false;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto procs = operator_overload_procs_cloned(c, be->op.kind, temporary_allocator());
+	if (procs.count == 0) {
+		return false;
+	}
+
+	Token proc_token = make_token_ident(token_strings[be->op.kind]);
+	proc_token.pos = be->op.pos;
+
+	Entity proc_group = {};
+	proc_group.kind = Entity_ProcGroup;
+	proc_group.state = EntityState_Resolved;
+	proc_group.token = proc_token;
+	proc_group.scope = c->scope;
+	proc_group.ProcGroup.entities = procs;
+
+	auto args = array_make<Ast *>(temporary_allocator(), 0, 2);
+	array_add(&args, be->left);
+	array_add(&args, be->right);
+
+	Token open  = {Token_OpenParen,  0, token_strings[Token_OpenParen],  be->op.pos};
+	Token close = {Token_CloseParen, 0, token_strings[Token_CloseParen], be->op.pos};
+	Ast *proc_expr = ast_ident(node->file(), proc_token);
+	Ast *call = ast_call_expr(node->file(), proc_expr, args, open, close, {});
+	ast_node(ce, CallExpr, call);
+	AstSplitArgs *split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+	split_args->positional = slice_from_array(args);
+	split_args->named = {};
+	ce->split_args = split_args;
+
+	Operand overload_operand = {};
+	overload_operand.mode = Addressing_ProcGroup;
+	overload_operand.proc_group = &proc_group;
+	overload_operand.expr = proc_expr;
+
+	auto positional_operands = array_make<Operand>(temporary_allocator(), 0, 2);
+	array_add(&positional_operands, *lhs);
+	array_add(&positional_operands, *rhs);
+	auto named_operands = array_make<Operand>(temporary_allocator(), 0, 0);
+
+	bool has_candidate = false;
+	c->in_proc_group = true;
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+
+		CallArgumentData data = {};
+		CheckerContext ctx = *c;
+		ctx.no_polymorphic_errors = true;
+		ctx.allow_polymorphic_types = is_type_polymorphic(pt);
+		ctx.hide_polymorphic_errors = true;
+
+		Operand candidate_operand = overload_operand;
+		bool is_candidate = check_call_arguments_single(&ctx, call, &candidate_operand,
+			p, pt,
+			positional_operands, named_operands,
+			CallArgumentErrorMode::NoErrors,
+			&data, true);
+		if (is_candidate) {
+			has_candidate = true;
+			break;
+		}
+	}
+	c->in_proc_group = false;
+
+	if (!has_candidate) {
+		return false;
+	}
+
+	check_call_expr(c, &overload_operand, call, nullptr, slice_from_array(args), ProcInlining_none, ProcTailing_none, nullptr);
+	if (overload_operand.mode != Addressing_Invalid) {
+		set_overloaded_operator_call_expr(c, node, call);
+	}
+	*x = overload_operand;
+	x->expr = node;
+	return true;
+}
+
+gb_internal bool maybe_has_binary_expr_custom_overload_candidate(CheckerContext *c, TokenKind op, Operand const *lhs, Operand const *rhs) {
+	if (lhs == nullptr || rhs == nullptr) {
+		return true;
+	}
+	if (lhs->type == nullptr || rhs->type == nullptr ||
+	    lhs->type == t_invalid || rhs->type == t_invalid) {
+		return true;
+	}
+
+	Type *lhs_type = default_type(lhs->type);
+	Type *rhs_type = default_type(rhs->type);
+
+	if (lhs_type == nullptr || rhs_type == nullptr ||
+	    lhs_type == t_invalid || rhs_type == t_invalid) {
+		return true;
+	}
+
+	if (is_type_untyped(lhs_type) || is_type_untyped(rhs_type)) {
+		return true;
+	}
+
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	auto const &procs = c->info->operator_overloads[op];
+	if (procs.count == 0) {
+		return false;
+	}
+
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+		if (pt->Proc.variadic || pt->Proc.param_count < 2 || pt->Proc.params == nullptr) {
+			continue;
+		}
+
+		auto vars = pt->Proc.params->Tuple.variables;
+		if (vars.data == nullptr || vars.count < 2) {
+			continue;
+		}
+
+		Type *a = vars[0]->type;
+		Type *b = vars[1]->type;
+		if (a == nullptr || b == nullptr) {
+			continue;
+		}
+
+		bool lhs_matches = false;
+		if (is_type_polymorphic(a)) {
+			CheckerContext ctx = *c;
+			lhs_matches = is_polymorphic_type_assignable(&ctx, a, lhs_type, false, false);
+		} else {
+			lhs_matches = are_types_identical(a, lhs_type);
+		}
+		if (!lhs_matches) {
+			continue;
+		}
+
+		bool rhs_matches = false;
+		if (is_type_polymorphic(b)) {
+			CheckerContext ctx = *c;
+			rhs_matches = is_polymorphic_type_assignable(&ctx, b, rhs_type, false, false);
+		} else {
+			rhs_matches = are_types_identical(b, rhs_type);
+		}
+		if (!rhs_matches) {
+			continue;
+		}
+
+		if (lhs_matches && rhs_matches) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+gb_internal Type *get_custom_index_expr_type_hint(Type *container_type) {
+	Type *t = base_type(type_deref(container_type));
+	if (t == nullptr || t == t_invalid) {
+		return nullptr;
+	}
+
+	if (is_type_map(t)) {
+		return t->Map.key;
+	}
+	if (is_type_enumerated_array(t)) {
+		return t->EnumeratedArray.index;
+	}
+
+	return nullptr;
+}
+
+gb_internal bool receiver_type_matches_custom_index_overload_param(CheckerContext *c, Type *param_type, Type *receiver_type) {
+	if (param_type == nullptr || receiver_type == nullptr ||
+	    param_type == t_invalid || receiver_type == t_invalid) {
+		return false;
+	}
+	if (are_types_identical(param_type, receiver_type)) {
+		return true;
+	}
+	if (is_type_polymorphic(param_type)) {
+		CheckerContext ctx = *c;
+		return is_polymorphic_type_assignable(&ctx, param_type, receiver_type, false, false);
+	}
+	return false;
+}
+
+gb_internal bool custom_index_overload_result_is_pointer(Entity *proc_entity, Type *proc_type) {
+	Type *pt = base_type(proc_type);
+	if (!(pt != nullptr && is_type_proc(pt))) {
+		return false;
+	}
+	if (pt->Proc.result_count < 1 || pt->Proc.results == nullptr) {
+		return false;
+	}
+
+	auto vars = pt->Proc.results->Tuple.variables;
+	if (vars.count < 1 || vars[0] == nullptr) {
+		return false;
+	}
+
+	Type *payload_type = vars[0]->type;
+	if (is_type_pointer(payload_type)) {
+		return true;
+	}
+
+	Type *payload_base = base_type(payload_type);
+	bool needs_ast_fallback = payload_base != nullptr &&
+	                          payload_base->kind == Type_Generic;
+	if (!needs_ast_fallback) {
+		return false;
+	}
+
+	if (proc_entity != nullptr &&
+	    proc_entity->kind == Entity_Procedure &&
+	    proc_entity->decl_info != nullptr &&
+	    proc_entity->decl_info->proc_lit != nullptr) {
+		ast_node(pl, ProcLit, proc_entity->decl_info->proc_lit);
+		Ast *proc_type_expr = unparen_expr(pl->type);
+		if (proc_type_expr != nullptr && proc_type_expr->kind == Ast_ProcType) {
+			ast_node(proc_type_ast, ProcType, proc_type_expr);
+			Ast *results = proc_type_ast->results;
+			if (results != nullptr && results->kind == Ast_FieldList) {
+				auto list = results->FieldList.list;
+				if (list.count > 0 && list[0] != nullptr && list[0]->kind == Ast_Field) {
+					ast_node(field, Field, list[0]);
+					Ast *result_type_expr = unparen_expr(field->type);
+					if (result_type_expr != nullptr) {
+						return result_type_expr->kind == Ast_PointerType ||
+						       result_type_expr->kind == Ast_MultiPointerType;
+					}
+				}
+			}
+		}
+	}
+	return false;
+}
+
+gb_internal bool custom_index_overload_matches_result_intent(Entity *proc_entity, Type *proc_type, bool require_pointer_result) {
+	bool returns_pointer = custom_index_overload_result_is_pointer(proc_entity, proc_type);
+	return require_pointer_result ? returns_pointer : !returns_pointer;
+}
+
+gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x, Ast *node, AstIndexExpr *ie, bool prefer_address_overload, bool require_address_overload) {
+	if (ie->index == nullptr) {
+		return false;
+	}
+	if (!maybe_has_index_expr_custom_overload_candidate(c, x)) {
+		return false;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto procs = index_get_operator_overload_procs_cloned(c, temporary_allocator());
+	if (procs.count == 0) {
+		return false;
+	}
+
+	Operand index_operand = {};
+	Type *index_type_hint = get_custom_index_expr_type_hint(x->type);
+	if (index_type_hint != nullptr) {
+		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
+	} else {
+		check_expr(c, &index_operand, ie->index);
+	}
+	if (index_operand.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	Token proc_token = make_token_ident(str_lit("[]"));
+	proc_token.pos = ie->open.pos;
+
+	Type *address_type = nullptr;
+	if (!check_is_not_addressable(c, x)) {
+		address_type = alloc_type_pointer(x->type);
+	}
+
+	bool can_use_direct = false;
+	bool can_use_address = false;
+
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+		if (pt->Proc.variadic || pt->Proc.param_count < 2) {
+			continue;
+		}
+		if (!custom_index_overload_matches_result_intent(p, pt, require_address_overload)) {
+			continue;
+		}
+
+		Type *param0 = pt->Proc.params->Tuple.variables[0]->type;
+		if (receiver_type_matches_custom_index_overload_param(c, param0, x->type)) {
+			can_use_direct = true;
+		}
+		if (address_type != nullptr &&
+		    receiver_type_matches_custom_index_overload_param(c, param0, address_type)) {
+			can_use_address = true;
+		}
+	}
+
+	if (!can_use_direct && !can_use_address) {
+		return false;
+	}
+	if (require_address_overload && !can_use_address && !can_use_direct) {
+		return false;
+	}
+
+	Ast *addr_expr = nullptr;
+	Operand addr_operand = {};
+	if (can_use_address) {
+		Token and_token = {Token_And, 0, token_strings[Token_And], ie->open.pos};
+		addr_expr = ast_unary_expr(node->file(), and_token, ie->expr);
+		check_expr(c, &addr_operand, addr_expr);
+		if (addr_operand.mode == Addressing_Invalid) {
+			can_use_address = false;
+		}
+	}
+	if (!can_use_direct && !can_use_address) {
+		return false;
+	}
+
+	auto try_call = [&](Ast *first_arg, Operand first_operand) -> bool {
+		auto filtered_procs = array_make<Entity *>(temporary_allocator(), 0, procs.count);
+		for (Entity *p : procs) {
+			if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+				continue;
+			}
+			Type *pt = base_type(p->type);
+			if (!(pt != nullptr && is_type_proc(pt))) {
+				continue;
+			}
+			if (pt->Proc.variadic || pt->Proc.param_count < 2 || pt->Proc.params == nullptr) {
+				continue;
+			}
+			if (!custom_index_overload_matches_result_intent(p, pt, require_address_overload)) {
+				continue;
+			}
+
+			Type *param0 = pt->Proc.params->Tuple.variables[0]->type;
+			if (!receiver_type_matches_custom_index_overload_param(c, param0, first_operand.type)) {
+				continue;
+			}
+			array_add(&filtered_procs, p);
+		}
+		if (filtered_procs.count == 0) {
+			return false;
+		}
+
+		auto args = array_make<Ast *>(temporary_allocator(), 0, 2);
+		array_add(&args, first_arg);
+		array_add(&args, ie->index);
+
+		Token open  = {Token_OpenParen,  0, token_strings[Token_OpenParen],  ie->open.pos};
+		Token close = {Token_CloseParen, 0, token_strings[Token_CloseParen], ie->open.pos};
+		Ast *proc_expr = ast_ident(node->file(), proc_token);
+		Ast *call = ast_call_expr(node->file(), proc_expr, args, open, close, {});
+		ast_node(ce, CallExpr, call);
+		AstSplitArgs *split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+		split_args->positional = slice_from_array(args);
+		split_args->named = {};
+		ce->split_args = split_args;
+
+		Entity proc_group = {};
+		proc_group.kind = Entity_ProcGroup;
+		proc_group.state = EntityState_Resolved;
+		proc_group.token = proc_token;
+		proc_group.scope = c->scope;
+		proc_group.ProcGroup.entities = filtered_procs;
+
+		Operand overload_operand = {};
+		overload_operand.mode = Addressing_ProcGroup;
+		overload_operand.proc_group = &proc_group;
+		overload_operand.expr = proc_expr;
+
+		auto positional_operands = array_make<Operand>(temporary_allocator(), 0, 2);
+		array_add(&positional_operands, first_operand);
+		array_add(&positional_operands, index_operand);
+		auto named_operands = array_make<Operand>(temporary_allocator(), 0, 0);
+
+		bool has_candidate = false;
+		Entity *selected_proc_entity = nullptr;
+		Type *selected_proc_type = nullptr;
+		c->in_proc_group = true;
+		for (Entity *p : filtered_procs) {
+			if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+				continue;
+			}
+			Type *pt = base_type(p->type);
+			if (!(pt != nullptr && is_type_proc(pt))) {
+				continue;
+			}
+
+			CallArgumentData data = {};
+			CheckerContext ctx = *c;
+			ctx.no_polymorphic_errors = true;
+			ctx.allow_polymorphic_types = is_type_polymorphic(pt);
+			ctx.hide_polymorphic_errors = true;
+
+			Operand candidate_operand = overload_operand;
+			bool is_candidate = check_call_arguments_single(&ctx, call, &candidate_operand,
+				p, pt,
+				positional_operands, named_operands,
+				CallArgumentErrorMode::NoErrors,
+				&data, true);
+			if (is_candidate) {
+				has_candidate = true;
+				selected_proc_entity = data.gen_entity != nullptr ? data.gen_entity : p;
+				selected_proc_type = selected_proc_entity != nullptr ? base_type(selected_proc_entity->type) : pt;
+				break;
+			}
+		}
+		c->in_proc_group = false;
+
+		if (!has_candidate) {
+			return false;
+		}
+
+		check_call_expr(c, &overload_operand, call, nullptr, slice_from_array(args), ProcInlining_none, ProcTailing_none, nullptr);
+		if (overload_operand.mode == Addressing_Invalid) {
+			return false;
+		}
+		if (selected_proc_type != nullptr &&
+		    selected_proc_type->kind == Type_Proc &&
+		    selected_proc_type->Proc.optional_ok &&
+		    selected_proc_type->Proc.result_count > 0 &&
+		    selected_proc_type->Proc.results != nullptr) {
+			TypeTuple *results = &selected_proc_type->Proc.results->Tuple;
+			if (results->variables.count >= 2) {
+				overload_operand.mode = Addressing_OptionalOk;
+				if (results->variables.count == 2) {
+					overload_operand.type = results->variables[0]->type;
+				} else {
+					auto payload = slice(results->variables, 0, results->variables.count-1);
+					if (payload.count == 1) {
+						overload_operand.type = payload[0]->type;
+					} else {
+						overload_operand.type = alloc_type_tuple();
+						overload_operand.type->Tuple.variables = payload;
+					}
+				}
+				if (call->kind == Ast_CallExpr) {
+					call->CallExpr.optional_ok_one = true;
+				}
+			}
+		}
+
+		set_overloaded_operator_call_expr(c, node, call);
+		*x = overload_operand;
+		x->expr = node;
+		return true;
+	};
+
+	if (prefer_address_overload && can_use_address) {
+		GB_ASSERT(addr_expr != nullptr);
+		if (try_call(addr_expr, addr_operand)) {
+			return true;
+		}
+	}
+
+	if (require_address_overload && can_use_direct && try_call(ie->expr, *x)) {
+		return true;
+	}
+
+	if (!require_address_overload && can_use_direct && try_call(ie->expr, *x)) {
+		return true;
+	}
+
+	if (can_use_address) {
+		GB_ASSERT(addr_expr != nullptr);
+		if (try_call(addr_expr, addr_operand)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+gb_internal bool check_unary_address_index_expr_custom_overload(CheckerContext *c, Operand *o, Ast *node) {
+	ast_node(ue, UnaryExpr, node);
+	Ast *ue_expr = unparen_expr(ue->expr);
+	if (ue_expr == nullptr || ue_expr->kind != Ast_IndexExpr) {
+		return false;
+	}
+
+	ast_node(ie, IndexExpr, ue_expr);
+	Operand receiver = {};
+	check_expr(c, &receiver, ie->expr);
+	if (receiver.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	if (!check_index_expr_custom_overload(c, &receiver, ue_expr, ie, true, true)) {
+		return false;
+	}
+
+	if (receiver.mode == Addressing_OptionalOk && is_type_pointer(receiver.type)) {
+		receiver.mode = Addressing_OptionalOkPtr;
+		*o = receiver;
+		return true;
+	}
+
+	if (receiver.mode == Addressing_Value && is_type_tuple(receiver.type)) {
+		Type *tuple = receiver.type;
+		auto vars = tuple->Tuple.variables;
+		if (vars.count >= 2) {
+			Type *payload_type = vars[0]->type;
+			Type *ok_type = vars[vars.count-1]->type;
+			if (is_type_boolean(ok_type)) {
+				receiver.mode = is_type_pointer(payload_type) ? Addressing_OptionalOkPtr : Addressing_OptionalOk;
+				receiver.type = payload_type;
+				*o = receiver;
+				return true;
+			}
+		}
+	}
+
+	if (receiver.mode == Addressing_OptionalOk || receiver.mode == Addressing_OptionalOkPtr || receiver.mode == Addressing_Value) {
+		*o = receiver;
+		return true;
+	}
+
+	return false;
+}
+
+gb_internal bool maybe_has_index_expr_custom_overload_candidate(CheckerContext *c, Operand const *expr_operand) {
+	if (expr_operand == nullptr || expr_operand->type == nullptr || expr_operand->type == t_invalid) {
+		return true;
+	}
+
+	Type *receiver_type = default_type(expr_operand->type);
+	if (receiver_type == nullptr || receiver_type == t_invalid || is_type_untyped(receiver_type)) {
+		return true;
+	}
+
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	auto const &procs = c->info->index_operator_get_overloads;
+	if (procs.count == 0) {
+		return false;
+	}
+
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+		if (pt->Proc.variadic || pt->Proc.param_count < 2 || pt->Proc.params == nullptr) {
+			continue;
+		}
+
+		auto vars = pt->Proc.params->Tuple.variables;
+		if (vars.data == nullptr || vars.count < 2) {
+			continue;
+		}
+
+		Type *a = vars[0]->type;
+		if (a == nullptr) {
+			continue;
+		}
+
+		if (receiver_type_matches_custom_index_overload_param(c, a, receiver_type)) {
+			return true;
+		}
+		Type *receiver_ptr_type = alloc_type_pointer(receiver_type);
+		if (receiver_type_matches_custom_index_overload_param(c, a, receiver_ptr_type)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand *x, Ast *index_expr_node, Ast *value_expr) {
+	ast_node(ie, IndexExpr, index_expr_node);
+	if (ie->index == nullptr) {
+		return false;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto procs = index_set_operator_overload_procs_cloned(c, temporary_allocator());
+	if (procs.count == 0) {
+		return false;
+	}
+
+	Operand expr_operand = {};
+	check_expr(c, &expr_operand, ie->expr);
+	if (expr_operand.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	Operand index_operand = {};
+	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type);
+	if (index_type_hint != nullptr) {
+		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
+	} else {
+		check_expr(c, &index_operand, ie->index);
+	}
+	if (index_operand.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	Token proc_token = make_token_ident(str_lit("[]="));
+	proc_token.pos = ie->open.pos;
+
+	Entity proc_group = {};
+	proc_group.kind = Entity_ProcGroup;
+	proc_group.state = EntityState_Resolved;
+	proc_group.token = proc_token;
+	proc_group.scope = c->scope;
+	proc_group.ProcGroup.entities = procs;
+
+	auto receiver_matches = [&](Type *param_type, Type *receiver_type) -> bool {
+		if (param_type == nullptr || receiver_type == nullptr ||
+		    param_type == t_invalid || receiver_type == t_invalid) {
+			return false;
+		}
+		if (are_types_identical(param_type, receiver_type)) {
+			return true;
+		}
+		if (is_type_polymorphic(param_type)) {
+			CheckerContext ctx = *c;
+			return is_polymorphic_type_assignable(&ctx, param_type, receiver_type, false, false);
+		}
+		return false;
+	};
+
+	Type *address_type = nullptr;
+	if (!check_is_not_addressable(c, &expr_operand)) {
+		address_type = alloc_type_pointer(expr_operand.type);
+	}
+
+	bool can_use_direct = false;
+	bool can_use_address = false;
+
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+		if (pt->Proc.variadic || pt->Proc.param_count < 3) {
+			continue;
+		}
+
+		Type *param0 = pt->Proc.params->Tuple.variables[0]->type;
+		if (receiver_matches(param0, expr_operand.type)) {
+			can_use_direct = true;
+		}
+		if (address_type != nullptr && receiver_matches(param0, address_type)) {
+			can_use_address = true;
+		}
+	}
+
+	if (!can_use_direct && !can_use_address) {
+		return false;
+	}
+
+	Ast *addr_expr = nullptr;
+	if (can_use_address) {
+		Token and_token = {Token_And, 0, token_strings[Token_And], ie->open.pos};
+		addr_expr = ast_unary_expr(index_expr_node->file(), and_token, ie->expr);
+
+		Operand addr_operand = {};
+		check_expr(c, &addr_operand, addr_expr);
+		if (addr_operand.mode == Addressing_Invalid) {
+			can_use_address = false;
+		}
+	}
+	if (!can_use_direct && !can_use_address) {
+		return false;
+	}
+
+	auto try_call = [&](Ast *first_arg) -> bool {
+		auto args = array_make<Ast *>(temporary_allocator(), 0, 3);
+		array_add(&args, first_arg);
+		array_add(&args, ie->index);
+		array_add(&args, value_expr);
+
+		Token open  = {Token_OpenParen,  0, token_strings[Token_OpenParen],  ie->open.pos};
+		Token close = {Token_CloseParen, 0, token_strings[Token_CloseParen], ie->open.pos};
+		Ast *proc_expr = ast_ident(index_expr_node->file(), proc_token);
+		Ast *call = ast_call_expr(index_expr_node->file(), proc_expr, args, open, close, {});
+		ast_node(ce, CallExpr, call);
+		AstSplitArgs *split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+		split_args->positional = slice_from_array(args);
+		split_args->named = {};
+		ce->split_args = split_args;
+
+		Operand overload_operand = {};
+		overload_operand.mode = Addressing_ProcGroup;
+		overload_operand.proc_group = &proc_group;
+		overload_operand.expr = proc_expr;
+
+		check_call_expr(c, &overload_operand, call, nullptr, slice_from_array(args), ProcInlining_none, ProcTailing_none, nullptr);
+		if (overload_operand.mode != Addressing_Invalid) {
+			*x = overload_operand;
+			x->expr = call;
+			return true;
+		}
+		return false;
+	};
+
+	if (can_use_direct) {
+		(void)try_call(ie->expr);
+		return true;
+	}
+
+	if (can_use_address) {
+		GB_ASSERT(addr_expr != nullptr);
+		(void)try_call(addr_expr);
+		return true;
+	}
+
+	return false;
+}
+
 
 gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, Operand *operand, Ast *call) {
 	ast_node(ce, CallExpr, call);
@@ -9446,6 +10198,10 @@ gb_internal void check_promote_optional_ok(CheckerContext *c, Operand *x, Type *
 	}
 
 	Ast *expr = unparen_expr(x->expr);
+	Ast *overload_call = nullptr;
+	if (expr->kind == Ast_IndexExpr && c->info != nullptr) {
+		overload_call = get_overloaded_operator_call_expr(c->info, expr);
+	}
 
 	if (expr->kind == Ast_CallExpr) {
 		Type *pt = base_type(type_of_expr(expr->CallExpr.proc));
@@ -9469,6 +10225,12 @@ gb_internal void check_promote_optional_ok(CheckerContext *c, Operand *x, Type *
 	if (ok_type_) *ok_type_ = tuple->Tuple.variables[1]->type;
 
 	if (change_operand) {
+		if (overload_call != nullptr && overload_call->kind == Ast_CallExpr) {
+			overload_call->CallExpr.optional_ok_one = false;
+		}
+		if (expr->kind == Ast_CallExpr) {
+			expr->CallExpr.optional_ok_one = false;
+		}
 		add_type_and_value(c, x->expr, x->mode, tuple, x->value);
 		x->type = tuple;
 		GB_ASSERT(is_type_tuple(type_of_expr(x->expr)));
@@ -11888,6 +12650,10 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 	bool is_ptr = is_type_pointer(o->type);
 	bool is_const = o->mode == Addressing_Constant;
 
+	if (check_index_expr_custom_overload(c, o, node, ie)) {
+		return kind;
+	}
+
 	if (is_type_map(t)) {
 		Operand key = {};
 		if (is_type_typeid(t->Map.key)) {
@@ -12504,6 +13270,10 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 		Type *th = type_hint;
 		if (ue->op.kind == Token_And) {
 			th = type_deref(th);
+			if (check_unary_address_index_expr_custom_overload(c, o, node)) {
+				o->expr = node;
+				return Expr_Expr;
+			}
 		}
 		check_expr_base(c, o, ue->expr, th);
 		node->viral_state_flags |= ue->expr->viral_state_flags;

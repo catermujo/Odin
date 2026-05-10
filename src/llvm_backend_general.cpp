@@ -1131,22 +1131,15 @@ gb_internal bool lb_try_get_bit_field_word_fast_path_info(lbAddr const &addr, Ty
 gb_internal bool lb_try_store_addr_bit_field_word_fast(lbProcedure *p, lbAddr const &addr, lbValue value) {
 	Type *backing_type = nullptr;
 	Type *backing_unsigned_type = nullptr;
-	i64 backing_bit_size = 0;
-	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, &backing_bit_size)) {
+	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, nullptr)) {
 		return false;
 	}
-
-	GB_ASSERT(addr.bitfield.bit_size >= 1);
 
 	i64 bit_size = addr.bitfield.bit_size;
 	i64 bit_offset = addr.bitfield.bit_offset;
 
 	u64 value_mask_u64 = bit_size == 64 ? ~0ull : ((1ull<<cast(u64)bit_size)-1ull);
-	u64 field_mask_u64 = value_mask_u64;
-	if (bit_offset > 0) {
-		field_mask_u64 <<= cast(u64)bit_offset;
-	}
-	u64 clear_mask_u64 = ~field_mask_u64;
+	u64 clear_mask_u64 = ~(value_mask_u64 << cast(u64)bit_offset);
 
 	lbValue backing_ptr = lb_emit_conv(p, addr.addr, alloc_type_pointer(backing_type));
 	lbValue raw = lb_emit_load(p, backing_ptr);
@@ -1175,8 +1168,6 @@ gb_internal bool lb_try_load_addr_bit_field_word_fast(lbProcedure *p, lbAddr con
 	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, &backing_bit_size)) {
 		return false;
 	}
-
-	GB_ASSERT(addr.bitfield.bit_size >= 1);
 
 	i64 bit_size = addr.bitfield.bit_size;
 	i64 bit_offset = addr.bitfield.bit_offset;
@@ -1917,15 +1908,16 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 	type = base_type(original_type);
 	GB_ASSERT(type->kind == Type_Proc);
 
-	mutex_lock(&m->func_raw_types_mutex);
-
-	LLVMTypeRef *found = map_get(&m->func_raw_types, type);
-	if (found) {
+	{
+		mutex_lock(&m->func_raw_types_mutex);
+		LLVMTypeRef *found = map_get(&m->func_raw_types, type);
+		if (found) {
+			LLVMTypeRef res = *found;
+			mutex_unlock(&m->func_raw_types_mutex);
+			return res;
+		}
 		mutex_unlock(&m->func_raw_types_mutex);
-		return *found;
 	}
-
-	mutex_unlock(&m->func_raw_types_mutex);
 
 	unsigned param_count = 0;
 
@@ -2028,7 +2020,6 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 		}
 	}
 
-	map_set(&m->function_type_map, type, ft);
 	LLVMTypeRef new_abi_fn_type = lb_function_type_to_llvm_raw(ft, type->Proc.c_vararg);
 
 	GB_ASSERT_MSG(LLVMGetTypeContext(new_abi_fn_type) == m->ctx,
@@ -2036,6 +2027,13 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 	              LLVMGetTypeContext(new_abi_fn_type), m->ctx);
 
 	mutex_lock(&m->func_raw_types_mutex);
+	LLVMTypeRef *found = map_get(&m->func_raw_types, type);
+	if (found) {
+		LLVMTypeRef res = *found;
+		mutex_unlock(&m->func_raw_types_mutex);
+		return res;
+	}
+	map_set(&m->function_type_map, type, ft);
 	map_set(&m->func_raw_types, type, new_abi_fn_type);
 	mutex_unlock(&m->func_raw_types_mutex);
 

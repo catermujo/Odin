@@ -1088,6 +1088,9 @@ gb_internal void lb_build_range_tuple(lbProcedure *p, AstRangeStmt *rs, Scope *s
 	if (rs->init != nullptr) {
 		lb_build_stmt(p, rs->init);
 	}
+	if (Entity *state_entity = get_range_stmt_iterator_overload_state_entity(p->module->info, cast(Ast *)rs)) {
+		lb_add_local(p, state_entity->type, state_entity, true);
+	}
 
 	lbBlock *loop = lb_create_block(p, "for.tuple.loop");
 	lb_emit_jump(p, loop);
@@ -3370,7 +3373,16 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 		lb_loop_end(p, loop_data);
 	}
 }
-gb_internal void lb_build_assign_stmt(lbProcedure *p, AstAssignStmt *as) {
+gb_internal void lb_build_assign_stmt(lbProcedure *p, Ast *node) {
+	ast_node(as, AssignStmt, node);
+
+	if (p->module->info != nullptr) {
+		if (Ast *overloaded_call = get_assignment_overloaded_call_expr(p->module->info, node)) {
+			lb_build_call_expr(p, overloaded_call);
+			return;
+		}
+	}
+
 	if (as->op.kind == Token_Eq) {
 		if (LB_ENABLE_ADVANCED_RVO) {
 			// @RVO for single assignments `x = call()`
@@ -3433,6 +3445,16 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, AstAssignStmt *as) {
 		}
 		lb_build_assignment(p, lvals, as->rhs);
 		return;
+	}
+
+	if (p->module->info != nullptr) {
+		if (Ast *binary_expr = get_assignment_operation_expr(p->module->info, node)) {
+			lbAddr lhs = lb_build_addr(p, as->lhs[0]);
+			Type *lhs_type = lb_addr_type(lhs);
+			lbValue new_value = lb_emit_conv(p, lb_build_expr(p, binary_expr), lhs_type);
+			lb_addr_store(p, lhs, new_value);
+			return;
+		}
 	}
 
 	GB_ASSERT(as->lhs.count == 1);
@@ -3683,7 +3705,7 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 	case_end;
 
 	case_ast_node(as, AssignStmt, node);
-		lb_build_assign_stmt(p, as);
+		lb_build_assign_stmt(p, node);
 	case_end;
 
 	case_ast_node(es, ExprStmt, node);

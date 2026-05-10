@@ -2078,6 +2078,12 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 
 	TypeAndValue tv = type_and_value_of_expr(expr);
 
+	if (p->module->info != nullptr) {
+		if (Ast *overload_call = get_overloaded_operator_call_expr(p->module->info, expr)) {
+			return lb_build_call_expr(p, overload_call);
+		}
+	}
+
 	if (is_type_matrix(be->left->tav.type) || is_type_matrix(be->right->tav.type)) {
 		lbValue left = lb_build_expr(p, be->left);
 		lbValue right = lb_build_expr(p, be->right);
@@ -4303,6 +4309,51 @@ gb_internal lbValue lb_build_unary_and(lbProcedure *p, Ast *expr) {
 	auto tv = type_and_value_of_expr(expr);
 
 	Ast *ue_expr = unparen_expr(ue->expr);
+	if (ue_expr->kind == Ast_IndexExpr &&
+	    (tv.mode == Addressing_OptionalOk || tv.mode == Addressing_OptionalOkPtr) &&
+	    p->module->info != nullptr) {
+		if (Ast *overload_call = get_overloaded_operator_call_expr(p->module->info, ue_expr)) {
+			bool reset_optional_ok_one = false;
+			bool prev_optional_ok_one = false;
+			if (is_type_tuple(tv.type) && overload_call->kind == Ast_CallExpr) {
+				prev_optional_ok_one = overload_call->CallExpr.optional_ok_one;
+				overload_call->CallExpr.optional_ok_one = false;
+				reset_optional_ok_one = true;
+			}
+
+			lbValue got = lb_build_call_expr(p, overload_call);
+			if (reset_optional_ok_one) {
+				overload_call->CallExpr.optional_ok_one = prev_optional_ok_one;
+			}
+
+			if (is_type_tuple(tv.type)) {
+				if (is_type_tuple(got.type)) {
+					return got;
+				}
+
+				if (tv.mode == Addressing_OptionalOkPtr && is_type_pointer(got.type)) {
+					Type *tuple = tv.type;
+					lbValue ok = lb_emit_comp_against_nil(p, Token_NotEq, got);
+					ok = lb_emit_conv(p, ok, tuple->Tuple.variables[1]->type);
+
+					lbAddr res = lb_add_local_generated(p, tuple, false);
+					lbValue gep0 = lb_emit_struct_ep(p, res.addr, 0);
+					lbValue gep1 = lb_emit_struct_ep(p, res.addr, 1);
+					lb_emit_store(p, gep0, got);
+					lb_emit_store(p, gep1, ok);
+					return lb_addr_load(p, res);
+				}
+
+				GB_PANIC("Addressed index overload expected tuple result, got: %s", type_to_string(got.type));
+			}
+
+			if (is_type_tuple(got.type)) {
+				return lb_emit_tuple_ev(p, got, 0);
+			}
+			return got;
+		}
+	}
+
 	if (ue_expr->kind == Ast_IndexExpr && tv.mode == Addressing_OptionalOkPtr && is_type_tuple(tv.type)) {
 		Type *tuple = tv.type;
 
@@ -4932,6 +4983,11 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	case_end;
 
 	case_ast_node(ie, IndexExpr, expr);
+		if (p->module->info != nullptr) {
+			if (Ast *overload_call = get_overloaded_operator_call_expr(p->module->info, expr)) {
+				return lb_build_call_expr(p, overload_call);
+			}
+		}
 		return lb_addr_load(p, lb_build_addr(p, expr));
 	case_end;
 
@@ -5265,6 +5321,16 @@ gb_internal void lb_build_addr_compound_lit_assign_array(lbProcedure *p, Array<l
 
 gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 	ast_node(ie, IndexExpr, expr);
+
+	if (p->module->info != nullptr) {
+		if (Ast *overload_call = get_overloaded_operator_call_expr(p->module->info, expr)) {
+			lbValue v = lb_build_call_expr(p, overload_call);
+			if (is_type_pointer(v.type)) {
+				return lb_addr(v);
+			}
+			return lb_addr(lb_address_from_load_or_generate_local(p, v));
+		}
+	}
 
 	Type *t = base_type(type_of_expr(ie->expr));
 
