@@ -2684,16 +2684,16 @@ gb_internal bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc
 
 	bool optional_ok = (pt->tags & ProcTag_optional_ok) != 0;
 	if (optional_ok) {
-		if (result_count != 2) {
-			error(proc_type_node, "A procedure type with the #optional_ok tag requires 2 return values, got %td", result_count);
+		if (result_count < 2) {
+			error(proc_type_node, "A procedure type with the #optional_ok tag requires at least 2 return values, got %td", result_count);
 		} else {
-			Entity *second = results->Tuple.variables[1];
-			if (is_type_polymorphic(second->type)) {
+			Entity *last = results->Tuple.variables[result_count-1];
+			if (is_type_polymorphic(last->type)) {
 				// ignore
-			} else if (is_type_boolean(second->type)) {
+			} else if (is_type_boolean(last->type)) {
 				// GOOD
 			} else {
-				error(second->token, "Second return value of an #optional_ok procedure must be a boolean, got %s", type_to_string(second->type));
+				error(last->token, "Last return value of an #optional_ok procedure must be a boolean, got %s", type_to_string(last->type));
 			}
 		}
 	}
@@ -2702,15 +2702,15 @@ gb_internal bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc
 			error(proc_type_node, "A procedure type cannot have both an #optional_ok tag and #optional_allocator_error");
 		}
 		optional_ok = true;
-		if (result_count != 2) {
-			error(proc_type_node, "A procedure type with the #optional_allocator_error tag requires 2 return values, got %td", result_count);
+		if (result_count < 2) {
+			error(proc_type_node, "A procedure type with the #optional_allocator_error tag requires at least 2 return values, got %td", result_count);
 		} else {
 			init_mem_allocator(c->checker);
 
-			Type *type = results->Tuple.variables[1]->type;
+			Type *type = results->Tuple.variables[result_count-1]->type;
 			if (!are_types_identical(type, t_allocator_error)) {
 				gbString t = type_to_string(type);
-				error(proc_type_node, "A procedure type with the #optional_allocator_error expects a `runtime.Allocator_Error`, got '%s'", t);
+				error(proc_type_node, "A procedure type with the #optional_allocator_error expects `runtime.Allocator_Error` as the last return value, got '%s'", t);
 				gb_string_free(t);
 			}
 		}
