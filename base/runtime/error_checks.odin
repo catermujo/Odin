@@ -146,6 +146,34 @@ matrix_bounds_check_error :: proc "contextless" (file: string, line, column: i32
 	handle_error(file, line, column, row_index, column_index, row_count, column_count)
 }
 
+optional_value_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
+	if ok {
+		return
+	}
+	@(cold, no_instrumentation)
+	handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
+		p := context.assertion_failure_proc
+		if p == nil {
+			p = default_assertion_failure_proc
+		}
+		p("optional value", "Invalid optional value", Source_Code_Location{file, line, column, ""})
+	}
+	handle_error(file, line, column)
+}
+
+optional_value_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32) {
+	if ok {
+		return
+	}
+	@(cold, no_instrumentation)
+	handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
+		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_string(" Invalid optional value\n")
+		type_assertion_trap_contextless()
+	}
+	handle_error(file, line, column)
+}
+
 
 when ODIN_NO_RTTI {
 	downcast_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
