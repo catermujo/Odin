@@ -2075,11 +2075,17 @@ gb_internal SubstResult subst_unify(CheckerContext *c, Type *pattern, Type *sour
 		if (pb->kind == Type_Struct) {
 			s_parent = pb->Struct.polymorphic_parent;
 			t_parent = sb->Struct.polymorphic_parent;
+			if (s_parent == nullptr || s_parent != t_parent) {
+				return Subst_Unhandled;
+			}
 			s_tuple  = get_record_polymorphic_params(pb);
 			t_tuple  = get_record_polymorphic_params(sb);
 		} else if (pb->kind == Type_Union) {
 			s_parent = pb->Union.polymorphic_parent;
 			t_parent = sb->Union.polymorphic_parent;
+			if (s_parent == nullptr || s_parent != t_parent) {
+				return Subst_Unhandled;
+			}
 			s_tuple  = get_record_polymorphic_params(pb);
 			t_tuple  = get_record_polymorphic_params(sb);
 		} else {
