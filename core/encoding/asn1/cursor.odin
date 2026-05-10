@@ -425,14 +425,19 @@ oid_to_string :: proc(raw: []byte, allocator := context.allocator) -> (str: stri
 			case:
 				arc1, arc2 = 2, acc - 80
 			}
-			written += strings.write_u64(&sb, arc1)
-			written += strings.write_byte(&sb, '.')
-			written += strings.write_u64(&sb, arc2)
+			n, _ := strings.write_u64(&sb, arc1)
+			written += n
+			n, _ = strings.write_byte(&sb, '.')
+			written += n
+			n, _ = strings.write_u64(&sb, arc2)
+			written += n
 			expected += _decimal_len(arc1) + 1 + _decimal_len(arc2)
 			first = false
 		} else {
-			written += strings.write_byte(&sb, '.')
-			written += strings.write_u64(&sb, acc)
+			n, _ := strings.write_byte(&sb, '.')
+			written += n
+			n, _ = strings.write_u64(&sb, acc)
+			written += n
 			expected += 1 + _decimal_len(acc)
 		}
 		acc = 0
