@@ -1,3 +1,5 @@
+gb_internal bool check_no_copy_assignment(Operand const &o, String const &context);
+
 gb_internal bool is_diverging_expr(Ast *expr) {
 	expr = unparen_expr(expr);
 	if (expr->kind != Ast_CallExpr) {
@@ -429,6 +431,7 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 	}
 
 	Ast *node = unparen_expr(lhs->expr);
+	check_no_copy_assignment(*rhs, context_name);
 
 	// NOTE(bill): Ignore assignments to '_'
 	if (is_blank_ident(node)) {
