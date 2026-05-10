@@ -1631,6 +1631,16 @@ gb_internal void init_checker_info(CheckerInfo *i) {
 	string_map_init(&i->load_file_cache);
 	array_init(&i->all_procedures, a);
 	mpsc_init(&i->all_procedures_queue, a);
+	for (isize token = 0; token < Token_Count; token++) {
+		array_init(&i->operator_overloads[token], a);
+	}
+	array_init(&i->index_operator_get_overloads, a);
+	array_init(&i->index_operator_set_overloads, a);
+	array_init(&i->iterator_operator_overloads, a);
+	map_init(&i->overloaded_operator_calls);
+	map_init(&i->assignment_operation_expr_map);
+	map_init(&i->assignment_overloaded_call_expr_map);
+	map_init(&i->range_stmt_iterator_overload_state_map);
 
 	mpsc_init(&i->entity_queue, a); // 1<<20);
 	mpsc_init(&i->definition_queue, a); //); // 1<<20);
@@ -1663,6 +1673,16 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	array_free(&i->defineables);
 
 	array_free(&i->all_procedures);
+	for (isize token = 0; token < Token_Count; token++) {
+		array_free(&i->operator_overloads[token]);
+	}
+	array_free(&i->index_operator_get_overloads);
+	array_free(&i->index_operator_set_overloads);
+	array_free(&i->iterator_operator_overloads);
+	map_destroy(&i->overloaded_operator_calls);
+	map_destroy(&i->assignment_operation_expr_map);
+	map_destroy(&i->assignment_overloaded_call_expr_map);
+	map_destroy(&i->range_stmt_iterator_overload_state_map);
 
 	mpsc_destroy(&i->all_procedures_queue);
 
@@ -3502,6 +3522,217 @@ gb_internal Array<Entity *> proc_group_entities_cloned(CheckerContext *c, Operan
 	return array_clone(permanent_allocator(), entities);
 }
 
+gb_internal bool token_kind_is_custom_overloadable_binary_operator(TokenKind kind) {
+	switch (kind) {
+	case Token_Add:
+	case Token_Sub:
+	case Token_Mul:
+	case Token_Quo:
+		return true;
+	}
+	return false;
+}
+
+struct ParsedOperatorOverload {
+	OperatorOverloadKind kind;
+	TokenKind binary_kind;
+};
+
+gb_internal ParsedOperatorOverload parse_operator_overload_string(String op) {
+	ParsedOperatorOverload parsed = {};
+	parsed.kind = OperatorOverloadKind_Invalid;
+	parsed.binary_kind = Token_Invalid;
+
+	if (op.len == 0) {
+		return parsed;
+	}
+	if (op == str_lit("[]")) {
+		parsed.kind = OperatorOverloadKind_IndexGet;
+		return parsed;
+	}
+	if (op == str_lit("[]=")) {
+		parsed.kind = OperatorOverloadKind_IndexSet;
+		return parsed;
+	}
+	if (op == str_lit("in") || op == str_lit("for in")) {
+		parsed.kind = OperatorOverloadKind_Iterator;
+		return parsed;
+	}
+
+	for (i32 kind = Token__OperatorBegin+1; kind < Token__OperatorEnd; kind++) {
+		if (!token_kind_is_custom_overloadable_binary_operator(cast(TokenKind)kind)) {
+			continue;
+		}
+		if (token_strings[kind] == op) {
+			parsed.kind = OperatorOverloadKind_Binary;
+			parsed.binary_kind = cast(TokenKind)kind;
+			return parsed;
+		}
+	}
+	return parsed;
+}
+
+gb_internal void add_operator_overload_proc(CheckerContext *c, TokenKind kind, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+
+	if (!token_kind_is_custom_overloadable_binary_operator(kind)) {
+		return;
+	}
+
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	Array<Entity *> *procs = &c->info->operator_overloads[kind];
+	for (Entity *e : *procs) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(procs, proc);
+}
+
+gb_internal Array<Entity *> operator_overload_procs_cloned(CheckerContext *c, TokenKind kind, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	if (!token_kind_is_custom_overloadable_binary_operator(kind)) {
+		return {};
+	}
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->operator_overloads[kind]);
+}
+
+gb_internal void add_index_get_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->index_operator_get_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->index_operator_get_overloads, proc);
+}
+
+gb_internal void add_index_set_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->index_operator_set_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->index_operator_set_overloads, proc);
+}
+
+gb_internal Array<Entity *> index_get_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->index_operator_get_overloads);
+}
+
+gb_internal Array<Entity *> index_set_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->index_operator_set_overloads);
+}
+
+gb_internal void add_iterator_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->iterator_operator_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->iterator_operator_overloads, proc);
+}
+
+gb_internal Array<Entity *> iterator_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->iterator_operator_overloads);
+}
+
+gb_internal void set_overloaded_operator_call_expr(CheckerContext *c, Ast *expr, Ast *call) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(expr != nullptr);
+	GB_ASSERT(call != nullptr);
+	MUTEX_GUARD(&c->info->overloaded_operator_call_mutex);
+	map_set(&c->info->overloaded_operator_calls, expr, call);
+}
+
+gb_internal Ast *get_overloaded_operator_call_expr(CheckerInfo *info, Ast *expr) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(expr != nullptr);
+	MUTEX_GUARD(&info->overloaded_operator_call_mutex);
+	Ast **found = map_get(&info->overloaded_operator_calls, expr);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_assignment_operation_expr(CheckerContext *c, Ast *assign_stmt, Ast *binary_expr) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	GB_ASSERT(binary_expr != nullptr);
+	MUTEX_GUARD(&c->info->assignment_operation_expr_mutex);
+	map_set(&c->info->assignment_operation_expr_map, assign_stmt, binary_expr);
+}
+
+gb_internal Ast *get_assignment_operation_expr(CheckerInfo *info, Ast *assign_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	MUTEX_GUARD(&info->assignment_operation_expr_mutex);
+	Ast **found = map_get(&info->assignment_operation_expr_map, assign_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_assignment_overloaded_call_expr(CheckerContext *c, Ast *assign_stmt, Ast *call_expr) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	GB_ASSERT(call_expr != nullptr);
+	MUTEX_GUARD(&c->info->assignment_overloaded_call_expr_mutex);
+	map_set(&c->info->assignment_overloaded_call_expr_map, assign_stmt, call_expr);
+}
+
+gb_internal Ast *get_assignment_overloaded_call_expr(CheckerInfo *info, Ast *assign_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	MUTEX_GUARD(&info->assignment_overloaded_call_expr_mutex);
+	Ast **found = map_get(&info->assignment_overloaded_call_expr_map, assign_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_range_stmt_iterator_overload_state_entity(CheckerContext *c, Ast *range_stmt, Entity *state_entity) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(range_stmt != nullptr);
+	GB_ASSERT(state_entity != nullptr);
+	MUTEX_GUARD(&c->info->range_stmt_iterator_overload_state_mutex);
+	map_set(&c->info->range_stmt_iterator_overload_state_map, range_stmt, state_entity);
+}
+
+gb_internal Entity *get_range_stmt_iterator_overload_state_entity(CheckerInfo *info, Ast *range_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(range_stmt != nullptr);
+	MUTEX_GUARD(&info->range_stmt_iterator_overload_state_mutex);
+	Entity **found = map_get(&info->range_stmt_iterator_overload_state_map, range_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
 
 
 
@@ -4118,7 +4349,33 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		}
 		ac->require_results = true;
 		return true;
-	} else if (name == "disabled") {
+	} else if (name == "operator") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+		if (ev.kind != ExactValue_String) {
+			error(elem, "Expected a string value for '%.*s'", LIT(name));
+			return false;
+		}
+		if (ac->has_operator_overload) {
+			error(elem, "Previous usage of an 'operator' attribute");
+			return false;
+		}
+
+			ParsedOperatorOverload parsed = parse_operator_overload_string(ev.value_string);
+			if (parsed.kind == OperatorOverloadKind_Invalid) {
+				ERROR_BLOCK();
+				error(elem, "Invalid operator '%.*s' for '%.*s'", LIT(ev.value_string), LIT(name));
+				error_line("\tSupported operators for now: '+', '-', '*', '/', '[]', '[]=', 'in'\n");
+				if (ev.value_string == "==" || ev.value_string == "!=") {
+					error_line("\tNote: '==' and '!=' currently use Odin's default comparison rules\n");
+				}
+				return false;
+			}
+
+			ac->has_operator_overload = true;
+			ac->operator_overload_kind = parsed.kind;
+			ac->operator_overload_binary_kind = parsed.binary_kind;
+			return true;
+		} else if (name == "disabled") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 
 		if (ev.kind == ExactValue_Bool) {

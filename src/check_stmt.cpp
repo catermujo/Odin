@@ -1765,6 +1765,200 @@ gb_internal bool all_operands_valid(Array<Operand> const &operands) {
 	return true;
 }
 
+gb_internal bool check_range_stmt_custom_iterator_overload(CheckerContext *ctx, AstRangeStmt *rs, Operand *container_operand) {
+	GB_ASSERT(ctx != nullptr);
+	GB_ASSERT(rs != nullptr);
+	GB_ASSERT(container_operand != nullptr);
+
+	if (container_operand->mode == Addressing_Invalid || container_operand->mode == Addressing_Type) {
+		return false;
+	}
+	if (container_operand->type == nullptr || container_operand->type == t_invalid) {
+		return false;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto procs = iterator_operator_overload_procs_cloned(ctx, temporary_allocator());
+	if (procs.count == 0) {
+		return false;
+	}
+
+	AstFile *f = rs->expr->file();
+	Token proc_token = make_token_ident(str_lit("in"));
+	proc_token.pos = rs->in_token.pos;
+
+	Entity proc_group = {};
+	proc_group.kind = Entity_ProcGroup;
+	proc_group.state = EntityState_Resolved;
+	proc_group.token = proc_token;
+	proc_group.scope = ctx->scope;
+	proc_group.ProcGroup.entities = procs;
+
+	// Placeholder for candidate probing before we add a hidden state variable.
+	Token state_token = make_token_ident(str_lit("__for_in_state"));
+	state_token.pos = rs->in_token.pos;
+	Ast *state_ident = ast_ident(f, state_token);
+	Token and_token = {Token_And, 0, token_strings[Token_And], rs->in_token.pos};
+	Ast *state_addr = ast_unary_expr(f, and_token, state_ident);
+
+	auto args = array_make<Ast *>(temporary_allocator(), 0, 2);
+	array_add(&args, rs->expr);
+	array_add(&args, state_addr);
+
+	Token open  = {Token_OpenParen,  0, token_strings[Token_OpenParen],  rs->in_token.pos};
+	Token close = {Token_CloseParen, 0, token_strings[Token_CloseParen], rs->in_token.pos};
+	Ast *proc_expr = ast_ident(f, proc_token);
+	Ast *call = ast_call_expr(f, proc_expr, args, open, close, {});
+	ast_node(ce, CallExpr, call);
+	AstSplitArgs *split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+	split_args->positional = slice_from_array(args);
+	split_args->named = {};
+	ce->split_args = split_args;
+
+	Operand overload_operand = {};
+	overload_operand.mode = Addressing_ProcGroup;
+	overload_operand.proc_group = &proc_group;
+	overload_operand.expr = proc_expr;
+
+	Operand state_ptr_operand = {};
+	state_ptr_operand.mode = Addressing_Value;
+	state_ptr_operand.type = alloc_type_pointer(t_int);
+	state_ptr_operand.expr = state_addr;
+
+	auto positional_operands = array_make<Operand>(temporary_allocator(), 0, 2);
+	array_add(&positional_operands, *container_operand);
+	array_add(&positional_operands, state_ptr_operand);
+	auto named_operands = array_make<Operand>(temporary_allocator(), 0, 0);
+
+	struct IteratorOverloadCandidate {
+		Entity *proc;
+		isize value_count;
+	};
+
+	auto candidates = array_make<IteratorOverloadCandidate>(temporary_allocator(), 0, procs.count);
+	ctx->in_proc_group = true;
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+
+		CallArgumentData data = {};
+		CheckerContext probe = *ctx;
+		probe.no_polymorphic_errors = true;
+		probe.allow_polymorphic_types = is_type_polymorphic(pt);
+		probe.hide_polymorphic_errors = true;
+
+		Operand candidate_operand = overload_operand;
+		bool is_candidate = check_call_arguments_single(&probe, call, &candidate_operand,
+			p, pt,
+			positional_operands, named_operands,
+			CallArgumentErrorMode::NoErrors,
+			&data, true);
+		if (is_candidate) {
+			GB_ASSERT(pt->Proc.results != nullptr);
+			isize result_count = pt->Proc.results->Tuple.variables.count;
+			GB_ASSERT(result_count >= 2);
+			IteratorOverloadCandidate candidate = {};
+			candidate.proc = p;
+			candidate.value_count = result_count-1; // trailing boolean is the loop condition
+			array_add(&candidates, candidate);
+		}
+	}
+	ctx->in_proc_group = false;
+
+	if (candidates.count == 0) {
+		return false;
+	}
+
+	isize requested_value_count = rs->vals.count;
+	bool found_satisfying = false;
+	isize target_value_count = 0;
+
+	for (auto const &candidate : candidates) {
+		if (candidate.value_count >= requested_value_count) {
+			if (!found_satisfying || candidate.value_count < target_value_count) {
+				found_satisfying = true;
+				target_value_count = candidate.value_count;
+			}
+		}
+	}
+	if (!found_satisfying) {
+		// Fall back to the widest candidate so diagnostics can mention the largest available arity.
+		for (auto const &candidate : candidates) {
+			if (candidate.value_count > target_value_count) {
+				target_value_count = candidate.value_count;
+			}
+		}
+	}
+
+	auto selected_procs = array_make<Entity *>(temporary_allocator(), 0, candidates.count);
+	for (auto const &candidate : candidates) {
+		if (candidate.value_count == target_value_count) {
+			array_add(&selected_procs, candidate.proc);
+		}
+	}
+	GB_ASSERT(selected_procs.count > 0);
+	proc_group.ProcGroup.entities = selected_procs;
+
+	// Reserve a hidden state variable in the range statement scope.
+	String base_name = str_lit("__for_in_state");
+	Token unique_state_token = make_token_ident(base_name);
+	unique_state_token.pos = rs->in_token.pos;
+	for (isize i = 0;; i++) {
+		gbString tmp = gb_string_make_reserve(temporary_allocator(), base_name.len + 32);
+		tmp = gb_string_append_length(tmp, cast(char const *)base_name.text, base_name.len);
+		if (i > 0) {
+			tmp = gb_string_append_fmt(tmp, "$%td", i);
+		}
+		String state_name = make_string(cast(u8 const *)tmp, gb_string_length(tmp));
+		InternedString interned = string_interner_insert(state_name);
+		if (scope_lookup_current(ctx->scope, interned) == nullptr) {
+			unique_state_token = make_token_ident(state_name);
+			unique_state_token.pos = rs->in_token.pos;
+			break;
+		}
+	}
+
+	Ast *real_state_ident = ast_ident(f, unique_state_token);
+	Entity *state_entity = alloc_entity_variable(ctx->scope, unique_state_token, t_int, EntityState_Resolved);
+	state_entity->identifier = real_state_ident;
+	add_entity(ctx, ctx->scope, real_state_ident, state_entity);
+	DeclInfo *decl = make_decl_info(ctx->scope, ctx->decl);
+	add_entity_and_decl_info(ctx, real_state_ident, state_entity, decl);
+	set_range_stmt_iterator_overload_state_entity(ctx, cast(Ast *)rs, state_entity);
+
+	// Rebuild call with the real state variable.
+	Ast *real_state_addr = ast_unary_expr(f, and_token, real_state_ident);
+	auto real_args = array_make<Ast *>(temporary_allocator(), 0, 2);
+	array_add(&real_args, rs->expr);
+	array_add(&real_args, real_state_addr);
+	Ast *real_proc_expr = ast_ident(f, proc_token);
+	Ast *real_call = ast_call_expr(f, real_proc_expr, real_args, open, close, {});
+	ast_node(real_ce, CallExpr, real_call);
+	AstSplitArgs *real_split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+	real_split_args->positional = slice_from_array(real_args);
+	real_split_args->named = {};
+	real_ce->split_args = real_split_args;
+
+	Operand real_overload_operand = {};
+	real_overload_operand.mode = Addressing_ProcGroup;
+	real_overload_operand.proc_group = &proc_group;
+	real_overload_operand.expr = real_proc_expr;
+	check_call_expr(ctx, &real_overload_operand, real_call, nullptr, slice_from_array(real_args), ProcInlining_none, ProcTailing_none, nullptr);
+	if (real_overload_operand.mode == Addressing_Invalid || real_overload_operand.type == nullptr || real_overload_operand.type == t_invalid) {
+		return false;
+	}
+	add_type_and_value(ctx, real_call, real_overload_operand.mode, real_overload_operand.type, real_overload_operand.value);
+	rs->expr = real_call;
+	real_overload_operand.expr = real_call;
+	*container_operand = real_overload_operand;
+	return true;
+}
+
 gb_internal bool check_stmt_internal_builtin_proc_id(Ast *expr, BuiltinProcId *id_) {
 	BuiltinProcId id = BuiltinProc_Invalid;
 	Entity *e = entity_of_node(expr);
@@ -1862,6 +2056,14 @@ gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags)
 					}
 				}
 			}
+
+			if (check_range_stmt_custom_iterator_overload(ctx, rs, &operand)) {
+				expr = unparen_expr(rs->expr);
+				if (operand.mode == Addressing_Invalid) {
+					goto skip_expr_range_stmt;
+				}
+			}
+
 			bool is_ptr = is_type_pointer(operand.type);
 			Type *t = base_type(type_deref(operand.type));
 
@@ -2554,6 +2756,19 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 			error(as->op, "Missing LHS in assignment statement");
 			return;
 		}
+		if (lhs_count == 1 && as->rhs.count == 1) {
+			Ast *lhs_expr = unparen_expr(as->lhs[0]);
+			if (lhs_expr->kind == Ast_IndexExpr) {
+				Operand setter_call = {};
+				if (check_index_set_expr_custom_overload(ctx, &setter_call, lhs_expr, as->rhs[0])) {
+					if (setter_call.mode == Addressing_Invalid) {
+						return;
+					}
+					set_assignment_overloaded_call_expr(ctx, node, setter_call.expr);
+					return;
+				}
+			}
+		}
 
 		TEMPORARY_ALLOCATOR_GUARD();
 
@@ -2615,8 +2830,12 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 		check_binary_expr(ctx, &rhs, binary_expr, nullptr, true);
 		if (rhs.mode != Addressing_Invalid) {
 			be->op.string = substring(be->op.string, 0, be->op.string.len - 1);
+			add_type_and_value(ctx, binary_expr, rhs.mode, rhs.type, rhs.value);
 			rhs.expr = binary_expr;
 			check_assignment_variable(ctx, &lhs, &rhs, str_lit("assignment operation"));
+			if (get_overloaded_operator_call_expr(ctx->info, binary_expr) != nullptr) {
+				set_assignment_operation_expr(ctx, node, binary_expr);
+			}
 		}
 	}
 }
