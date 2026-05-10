@@ -130,6 +130,7 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 	p->defer_stmts.allocator       = a;
 	p->blocks.allocator            = a;
 	p->branch_blocks.allocator     = a;
+	p->debug_scope_metadata.allocator = a;
 	p->context_stack.allocator     = a;
 	p->scope_stack.allocator       = a;
 	p->asan_stack_locals.allocator = a;
