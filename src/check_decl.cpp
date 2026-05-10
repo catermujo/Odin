@@ -1,4 +1,6 @@
 gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags);
+gb_internal bool is_type_no_copy(Type *t);
+gb_internal bool check_no_copy_assignment(Operand const &o, String const &context);
 
 // NOTE(bill): 'content_name' is for debugging and error messages
 gb_internal Type *check_init_variable(CheckerContext *ctx, Entity *e, Operand *operand, String context_name) {
@@ -144,6 +146,12 @@ gb_internal void check_init_variables(CheckerContext *ctx, Entity **lhs, isize l
 		check_init_variable(ctx, e, o, context_name);
 		if (d != nullptr) {
 			d->init_expr = o->expr;
+		}
+		if (o->type && is_type_no_copy(o->type)) {
+			ERROR_BLOCK();
+			if (check_no_copy_assignment(*o, str_lit("initialization"))) {
+				error_line("\tInitialization of a #no_copy type must be either implicitly zero, a constant literal, or a return value from a call expression");
+			}
 		}
 	}
 	if (rhs_count > 0 && lhs_count != rhs_count) {

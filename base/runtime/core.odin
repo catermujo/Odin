@@ -148,6 +148,7 @@ Type_Info_Struct_Flag :: enum u8 {
 	all_or_none = 2,
 	align       = 3,
 	simple      = 4,
+	no_copy     = 5,
 }
 
 Type_Info_Struct :: struct {

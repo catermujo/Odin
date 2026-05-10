@@ -1272,7 +1272,7 @@ gb_internal Ast *ast_fixed_capacity_dynamic_array_type(AstFile *f, Token token, 
 }
 
 gb_internal Ast *ast_struct_type(AstFile *f, Token token, Slice<Ast *> fields, isize field_count,
-                     Ast *polymorphic_params, bool is_packed, bool is_raw_union, bool is_all_or_none, bool is_simple,
+                     Ast *polymorphic_params, bool is_packed, bool is_raw_union, bool is_no_copy, bool is_all_or_none, bool is_simple,
                      Ast *align, Ast *min_field_align, Ast *max_field_align,
                      Token where_token, Array<Ast *> const &where_clauses) {
 	Ast *result = alloc_ast_node(f, Ast_StructType);
@@ -1282,6 +1282,7 @@ gb_internal Ast *ast_struct_type(AstFile *f, Token token, Slice<Ast *> fields, i
 	result->StructType.polymorphic_params = polymorphic_params;
 	result->StructType.is_packed          = is_packed;
 	result->StructType.is_raw_union       = is_raw_union;
+	result->StructType.is_no_copy         = is_no_copy;
 	result->StructType.is_all_or_none     = is_all_or_none;
 	result->StructType.is_simple          = is_simple;
 	result->StructType.align              = align;
@@ -2804,6 +2805,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		bool is_packed          = false;
 		bool is_all_or_none     = false;
 		bool is_raw_union       = false;
+		bool is_no_copy         = false;
 		bool is_simple          = false;
 		Ast *align              = nullptr;
 		Ast *min_field_align    = nullptr;
@@ -2891,6 +2893,11 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 					syntax_error(tag, "Duplicate struct tag '#%.*s'", LIT(tag.string));
 				}
 				is_raw_union = true;
+			} else if (tag.string == "no_copy") {
+				if (is_no_copy) {
+					syntax_error(tag, "Duplicate struct tag '#%.*s'", LIT(tag.string));
+				}
+				is_no_copy = true;
 			} else if (tag.string == "simple") {
 				if (is_simple) {
 					syntax_error(tag, "Duplicate struct tag '#%.*s'", LIT(tag.string));
@@ -2937,7 +2944,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		parser_check_polymorphic_record_parameters(f, polymorphic_params);
 
 		return ast_struct_type(f, token, decls, name_count,
-		                       polymorphic_params, is_packed, is_raw_union, is_all_or_none, is_simple,
+		                       polymorphic_params, is_packed, is_raw_union, is_no_copy, is_all_or_none, is_simple,
 		                       align, min_field_align, max_field_align,
 		                       where_token, where_clauses);
 	} break;
