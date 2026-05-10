@@ -3488,6 +3488,9 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	}
 
 	FORCE_ADD_RUNTIME_ENTITIES(true,
+		// Optional single-result unwrap checking related procedures
+		str_lit("optional_value_check_with_context"),
+		str_lit("optional_value_check_contextless"),
 		// Explicit integer downcast checking related procedures
 		str_lit("downcast_assertion_check_with_context"),
 		str_lit("downcast_assertion_check_contextless"),

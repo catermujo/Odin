@@ -2070,6 +2070,17 @@ gb_internal SubstResult subst_unify(CheckerContext *c, Type *pattern, Type *sour
 		if (pb->kind != sb->kind) {
 			return Subst_Unhandled;
 		}
+		// This matcher is also used while overload candidates are being checked. Do not wait on
+		// another record checker here: an in-progress record has not published its polymorphic
+		// parameter list yet, so the match is unresolved at this point.
+		if (pb->kind == Type_Struct &&
+		    (pb->Struct.polymorphic_wait_signal.futex.load() == 0 || sb->Struct.polymorphic_wait_signal.futex.load() == 0)) {
+			return Subst_Unhandled;
+		}
+		if (pb->kind == Type_Union &&
+		    (pb->Union.polymorphic_wait_signal.futex.load() == 0 || sb->Union.polymorphic_wait_signal.futex.load() == 0)) {
+			return Subst_Unhandled;
+		}
 		Type *s_parent = nullptr, *t_parent = nullptr;
 		TypeTuple *s_tuple = nullptr, *t_tuple = nullptr;
 		if (pb->kind == Type_Struct) {
