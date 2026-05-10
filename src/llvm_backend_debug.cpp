@@ -106,6 +106,31 @@ gb_internal void lb_add_raddbg_generated_view(lbModule *m, String const &type_na
 	mpsc_enqueue(&m->gen->raddebug_generated_views, copy_string(permanent_allocator(), make_string(cast(u8 *)s, gb_string_length(s))));
 }
 
+gb_internal LLVMMetadataRef lb_get_procedure_scope_metadata(lbProcedure *p, Scope *s) {
+	if (p == nullptr || s == nullptr) {
+		return nullptr;
+	}
+	for_array(i, p->debug_scope_metadata) {
+		if (p->debug_scope_metadata[i].scope == s) {
+			return p->debug_scope_metadata[i].metadata;
+		}
+	}
+	return nullptr;
+}
+
+gb_internal void lb_set_procedure_scope_metadata(lbProcedure *p, Scope *s, LLVMMetadataRef md) {
+	if (p == nullptr || s == nullptr || md == nullptr) {
+		return;
+	}
+	for_array(i, p->debug_scope_metadata) {
+		if (p->debug_scope_metadata[i].scope == s) {
+			p->debug_scope_metadata[i].metadata = md;
+			return;
+		}
+	}
+	array_add(&p->debug_scope_metadata, {s, md});
+}
+
 
 
 gb_internal LLVMMetadataRef lb_get_current_debug_scope(lbProcedure *p) {
@@ -113,7 +138,7 @@ gb_internal LLVMMetadataRef lb_get_current_debug_scope(lbProcedure *p) {
 
 	for (isize i = p->scope_stack.count-1; i >= 0; i--) {
 		Scope *s = p->scope_stack[i];
-		LLVMMetadataRef md = lb_get_llvm_metadata(p->module, s);
+		LLVMMetadataRef md = lb_get_procedure_scope_metadata(p, s);
 		if (md) {
 			return md;
 		}
