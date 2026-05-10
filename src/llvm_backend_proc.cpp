@@ -5003,15 +5003,12 @@ gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_
 
 	if (ce->optional_ok_one) {
 		GB_ASSERT(is_type_tuple(res.type));
-		GB_ASSERT(res.type->Tuple.variables.count == 2);
-		lbValue rhs = lb_emit_struct_ev(p, res, 1);
-		lbValue has_value = {};
-		if (is_type_boolean(rhs.type)) {
-			has_value = rhs;
-		} else {
-			GB_ASSERT_MSG(type_has_nil(rhs.type), "%s", type_to_string(rhs.type));
-			has_value = lb_emit_comp(p, Token_CmpEq, rhs, lb_const_nil(p->module, rhs.type));
-		}
+		i32 count = cast(i32)res.type->Tuple.variables.count;
+		GB_ASSERT(count >= 2);
+
+		i32 ok_index = count-1;
+		lbValue rhs = lb_emit_struct_ev(p, res, ok_index);
+		lbValue has_value = lb_emit_try_has_value(p, rhs);
 
 		auto args = array_make<lbValue>(permanent_allocator(), 4);
 		args[0] = lb_emit_conv(p, has_value, t_bool);
@@ -5024,7 +5021,21 @@ gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_
 			name = "optional_value_check_with_context";
 		}
 		lb_emit_runtime_call(p, name, args);
-		return lb_emit_struct_ev(p, res, 0);
+
+		if (count == 2) {
+			return lb_emit_struct_ev(p, res, 0);
+		}
+
+		Type *lhs_type = default_type(type_of_expr(expr));
+		GB_ASSERT(is_type_tuple(lhs_type));
+		GB_ASSERT(lhs_type->Tuple.variables.count == count-1);
+
+		lbAddr lhs_addr = lb_add_local_generated(p, lhs_type, false);
+		lbValue lhs_ptr = lb_addr_get_ptr(p, lhs_addr);
+		for (i32 i = 0; i < count-1; i++) {
+			lb_emit_store(p, lb_emit_struct_ep(p, lhs_ptr, i), lb_emit_struct_ev(p, res, i));
+		}
+		return lb_addr_load(p, lhs_addr);
 	}
 	return res;
 }

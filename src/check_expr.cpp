@@ -6556,6 +6556,65 @@ gb_internal bool check_no_copy_assignment(Operand const &o, String const &contex
 	return false;
 }
 
+gb_internal Type *check_optional_ok_tuple_type_from_operand(Operand *o) {
+	switch (o->mode) {
+	case Addressing_MapIndex:
+	case Addressing_OptionalOk:
+	case Addressing_OptionalOkPtr:
+		break;
+	default:
+		return nullptr;
+	}
+
+	Ast *expr = unparen_expr(o->expr);
+	if (expr != nullptr && expr->kind == Ast_CallExpr) {
+		Type *pt = base_type(type_of_expr(expr->CallExpr.proc));
+		if (is_type_proc(pt) && pt->Proc.optional_ok && pt->Proc.results != nullptr) {
+			GB_ASSERT(pt->Proc.results->kind == Type_Tuple);
+			GB_ASSERT(pt->Proc.result_count >= 2);
+			return pt->Proc.results;
+		}
+	}
+
+	return make_optional_ok_type(o->type);
+}
+
+gb_internal bool entity_has_default_parameter_value(Entity *e) {
+	if (e == nullptr) {
+		return false;
+	}
+	switch (e->kind) {
+	case Entity_Variable:
+		return e->Variable.param_value.kind != ParameterValue_Invalid;
+	case Entity_Constant:
+		return e->Constant.param_value.kind != ParameterValue_Invalid;
+	default:
+		return false;
+	}
+}
+
+gb_internal isize get_required_unpack_lhs_count(Entity **lhs, isize lhs_count, isize variadic_index) {
+	if (lhs == nullptr || lhs_count < 0) {
+		return lhs_count;
+	}
+
+	isize required_count = lhs_count;
+	if (variadic_index >= 0 && required_count > 0 && variadic_index == required_count-1) {
+		// A variadic tail parameter is optional at the call-site.
+		required_count--;
+	}
+
+	while (required_count > 0) {
+		Entity *e = lhs[required_count-1];
+		if (!entity_has_default_parameter_value(e)) {
+			break;
+		}
+		required_count--;
+	}
+
+	return required_count;
+}
+
 gb_internal bool check_assignment_arguments(CheckerContext *ctx, Array<Operand> const &lhs, Array<Operand> *operands, Slice<Ast *> const &rhs) {
 	bool optional_ok = false;
 	isize tuple_index = 0;
@@ -6575,6 +6634,16 @@ gb_internal bool check_assignment_arguments(CheckerContext *ctx, Array<Operand> 
 		if (o.mode == Addressing_NoValue) {
 			error_operand_no_value(&o);
 			o.mode = Addressing_Invalid;
+		}
+
+		if (rhs.count == 1) {
+			Type *opt_tuple = check_optional_ok_tuple_type_from_operand(&o);
+			if (opt_tuple != nullptr && opt_tuple->kind == Type_Tuple) {
+				if (lhs.count == opt_tuple->Tuple.variables.count) {
+					// Caller captures the optional tag explicitly; disable auto-unwrap lowering.
+					check_promote_optional_ok(c, &o, nullptr, nullptr);
+				}
+			}
 		}
 
 		if (o.type == nullptr || o.type->kind != Type_Tuple) {
@@ -6605,32 +6674,20 @@ gb_internal bool check_assignment_arguments(CheckerContext *ctx, Array<Operand> 
 				array_add(operands, val1);
 				optional_ok = true;
 				tuple_index += 2;
-			} else if (o.mode == Addressing_OptionalOk && is_type_tuple(o.type)) {
-				Type *tuple = o.type;
-				GB_ASSERT(tuple->Tuple.variables.count == 2);
-				Ast *expr = unparen_expr(o.expr);
-				if (expr->kind == Ast_CallExpr) {
-					expr->CallExpr.optional_ok_one = true;
-				}
-				Operand val = o;
-				val.type = tuple->Tuple.variables[0]->type;
-				val.mode = Addressing_Value;
-				array_add(operands, val);
-				tuple_index += tuple->Tuple.variables.count;
 			} else {
 				array_add(operands, o);
 				tuple_index += 1;
 			}
-			} else {
-				TypeTuple *tuple = &o.type->Tuple;
-				for (Entity *e : tuple->variables) {
-					o.type = e->type;
-					array_add(operands, o);
-					check_no_copy_assignment(o, str_lit("assignment"));
-				}
-
-				tuple_index += tuple->variables.count;
+		} else {
+			TypeTuple *tuple = &o.type->Tuple;
+			for (Entity *e : tuple->variables) {
+				o.type = e->type;
+				array_add(operands, o);
+				check_no_copy_assignment(o, str_lit("assignment"));
 			}
+
+			tuple_index += tuple->variables.count;
+		}
 	}
 
 	return optional_ok;
@@ -6646,7 +6703,7 @@ enum UnpackFlag : u32 {
 
 
 gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize lhs_count, Array<Operand> *operands, Slice<Ast *> const &rhs_arguments, UnpackFlags flags,
-	isize variadic_index = -1) {
+	isize variadic_index = -1, isize lhs_required_count_override = -1) {
 	auto const &add_dependencies_from_unpacking = [](CheckerContext *c, Entity **lhs, isize lhs_count, isize tuple_index, isize tuple_count) -> isize {
 		if (lhs == nullptr || c->decl == nullptr) {
 			return tuple_count;
@@ -6677,6 +6734,10 @@ gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize
 	bool is_variadic = variadic_index > -1;
 	if (!is_variadic) {
 		variadic_index = lhs_count;
+	}
+	isize lhs_required_count = lhs_required_count_override;
+	if (lhs_required_count < 0) {
+		lhs_required_count = get_required_unpack_lhs_count(lhs, lhs_count, variadic_index);
 	}
 
 	bool optional_ok = false;
@@ -6724,6 +6785,16 @@ gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize
 		if (o.mode == Addressing_NoValue) {
 			error_operand_no_value(&o);
 			o.mode = Addressing_Invalid;
+		}
+
+		if (rhs_arguments.count == 1) {
+			Type *opt_tuple = check_optional_ok_tuple_type_from_operand(&o);
+			if (opt_tuple != nullptr && opt_tuple->kind == Type_Tuple) {
+				if (lhs_required_count == opt_tuple->Tuple.variables.count) {
+					// Caller captures the optional tag explicitly; disable auto-unwrap lowering.
+					check_promote_optional_ok(c, &o, nullptr, nullptr);
+				}
+			}
 		}
 
 		if (o.type == nullptr || o.type->kind != Type_Tuple) {
@@ -7639,16 +7710,16 @@ gb_internal bool check_binary_expr_custom_overload(CheckerContext *c, Operand *x
 		ctx.hide_polymorphic_errors = true;
 
 		Operand candidate_operand = overload_operand;
-		bool is_candidate = check_call_arguments_single(&ctx, call, &candidate_operand,
-			p, pt,
-			positional_operands, named_operands,
-			CallArgumentErrorMode::NoErrors,
-			&data, true);
-		if (is_candidate) {
-			has_candidate = true;
-			break;
-		}
-	}
+				bool is_candidate = check_call_arguments_single(&ctx, call, &candidate_operand,
+					p, pt,
+					positional_operands, named_operands,
+					CallArgumentErrorMode::NoErrors,
+					&data, true);
+				if (is_candidate) {
+					has_candidate = true;
+					break;
+				}
+			}
 	c->in_proc_group = false;
 
 	if (!has_candidate) {
@@ -8402,6 +8473,7 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 
 	Entity **lhs = nullptr;
 	isize lhs_count = -1;
+	isize lhs_required_count = -1;
 	i32 variadic_index = -1;
 
 	TEMPORARY_ALLOCATOR_GUARD();
@@ -8414,11 +8486,12 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		Type *pt = base_type(e->type);
 		if (pt != nullptr && is_type_proc(pt)) {
 			lhs = populate_proc_parameter_list(c, pt, &lhs_count);
+			lhs_required_count = get_procedure_param_count_excluding_defaults(pt, nullptr);
 			if (pt->Proc.variadic) {
 				variadic_index = pt->Proc.variadic_index;
 			}
 		}
-		check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index);
+		check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index, lhs_required_count);
 
 		if (check_named_arguments(c, e->type, named_args, &named_operands, true)) {
 			check_call_arguments_single(c, call, operand,
@@ -8430,24 +8503,29 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		return data;
 	}
 
-	{
-		// NOTE(bill, 2019-07-13): This code is used to improve the type inference for procedure groups
-		// where the same positional parameter has the same type value (and ellipsis)
-		isize proc_arg_count = -1;
-		for (Entity *p : procs) {
-			Type *pt = base_type(p->type);
-			if (pt != nullptr && is_type_proc(pt)) {
-				if (proc_arg_count < 0) {
-					proc_arg_count = pt->Proc.param_count;
-				} else {
-					proc_arg_count = gb_min(proc_arg_count, pt->Proc.param_count);
+		{
+			// NOTE(bill, 2019-07-13): This code is used to improve the type inference for procedure groups
+			// where the same positional parameter has the same type value (and ellipsis)
+			isize proc_arg_count = -1;
+			isize proc_required_arg_count = -1;
+			for (Entity *p : procs) {
+				Type *pt = base_type(p->type);
+				if (pt != nullptr && is_type_proc(pt)) {
+					isize required = get_procedure_param_count_excluding_defaults(pt, nullptr);
+					if (proc_arg_count < 0) {
+						proc_arg_count = pt->Proc.param_count;
+						proc_required_arg_count = required;
+					} else {
+						proc_arg_count = gb_min(proc_arg_count, pt->Proc.param_count);
+						proc_required_arg_count = gb_min(proc_required_arg_count, required);
+					}
 				}
 			}
-		}
 
-		if (proc_arg_count >= 0) {
-			lhs_count = proc_arg_count;
-			if (lhs_count > 0)  {
+			if (proc_arg_count >= 0) {
+				lhs_count = proc_arg_count;
+				lhs_required_count = proc_required_arg_count;
+				if (lhs_count > 0)  {
 				lhs = gb_alloc_array(temporary_allocator(), Entity *, lhs_count);
 				for (isize param_index = 0; param_index < lhs_count; param_index++) {
 					Entity *e = nullptr;
@@ -8501,7 +8579,7 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		}
 	}
 
-	check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index);
+	check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index, lhs_required_count);
 
 	for_array(i, named_args) {
 		Ast *arg = named_args[i];
@@ -9091,14 +9169,16 @@ gb_internal CallArgumentData check_call_arguments(CheckerContext *c, Operand *op
 	if (positional_args.count > 0) {
 		Entity **lhs =  nullptr;
 		isize lhs_count = -1;
+		isize lhs_required_count = -1;
 		i32 variadic_index = -1;
 		if (pt != nullptr)  {
 			lhs = populate_proc_parameter_list(c, proc_type, &lhs_count);
+			lhs_required_count = get_procedure_param_count_excluding_defaults(proc_type, nullptr);
 			if (pt->variadic) {
 				variadic_index = pt->variadic_index;
 			}
 		}
-		check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index);
+		check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index, lhs_required_count);
 	}
 
 	if (named_args.count > 0) {
@@ -10052,15 +10132,28 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 		if (type == nullptr) {
 			type = pt;
 		}
-		type = base_type(type);
-		if (type->kind == Type_Proc && type->Proc.optional_ok && type->Proc.result_count > 0) {
-			operand->mode = Addressing_OptionalOk;
-			operand->type = type->Proc.results->Tuple.variables[0]->type;
-			if (operand->expr != nullptr && operand->expr->kind == Ast_CallExpr) {
-				operand->expr->CallExpr.optional_ok_one = true;
+			type = base_type(type);
+			if (type->kind == Type_Proc && type->Proc.optional_ok && type->Proc.result_count > 0) {
+				GB_ASSERT(type->Proc.results != nullptr);
+				TypeTuple *results = &type->Proc.results->Tuple;
+				GB_ASSERT(results->variables.count >= 2);
+				operand->mode = Addressing_OptionalOk;
+				if (results->variables.count == 2) {
+					operand->type = results->variables[0]->type;
+				} else {
+					auto payload = slice(results->variables, 0, results->variables.count-1);
+					if (payload.count == 1) {
+						operand->type = payload[0]->type;
+					} else {
+						operand->type = alloc_type_tuple();
+						operand->type->Tuple.variables = payload;
+					}
+				}
+				if (operand->expr != nullptr && operand->expr->kind == Ast_CallExpr) {
+					operand->expr->CallExpr.optional_ok_one = true;
+				}
 			}
 		}
-	}
 
 	Entity *proc_entity = entity_from_expr(call->CallExpr.proc);
 	bool is_objc_call = proc_entity && proc_entity->kind == Entity_Procedure && proc_entity->Procedure.is_objc_impl_or_import;
@@ -10503,7 +10596,7 @@ gb_internal void check_promote_optional_ok(CheckerContext *c, Operand *x, Type *
 			Type *tuple = pt->Proc.results;
 
 			if (pt->Proc.result_count >= 2) {
-				if (ok_type_) *ok_type_ = tuple->Tuple.variables[1]->type;
+				if (ok_type_) *ok_type_ = tuple->Tuple.variables[pt->Proc.result_count-1]->type;
 			}
 			if (change_operand) {
 				expr->CallExpr.optional_ok_one = false;
