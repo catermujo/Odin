@@ -162,6 +162,7 @@ struct TypeStruct {
 	bool            are_offsets_set             : 1;
 	bool            is_packed                   : 1;
 	bool            is_raw_union                : 1;
+	bool            is_no_copy                  : 1;
 	bool            is_all_or_none              : 1;
 	bool            is_simple                   : 1;
 	bool            is_poly_specialized         : 1;
@@ -2023,6 +2024,11 @@ gb_internal bool is_type_raw_union(Type *t) {
 	if (t == nullptr) { return false; }
 	return (t->kind == Type_Struct && t->Struct.is_raw_union);
 }
+gb_internal bool is_type_no_copy(Type *t) {
+	t = base_type(t);
+	if (t == nullptr) { return false; }
+	return (t->kind == Type_Struct && t->Struct.is_no_copy);
+}
 gb_internal bool is_type_enum(Type *t) {
 	t = base_type(t);
 	if (t == nullptr) { return false; }
@@ -3469,6 +3475,7 @@ gb_internal bool are_types_identical_internal(Type *x, Type *y, bool check_tuple
 
 	case Type_Struct:
 		if (x->Struct.is_raw_union   == y->Struct.is_raw_union &&
+		    x->Struct.is_no_copy     == y->Struct.is_no_copy &&
 		    x->Struct.fields.count   == y->Struct.fields.count &&
 		    x->Struct.is_packed      == y->Struct.is_packed &&
 		    x->Struct.is_all_or_none == y->Struct.is_all_or_none &&
@@ -5685,11 +5692,12 @@ gb_internal gbString write_type_to_string(gbString str, Type *type, bool shortha
 			str = gb_string_appendc(str, ")");
 		}
 
-		if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
-		if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
-		if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
-		if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
-		if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
+			if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
+			if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
+			if (type->Struct.is_no_copy)        str = gb_string_appendc(str, " #no_copy");
+			if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
+			if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
+			if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
 
 		str = gb_string_appendc(str, " {");
 

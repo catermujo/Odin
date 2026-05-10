@@ -687,6 +687,7 @@ gb_internal void check_struct_type(CheckerContext *ctx, Type *struct_type, Ast *
 	struct_type->Struct.node           = node;
 	struct_type->Struct.scope          = ctx->scope;
 	struct_type->Struct.is_packed      = st->is_packed;
+	struct_type->Struct.is_no_copy     = st->is_no_copy;
 	struct_type->Struct.is_all_or_none = st->is_all_or_none;
 	struct_type->Struct.polymorphic_params = check_record_polymorphic_params(
 		ctx, st->polymorphic_params,
