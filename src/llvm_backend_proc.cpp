@@ -4766,6 +4766,26 @@ gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_
 	if (ce->optional_ok_one) {
 		GB_ASSERT(is_type_tuple(res.type));
 		GB_ASSERT(res.type->Tuple.variables.count == 2);
+		lbValue rhs = lb_emit_struct_ev(p, res, 1);
+		lbValue has_value = {};
+		if (is_type_boolean(rhs.type)) {
+			has_value = rhs;
+		} else {
+			GB_ASSERT_MSG(type_has_nil(rhs.type), "%s", type_to_string(rhs.type));
+			has_value = lb_emit_comp(p, Token_CmpEq, rhs, lb_const_nil(p->module, rhs.type));
+		}
+
+		auto args = array_make<lbValue>(permanent_allocator(), 4);
+		args[0] = lb_emit_conv(p, has_value, t_bool);
+
+		TokenPos pos = ast_token(expr).pos;
+		lb_set_file_line_col(p, array_slice(args, 1, args.count), pos);
+
+		char const *name = "optional_value_check_contextless";
+		if (p->context_stack.count > 0) {
+			name = "optional_value_check_with_context";
+		}
+		lb_emit_runtime_call(p, name, args);
 		return lb_emit_struct_ev(p, res, 0);
 	}
 	return res;
