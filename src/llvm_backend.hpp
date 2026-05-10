@@ -302,6 +302,11 @@ struct lbVariadicReuseSlices {
 	lbAddr slice_addr;
 };
 
+struct lbScopeDebugInfo {
+	Scope *scope;
+	LLVMMetadataRef metadata;
+};
+
 struct lbGlobalVariable {
 	lbValue var;
 	lbValue init;
@@ -365,6 +370,7 @@ struct lbProcedure {
 	Ast *curr_stmt;
 
 	Array<Scope *>       scope_stack;
+	Array<lbScopeDebugInfo> debug_scope_metadata;
 	Array<lbContextData> context_stack;
 
 	LLVMMetadataRef debug_info;
@@ -619,6 +625,8 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 gb_internal lbValue lb_emit_source_code_location_as_global_ptr(lbProcedure *p, String const &procedure, TokenPos const &pos);
 
 gb_internal LLVMMetadataRef lb_debug_location_from_token_pos(lbProcedure *p, TokenPos pos);
+gb_internal LLVMMetadataRef lb_get_procedure_scope_metadata(lbProcedure *p, Scope *s);
+gb_internal void lb_set_procedure_scope_metadata(lbProcedure *p, Scope *s, LLVMMetadataRef md);
 
 gb_internal LLVMTypeRef llvm_array_type(LLVMTypeRef ElementType, uint64_t ElementCount) {
 	return LLVMArrayType2(ElementType, ElementCount);
