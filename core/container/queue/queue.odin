@@ -185,6 +185,17 @@ set :: proc(q: ^$Q/Queue($T), #any_int i: int, val: T, loc := #caller_location) 
 	q.data[idx] = val
 }
 
+@(operator="[]")
+operator_index_get :: proc(q: $Q/Queue($T), #any_int i: int) -> T {
+	q_copy := q
+	return get(&q_copy, i)
+}
+
+@(operator="[]=")
+operator_index_set :: proc(q: ^$Q/Queue($T), #any_int i: int, val: T) {
+	set(q, i, val)
+}
+
 /*
 Get the element at the front of the queue.
 
