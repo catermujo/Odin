@@ -7705,6 +7705,11 @@ gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x,
 
 	bool can_use_direct = false;
 	bool can_use_address = false;
+	auto intent_matching_procs = array_make<Entity *>(temporary_allocator(), 0, procs.count);
+	auto receiver_matching_procs = array_make<Entity *>(temporary_allocator(), 0, procs.count);
+	Type *receiver_base_for_index = base_type(type_deref(x->type));
+	bool can_fallback_to_builtin_index = receiver_base_for_index != nullptr &&
+	                                     (is_type_indexable(type_deref(x->type)) || is_type_soa_struct(receiver_base_for_index));
 
 	for (Entity *p : procs) {
 		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
@@ -7717,21 +7722,96 @@ gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x,
 		if (pt->Proc.variadic || pt->Proc.param_count < 2) {
 			continue;
 		}
+
+		Type *param0 = pt->Proc.params->Tuple.variables[0]->type;
+		bool direct_match = receiver_type_matches_custom_index_overload_param(c, param0, x->type);
+		bool address_match = address_type != nullptr &&
+		                     receiver_type_matches_custom_index_overload_param(c, param0, address_type);
+		if (!direct_match && !address_match) {
+			continue;
+		}
+		array_add(&receiver_matching_procs, p);
+
 		if (!custom_index_overload_matches_result_intent(p, pt, require_address_overload)) {
 			continue;
 		}
 
-		Type *param0 = pt->Proc.params->Tuple.variables[0]->type;
-		if (receiver_type_matches_custom_index_overload_param(c, param0, x->type)) {
+		array_add(&intent_matching_procs, p);
+		if (direct_match) {
 			can_use_direct = true;
 		}
-		if (address_type != nullptr &&
-		    receiver_type_matches_custom_index_overload_param(c, param0, address_type)) {
+		if (address_match) {
 			can_use_address = true;
 		}
 	}
 
+	auto emit_no_matching_overload_error = [&]() {
+		ERROR_BLOCK();
+
+		error(node, "Could not find matching overload for operator '[]'");
+
+		gbString receiver_type_str = type_to_string(x->type);
+		defer (gb_string_free(receiver_type_str));
+		gbString index_type_str = type_to_string(index_operand.type);
+		defer (gb_string_free(index_type_str));
+
+		error_line("\tGiven argument types:\n");
+		error_line("\t • %s\n", receiver_type_str);
+		error_line("\t • %s\n", index_type_str);
+
+		if (receiver_matching_procs.count > 0 && intent_matching_procs.count == 0) {
+			if (require_address_overload) {
+				error_line("\tNo matching overload returns a pointer payload required by '&expr[index]'\n");
+			} else {
+				error_line("\tNo matching overload returns a value payload required by 'expr[index]'; use '&expr[index]' for pointer payload getters\n");
+			}
+		}
+
+		if (receiver_matching_procs.count > 0) {
+			error_line("Did you mean one of the following overloads?\n");
+		}
+
+		for (Entity *proc : receiver_matching_procs) {
+			if (proc == nullptr || (proc->flags & EntityFlag_Disabled)) {
+				continue;
+			}
+			Type *pt = base_type(proc->type);
+			if (!(pt != nullptr && is_type_proc(pt))) {
+				continue;
+			}
+
+			gbString proc_sig = nullptr;
+			defer (gb_string_free(proc_sig));
+			if (pt->Proc.node != nullptr) {
+				proc_sig = expr_to_string(pt->Proc.node);
+			} else {
+				proc_sig = type_to_string(pt);
+			}
+
+			String prefix = {};
+			String prefix_sep = {};
+			if (proc->pkg) {
+				prefix = proc->pkg->name;
+				prefix_sep = str_lit(".");
+			}
+
+			error_line("\t%.*s%.*s%.*s :: %s at %s\n",
+			           LIT(prefix), LIT(prefix_sep), LIT(proc->token.string),
+			           proc_sig,
+			           token_pos_to_string(proc->token.pos));
+		}
+		if (receiver_matching_procs.count > 0) {
+			error_line("\n");
+		}
+	};
+
 	if (!can_use_direct && !can_use_address) {
+		if (!can_fallback_to_builtin_index && receiver_matching_procs.count > 0) {
+			x->mode = Addressing_Invalid;
+			x->expr = node;
+			emit_no_matching_overload_error();
+			return true;
+		}
 		return false;
 	}
 	if (require_address_overload && !can_use_address && !can_use_direct) {
@@ -7903,6 +7983,13 @@ gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x,
 		if (try_call(addr_expr, addr_operand)) {
 			return true;
 		}
+	}
+
+	if (!can_fallback_to_builtin_index) {
+		x->mode = Addressing_Invalid;
+		x->expr = node;
+		emit_no_matching_overload_error();
+		return true;
 	}
 	return false;
 }
