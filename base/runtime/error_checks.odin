@@ -52,6 +52,24 @@ bounds_check_error :: proc "contextless" (file: string, line, column: i32, index
 	handle_error(file, line, column, index, count)
 }
 
+@(disabled=ODIN_NO_BOUNDS_CHECK)
+array_len_mismatch_error :: proc "contextless" (file: string, line, column: i32, lhs_len, rhs_len: int) {
+	if lhs_len == rhs_len {
+		return
+	}
+	@(cold, no_instrumentation)
+	handle_error :: proc "contextless" (file: string, line, column: i32, lhs_len, rhs_len: int) -> ! {
+		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_string(" Array length mismatch: lhs len = ")
+		print_i64(i64(lhs_len))
+		print_string(", rhs len = ")
+		print_i64(i64(rhs_len))
+		print_byte('\n')
+		bounds_trap()
+	}
+	handle_error(file, line, column, lhs_len, rhs_len)
+}
+
 @(no_instrumentation)
 slice_handle_error :: proc "contextless" (file: string, line, column: i32, lo, hi: int, len: int) -> ! {
 	print_caller_location(Source_Code_Location{file, line, column, ""})
