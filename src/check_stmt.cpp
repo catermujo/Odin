@@ -2817,19 +2817,70 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 			return;
 		}
 		Operand lhs = {Addressing_Invalid};
+		check_expr(ctx, &lhs, as->lhs[0]);
+		if (lhs.mode == Addressing_Invalid) {
+			return;
+		}
+
+		Token binary_op = op;
+		binary_op.kind = cast(TokenKind)(cast(i32)binary_op.kind - (Token_AddEq - Token_Add));
+		binary_op.string = substring(binary_op.string, 0, binary_op.string.len - 1);
+
+		Type *lhs_bt = base_type(lhs.type);
+		if (is_type_slice(lhs_bt) || is_type_dynamic_array(lhs_bt) || is_type_fixed_capacity_dynamic_array(lhs_bt)) {
+			Operand rhs_raw = {Addressing_Invalid};
+			check_expr(ctx, &rhs_raw, as->rhs[0]);
+			if (rhs_raw.mode == Addressing_Invalid) {
+				return;
+			}
+
+			Type *elem_type = base_any_array_type(lhs_bt);
+			Operand rhs_array = rhs_raw;
+			Operand rhs_elem  = rhs_raw;
+			bool rhs_is_container = check_is_assignable_to(ctx, &rhs_array, lhs.type);
+			bool rhs_is_scalar = false;
+			if (!rhs_is_container) {
+				rhs_is_scalar = check_is_assignable_to(ctx, &rhs_elem, elem_type);
+			}
+
+			if (!rhs_is_container && !rhs_is_scalar) {
+				gbString lhs_str = type_to_string(lhs.type);
+				gbString elem_str = type_to_string(elem_type);
+				error(op, "Assignment operator '%.*s' with '%s' requires RHS assignable to '%s' or '%s'", LIT(op.string), lhs_str, lhs_str, elem_str);
+				gb_string_free(elem_str);
+				gb_string_free(lhs_str);
+				return;
+			}
+
+			Operand elem_op = {};
+			elem_op.mode = Addressing_Value;
+			elem_op.type = elem_type;
+			elem_op.expr = as->lhs[0];
+			if (!check_binary_op(ctx, &elem_op, binary_op)) {
+				return;
+			}
+
+			Operand rhs = rhs_is_container ? rhs_array : rhs_elem;
+			rhs.mode = Addressing_Value;
+			rhs.type = lhs.type;
+			rhs.expr = as->rhs[0];
+			rhs.value = {};
+			check_assignment_variable(ctx, &lhs, &rhs, str_lit("assignment operation"));
+			return;
+		}
+
 		Operand rhs = {Addressing_Invalid};
 		Ast *binary_expr = alloc_ast_node(node->file(), Ast_BinaryExpr);
 		ast_node(be, BinaryExpr, binary_expr);
 		be->op = op;
-		be->op.kind = cast(TokenKind)(cast(i32)be->op.kind - (Token_AddEq - Token_Add));
+		be->op.kind = binary_op.kind;
 		// NOTE(bill): Only use the first one will be used
 		be->left  = as->lhs[0];
 		be->right = as->rhs[0];
 
-		check_expr(ctx, &lhs, as->lhs[0]);
 		check_binary_expr(ctx, &rhs, binary_expr, nullptr, true);
 		if (rhs.mode != Addressing_Invalid) {
-			be->op.string = substring(be->op.string, 0, be->op.string.len - 1);
+			be->op.string = binary_op.string;
 			add_type_and_value(ctx, binary_expr, rhs.mode, rhs.type, rhs.value);
 			rhs.expr = binary_expr;
 			check_assignment_variable(ctx, &lhs, &rhs, str_lit("assignment operation"));
