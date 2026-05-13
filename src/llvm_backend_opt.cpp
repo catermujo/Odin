@@ -94,6 +94,16 @@ gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 		return;
 	}
 
+	if (fast_math_flags & OdinFastMath_Allow_Contract) {
+		char const *name = "fp-contract";
+		char const *value = "fast";
+		LLVMAttributeRef attr = LLVMCreateStringAttribute(
+			p->module->ctx,
+			name, cast(unsigned)gb_strlen(name),
+			value, cast(unsigned)gb_strlen(value));
+		LLVMAddAttributeAtIndex(p->value, LLVMAttributeIndex_FunctionIndex, attr);
+	}
+
 	for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(p->value);
 	     block != nullptr;
 	     block = LLVMGetNextBasicBlock(block)) {
