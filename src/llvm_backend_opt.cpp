@@ -50,6 +50,28 @@
 	optimization of Odin programs	
 **************************************************************************/
 
+gb_internal bool lb_is_float_or_float_vector_llvm_type(LLVMTypeRef t) {
+	if (t == nullptr) {
+		return false;
+	}
+
+	switch (LLVMGetTypeKind(t)) {
+	case LLVMHalfTypeKind:
+	case LLVMFloatTypeKind:
+	case LLVMDoubleTypeKind:
+	case LLVMX86_FP80TypeKind:
+	case LLVMFP128TypeKind:
+	case LLVMPPC_FP128TypeKind:
+		return true;
+
+	case LLVMVectorTypeKind:
+		return lb_is_float_or_float_vector_llvm_type(LLVMGetElementType(t));
+
+	default:
+		return false;
+	}
+}
+
 gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 	Entity *e = p->entity;
 	if (e == nullptr) {
@@ -92,7 +114,15 @@ gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 			case LLVMFPTrunc:
 			case LLVMFPExt:
 			case LLVMFCmp:
+			case LLVMPHI:
+			case LLVMSelect:
 				LLVMSetFastMathFlags(instr, llvm_flags);
+				break;
+			case LLVMCall:
+			case LLVMInvoke:
+				if (lb_is_float_or_float_vector_llvm_type(LLVMTypeOf(instr))) {
+					LLVMSetFastMathFlags(instr, llvm_flags);
+				}
 				break;
 			}
 		}
@@ -487,5 +517,3 @@ gb_internal void lb_run_remove_unused_globals_pass(lbModule *m) {
 		}
 	}
 }
-
-
