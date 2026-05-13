@@ -485,6 +485,47 @@ map_with_integer_keys :: proc(t: ^testing.T) {
 }
 
 @test
+unmarshal_struct_ignores_unknown_array_field :: proc(t: ^testing.T) {
+	Header :: struct {
+		frame_type: string `json:"type"`,
+	}
+
+	input := `{"type":"message","headers":{},"method":"PUT","payloads":["aGVsbG8="],"uri":"hm://x"}`
+	h: Header
+	err := json.unmarshal_string(input, &h)
+	defer delete(h.frame_type)
+
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, h.frame_type, "message")
+}
+
+@test
+unmarshal_nested_struct_ignores_unknown_array_field :: proc(t: ^testing.T) {
+	Track :: struct {
+		name: string `json:"name"`,
+	}
+	Playlist_Page :: struct {
+		items: []Track `json:"items"`,
+	}
+
+	input := `{"items":[{"name":"x","genres":["alt"]}]}`
+	page: Playlist_Page
+	err := json.unmarshal_string(input, &page)
+	defer {
+		for item in page.items {
+			delete(item.name)
+		}
+		delete(page.items)
+	}
+
+	testing.expect_value(t, err, nil)
+	testing.expectf(t, len(page.items) == 1, "Expected 1 item, got %v", len(page.items))
+	if len(page.items) == 1 {
+		testing.expect_value(t, page.items[0].name, "x")
+	}
+}
+
+@test
 enumerated_array :: proc(t: ^testing.T) {
 	Fruit :: enum { Apple, Banana, Pear }
 	Fruit_Stock :: [Fruit]uint {
