@@ -3216,6 +3216,7 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	FORCE_ADD_RUNTIME_ENTITIES(!build_context.no_bounds_check,
 		// Bounds checking related procedures
 		str_lit("bounds_check_error"),
+		str_lit("array_len_mismatch_error"),
 		str_lit("matrix_bounds_check_error"),
 		str_lit("slice_expr_error_hi"),
 		str_lit("slice_expr_error_lo_hi"),

@@ -3596,8 +3596,8 @@ gb_internal void lb_emit_runtime_array_len_mismatch_check(lbProcedure *p, Token 
 		auto args = array_make<lbValue>(temporary_allocator(), 5);
 		lb_set_file_line_col(p, args, token.pos);
 		args[3] = lhs_len;
-		args[4] = lhs_len;
-		lb_emit_runtime_call(p, "bounds_check_error", args);
+		args[4] = rhs_len;
+		lb_emit_runtime_call(p, "array_len_mismatch_error", args);
 	}
 	lb_emit_jump(p, ok);
 	lb_start_block(p, ok);
