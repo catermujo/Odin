@@ -362,11 +362,16 @@ gb_internal void add_polymorphic_record_entity(CheckerContext *ctx, Ast *node, T
 }
 
 
-bool check_constant_parameter_value(Type *type, Ast *expr) {
+bool check_constant_parameter_value(CheckerContext *ctx, Type *type, Ast *expr) {
 	if (!is_type_constant_type(type)) {
-		gbString str = type_to_string(type);
-		defer (gb_string_free(str));
-		error(expr, "A parameter must be a valid constant type, got %s", str);
+		if (ctx == nullptr ||
+		    (!ctx->no_polymorphic_errors &&
+		     !ctx->hide_polymorphic_errors &&
+		     !ctx->in_proc_group)) {
+			gbString str = type_to_string(type);
+			defer (gb_string_free(str));
+			error(expr, "A parameter must be a valid constant type, got %s", str);
+		}
 		return true;
 	}
 	return false;
@@ -483,7 +488,7 @@ gb_internal Type *check_record_polymorphic_params(CheckerContext *ctx, Ast *poly
 				type = t_invalid;
 			}
 
-			if (!is_type_param && check_constant_parameter_value(type, params[i])) {
+			if (!is_type_param && check_constant_parameter_value(ctx, type, params[i])) {
 				// failed
 			}
 
@@ -2291,9 +2296,9 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 					}
 
 
-					if (!is_type_polymorphic(type) && check_constant_parameter_value(type, params[i])) {
-						// failed
-					}
+						if (!is_type_polymorphic(type) && check_constant_parameter_value(ctx, type, params[i])) {
+							// failed
+						}
 
 					// param = alloc_entity_const_param(scope, name->Ident.token, type, poly_const, is_type_polymorphic(type));
 
