@@ -126,6 +126,58 @@ parse_comma :: proc(p: ^Parser) -> (do_break: bool) {
 }
 
 @(require_results)
+skip_value :: proc(p: ^Parser) -> (err: Error) {
+	#partial switch p.curr_token.kind {
+	case .Null, .False, .True, .Integer, .Float, .String:
+		advance_token(p)
+		return nil
+
+	case .Ident:
+		if p.spec == .MJSON {
+			advance_token(p)
+			return nil
+		}
+
+	case .Infinity, .NaN:
+		if p.spec != .JSON {
+			advance_token(p)
+			return nil
+		}
+
+	case .Open_Brace:
+		expect_token(p, .Open_Brace) or_return
+		for p.curr_token.kind != .Close_Brace {
+			if p.spec != .JSON && allow_token(p, .Ident) {
+				// Ident key was already consumed.
+			} else {
+				expect_token(p, .String) or_return
+			}
+			parse_colon(p) or_return
+			skip_value(p) or_return
+			if parse_comma(p) {
+				break
+			}
+		}
+		expect_token(p, .Close_Brace) or_return
+		return nil
+
+	case .Open_Bracket:
+		expect_token(p, .Open_Bracket) or_return
+		for p.curr_token.kind != .Close_Bracket {
+			skip_value(p) or_return
+			if parse_comma(p) {
+				break
+			}
+		}
+		expect_token(p, .Close_Bracket) or_return
+		return nil
+	}
+
+	err = .Unexpected_Token
+	advance_token(p)
+	return
+}
+
 parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: Error) {
 	err = .None
 	token := p.curr_token
