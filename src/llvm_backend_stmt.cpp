@@ -867,6 +867,70 @@ gb_internal void lb_build_range_string16(lbProcedure *p, lbValue expr, Type *val
 	if (done_) *done_ = done;
 }
 
+gb_internal void lb_try_attach_full_unroll_loop_metadata(lbProcedure *p, LLVMValueRef branch_instr) {
+	if (branch_instr == nullptr || LLVMGetInstructionOpcode(branch_instr) != LLVMBr) {
+		return;
+	}
+
+	LLVMContextRef ctx = p->module->ctx;
+	LLVMMetadataRef unroll_name = LLVMMDStringInContext2(ctx, "llvm.loop.unroll.full", gb_strlen("llvm.loop.unroll.full"));
+	LLVMMetadataRef unroll_node = LLVMMDNodeInContext2(ctx, &unroll_name, 1);
+
+	// LLVM loop metadata is self-referential in operand 0: !{!0, !{!"llvm.loop.unroll.full"}}
+	LLVMMetadataRef loop_ops[2] = {unroll_node, unroll_node};
+	LLVMMetadataRef loop_id = LLVMMDNodeInContext2(ctx, loop_ops, gb_count_of(loop_ops));
+	LLVMValueRef loop_id_value = LLVMMetadataAsValue(ctx, loop_id);
+	LLVMReplaceMDNodeOperandWith(loop_id_value, 0, loop_id);
+
+	unsigned kind_id = LLVMGetMDKindIDInContext(ctx, "llvm.loop", cast(unsigned)gb_strlen("llvm.loop"));
+	LLVMSetMetadata(branch_instr, kind_id, loop_id_value);
+}
+
+gb_internal bool lb_small_constant_trip_count(i64 trip_count) {
+	return trip_count > 0 && trip_count <= 16;
+}
+
+gb_internal bool lb_interval_trip_count_for_full_unroll(AstBinaryExpr *node, i64 *trip_count_) {
+	if (node == nullptr || trip_count_ == nullptr) {
+		return false;
+	}
+
+	if (node->left->tav.mode != Addressing_Constant || node->right->tav.mode != Addressing_Constant) {
+		return false;
+	}
+
+	i64 lo = exact_value_to_i64(node->left->tav.value);
+	i64 hi = exact_value_to_i64(node->right->tav.value);
+	i64 trip_count = 0;
+
+	switch (node->op.kind) {
+	case Token_RangeHalf:
+		if (hi <= lo) {
+			return false;
+		}
+		trip_count = hi-lo;
+		break;
+
+	case Token_RangeFull:
+	case Token_Ellipsis:
+		if (hi < lo) {
+			return false;
+		}
+		trip_count = (hi-lo)+1;
+		break;
+
+	default:
+		return false;
+	}
+
+	if (!lb_small_constant_trip_count(trip_count)) {
+		return false;
+	}
+
+	*trip_count_ = trip_count;
+	return true;
+}
+
 
 
 gb_internal Ast *lb_strip_and_prefix(Ast *ident) {
@@ -884,6 +948,9 @@ gb_internal Ast *lb_strip_and_prefix(Ast *ident) {
 gb_internal void lb_build_range_interval(lbProcedure *p, AstBinaryExpr *node,
                                          AstRangeStmt *rs, Scope *scope) {
 	bool ADD_EXTRA_WRAPPING_CHECK = true;
+	i64 full_unroll_trip_count = 0;
+	bool attach_full_unroll_metadata = lb_interval_trip_count_for_full_unroll(node, &full_unroll_trip_count);
+	gb_unused(full_unroll_trip_count);
 
 	lbModule *m = p->module;
 
@@ -1001,7 +1068,12 @@ gb_internal void lb_build_range_interval(lbProcedure *p, AstBinaryExpr *node,
 		lb_start_block(p, post);
 		lb_emit_increment(p, value.addr);
 		lb_emit_increment(p, index.addr);
+		lbBlock *backedge_block = p->curr_block;
 		lb_emit_jump(p, loop);
+		if (attach_full_unroll_metadata && backedge_block != nullptr) {
+			LLVMValueRef br = LLVMGetLastInstruction(backedge_block->block);
+			lb_try_attach_full_unroll_loop_metadata(p, br);
+		}
 	}
 
 	lb_start_block(p, done);
@@ -1320,6 +1392,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	lbBlock *loop = nullptr;
 	lbBlock *done = nullptr;
 	bool is_map = false;
+	bool attach_full_unroll_metadata = false;
 
 	if (rs->label != nullptr && p->debug_info != nullptr) {
 		lbBlock *label = lb_create_block(p, "for.range.label");
@@ -1331,6 +1404,9 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	}
 
 	if (tav.mode == Addressing_Type) {
+		Type *enum_type = base_type(type_deref(tav.type));
+		GB_ASSERT(is_type_enum(enum_type));
+		attach_full_unroll_metadata = lb_small_constant_trip_count(enum_type->Enum.fields.count);
 		lb_build_range_enum(p, type_deref(tav.type), val0_type, &val, &key, &loop, &done);
 	} else {
 		Type *expr_type = type_of_expr(expr);
@@ -1346,6 +1422,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 			break;
 		}
 		case Type_Array: {
+			attach_full_unroll_metadata = lb_small_constant_trip_count(et->Array.count);
 			lbValue array;
 			lbAddr addr = lb_build_addr(p, expr);
 			switch (addr.kind) {
@@ -1368,6 +1445,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 			break;
 		}
 		case Type_EnumeratedArray: {
+			attach_full_unroll_metadata = lb_small_constant_trip_count(et->EnumeratedArray.count);
 			lbValue array = lb_build_addr_ptr(p, expr);
 			if (is_type_pointer(type_deref(array.type))) {
 				array = lb_emit_load(p, array);
@@ -1503,7 +1581,12 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	if (p->debug_info != nullptr) {
 		LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, rs->body));
 	}
+	lbBlock *backedge_block = p->curr_block;
 	lb_emit_jump(p, loop);
+	if (attach_full_unroll_metadata && backedge_block != nullptr) {
+		LLVMValueRef br = LLVMGetLastInstruction(backedge_block->block);
+		lb_try_attach_full_unroll_loop_metadata(p, br);
+	}
 	lb_start_block(p, done);
 }
 
