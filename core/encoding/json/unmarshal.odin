@@ -746,10 +746,9 @@ unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind) -> (err: Unm
 @(private)
 unmarshal_count_array :: proc(p: ^Parser) -> (length: uintptr) {
 	p_backup := p^
-	p.allocator = mem.nil_allocator()
 	unmarshal_expect_token(p, .Open_Bracket)
 	array_length_loop: for p.curr_token.kind != .Close_Bracket {
-		_, _ = parse_value(p)
+		_ = skip_value(p)
 		length += 1
 		
 		if parse_comma(p) {
