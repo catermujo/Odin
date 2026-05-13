@@ -1042,6 +1042,8 @@ function<eager-inv>(
 		loop-deletion
 	),
 	loop-distribute,
+	loop-fusion,
+	loop-versioning,
 	inject-tli-mappings,
 	loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>,
 	drop-unnecessary-assumes,
@@ -1584,6 +1586,8 @@ function<eager-inv>(
 		loop-deletion
 	),
 	loop-distribute,
+	loop-fusion,
+	loop-versioning,
 	inject-tli-mappings,
 	loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>,
 	drop-unnecessary-assumes,
