@@ -5189,6 +5189,11 @@ gb_internal void lb_build_addr_compound_lit_populate(lbProcedure *p, Slice<Ast *
 	case Type_SimdVector:      et = bt->SimdVector.elem;      break;
 	case Type_Matrix:          et = bt->Matrix.elem;          break;
 	case Type_FixedCapacityDynamicArray: et = bt->FixedCapacityDynamicArray.elem; break;
+	case Type_Struct:
+		if (bt->Struct.soa_kind == StructSoa_Fixed) {
+			et = bt->Struct.soa_elem;
+		}
+		break;
 	}
 	GB_ASSERT(et != nullptr);
 
@@ -5315,6 +5320,29 @@ gb_internal void lb_build_addr_compound_lit_assign_array(lbProcedure *p, Array<l
 			} else {
 				lb_emit_store(p, td.gep, td.value);
 			}
+		}
+	}
+}
+
+gb_internal void lb_build_addr_compound_lit_assign_soa(lbProcedure *p, lbValue soa_addr, Array<lbCompoundLitElemTempData> const &temp_data) {
+	for (auto const &td : temp_data) {
+		if (td.value.value == nullptr) {
+			continue;
+		}
+
+		if (td.elem_length > 0) {
+			auto loop_data = lb_loop_start(p, cast(isize)td.elem_length, t_i32);
+			{
+				lbValue offset = lb_const_int(p->module, t_i32, td.elem_index);
+				lbValue index = lb_emit_arith(p, Token_Add, offset, loop_data.idx, t_i32);
+				lbAddr dst = lb_addr_soa_variable(soa_addr, index, td.expr);
+				lb_addr_store(p, dst, td.value);
+			}
+			lb_loop_end(p, loop_data);
+		} else {
+			lbValue index = lb_const_int(p->module, t_i32, td.elem_index);
+			lbAddr dst = lb_addr_soa_variable(soa_addr, index, td.expr);
+			lb_addr_store(p, dst, td.value);
 		}
 	}
 }
@@ -6396,7 +6424,18 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 	}
 
 	case Type_Struct:
-		lb_build_addr_struct_compound_lit_populate(p, expr, type, v);
+		if (is_type_soa_struct(type)) {
+			GB_ASSERT(bt->Struct.soa_kind == StructSoa_Fixed);
+			if (cl->elems.count > 0) {
+				lb_addr_store(p, v, lb_const_value(p->module, type, exact_value_compound(expr)));
+
+				auto temp_data = array_make<lbCompoundLitElemTempData>(temporary_allocator(), 0, cl->elems.count);
+				lb_build_addr_compound_lit_populate(p, cl->elems, &temp_data, type);
+				lb_build_addr_compound_lit_assign_soa(p, v.addr, temp_data);
+			}
+		} else {
+			lb_build_addr_struct_compound_lit_populate(p, expr, type, v);
+		}
 		break;
 
 	case Type_Map: {
