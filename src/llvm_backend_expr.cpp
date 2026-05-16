@@ -5276,6 +5276,17 @@ gb_internal void lb_build_addr_compound_lit_populate(lbProcedure *p, Slice<Ast *
 
 
 	isize elem_index = 0;
+	i64 matrix_vector_component_index = 0;
+	i64 matrix_vector_elem_count = 0;
+	Type *matrix_vector_type = nullptr;
+	if (bt->kind == Type_Matrix) {
+		if (bt->Matrix.is_row_major) {
+			matrix_vector_elem_count = bt->Matrix.column_count;
+		} else {
+			matrix_vector_elem_count = bt->Matrix.row_count;
+		}
+		matrix_vector_type = alloc_type_array(et, matrix_vector_elem_count);
+	}
 	// NOTE(bill): Separate value, gep, store into their own chunks
 	for (Ast *elem : elems) {
 		if (elem->kind == Ast_FieldValue) {
@@ -5347,7 +5358,17 @@ gb_internal void lb_build_addr_compound_lit_populate(lbProcedure *p, Slice<Ast *
 
 		} else {
 			if (bt->kind != Type_DynamicArray && lb_is_elem_const(elem, et)) {
-				elem_index++;
+				if (bt->kind == Type_Matrix) {
+					Type *ft = base_type(type_of_expr(elem));
+					if (ft != nullptr && ft->kind == Type_Array && ft->Array.count == matrix_vector_elem_count) {
+						matrix_vector_component_index += 1;
+						elem_index += cast(isize)matrix_vector_elem_count;
+					} else {
+						elem_index++;
+					}
+				} else {
+					elem_index++;
+				}
 				continue;
 			}
 
@@ -5369,6 +5390,32 @@ gb_internal void lb_build_addr_compound_lit_populate(lbProcedure *p, Slice<Ast *
 					array_add(temp_data, data);
 				}
 			} else {
+				if (bt->kind == Type_Matrix) {
+					Type *ft = base_type(type_deref(field_expr.type));
+					if (ft != nullptr && ft->kind == Type_Array && ft->Array.count == matrix_vector_elem_count && matrix_vector_type != nullptr) {
+						lbValue vector_value = lb_emit_conv(p, field_expr, matrix_vector_type);
+						lbValue vector_addr = lb_address_from_load_or_generate_local(p, vector_value);
+
+						for (i64 j = 0; j < matrix_vector_elem_count; j++) {
+							lbValue sp = lb_emit_array_epi(p, vector_addr, j);
+							lbValue ev = lb_emit_load(p, sp);
+
+							i64 row = bt->Matrix.is_row_major ? matrix_vector_component_index : j;
+							i64 col = bt->Matrix.is_row_major ? j : matrix_vector_component_index;
+							i64 linear_index = row*bt->Matrix.column_count + col;
+
+							lbCompoundLitElemTempData data = {};
+							data.value = ev;
+							data.elem_index = matrix_row_major_index_to_offset(bt, linear_index);
+							array_add(temp_data, data);
+						}
+
+						matrix_vector_component_index += 1;
+						elem_index += cast(isize)matrix_vector_elem_count;
+						continue;
+					}
+				}
+
 				lbValue ev = lb_emit_conv(p, field_expr, et);
 
 				lbCompoundLitElemTempData data = {};
