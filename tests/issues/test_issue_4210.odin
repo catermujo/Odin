@@ -4,6 +4,8 @@ package test_issues
 import "core:testing"
 import "base:intrinsics"
 
+Vec2 :: distinct [2]f32
+
 @test
 test_row_major_matrix :: proc(t: ^testing.T) {
 	row_major34: #row_major matrix[3,4]int = {
@@ -42,6 +44,69 @@ test_row_major_matrix :: proc(t: ^testing.T) {
 			testing.expect_value(t, major43_from_ptr [idx], row_major43_expected[idx])
 		}
 	}
+}
+
+@test
+test_matrix_literal_from_vectors :: proc(t: ^testing.T) {
+	col0 := [2]f32{1, 2}
+	col1 := [2]f32{3, 4}
+	value: matrix[2,2]f32 = {col0, col1}
+	expected: matrix[2,2]f32 = {
+		1, 3,
+		2, 4,
+	}
+	testing.expect_value(t, value, expected)
+
+	distinct_col0: Vec2 = {5, 6}
+	distinct_col1: Vec2 = {7, 8}
+	distinct_value: matrix[2,2]f32 = {distinct_col0, distinct_col1}
+	distinct_expected: matrix[2,2]f32 = {
+		5, 7,
+		6, 8,
+	}
+	testing.expect_value(t, distinct_value, distinct_expected)
+
+}
+
+@test
+test_matrix_component_vector_assignment :: proc(t: ^testing.T) {
+	m: matrix[2,2]f32
+
+	col0: Vec2 = {11, 22}
+	col1: Vec2 = {33, 44}
+
+	m[0] = col0
+	m[1] = col1
+
+	testing.expect_value(t, m, matrix[2,2]f32{
+		11, 33,
+		22, 44,
+	})
+
+	recovered0: Vec2 = m[0]
+	recovered1: Vec2 = m[1]
+	testing.expect_value(t, recovered0[0], col0[0])
+	testing.expect_value(t, recovered0[1], col0[1])
+	testing.expect_value(t, recovered1[0], col1[0])
+	testing.expect_value(t, recovered1[1], col1[1])
+}
+
+@test
+test_row_major_matrix_component_vectors :: proc(t: ^testing.T) {
+	row0 := [3]int{1, 2, 3}
+	row1 := [3]int{4, 5, 6}
+
+	value: #row_major matrix[2,3]int = {row0, row1}
+	expected: #row_major matrix[2,3]int = {
+		1, 2, 3,
+		4, 5, 6,
+	}
+	testing.expect_value(t, value, expected)
+
+	assigned: #row_major matrix[2,3]int
+	assigned[0] = row0
+	assigned[1] = row1
+	testing.expect_value(t, assigned, expected)
 }
 
 @test
