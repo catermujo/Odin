@@ -11897,6 +11897,17 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 
 			cl->max_count = max;
 		} else {
+			Type *matrix_vector_type = nullptr;
+			i64 matrix_vector_elem_count = 0;
+			if (t->kind == Type_Matrix) {
+				if (t->Matrix.is_row_major) {
+					matrix_vector_elem_count = t->Matrix.column_count;
+				} else {
+					matrix_vector_elem_count = t->Matrix.row_count;
+				}
+				matrix_vector_type = alloc_type_array(elem_type, matrix_vector_elem_count);
+			}
+
 			for (isize index = 0; index < cl->elems.count; index++) {
 				defer (max += 1);
 
@@ -11911,7 +11922,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 					continue;
 				}
 
-				if (0 <= max_type_count && max_type_count <= index) {
+				if (t->kind != Type_Matrix && 0 <= max_type_count && max_type_count <= index) {
 					error(e, "Index %lld is out of bounds (>= %lld) for %.*s", index, max_type_count, LIT(context_name));
 				}
 
@@ -11928,11 +11939,39 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 
 					max += tt->variables.count-1;
 				} else {
-					check_assignment(c, &operand, elem_type, context_name);
-
-					if (is_constant) {
-						is_constant = check_is_operand_compound_lit_constant(c, &operand, elem_type);
+					bool handled = false;
+					if (t->kind == Type_Matrix) {
+						Operand scalar_probe = operand;
+						if (check_is_assignable_to(c, &scalar_probe, elem_type)) {
+							check_assignment(c, &operand, elem_type, context_name);
+							if (is_constant) {
+								is_constant = check_is_operand_compound_lit_constant(c, &operand, elem_type);
+							}
+							handled = true;
+						} else {
+							Type *obt = base_type(type_deref(operand.type));
+							if (obt != nullptr && obt->kind == Type_Array && matrix_vector_type != nullptr &&
+							    check_is_castable_to(c, &scalar_probe, matrix_vector_type)) {
+								check_cast(c, &operand, matrix_vector_type);
+								max += matrix_vector_elem_count-1;
+								if (is_constant) {
+									is_constant = check_is_operand_compound_lit_constant(c, &operand, matrix_vector_type);
+								}
+								handled = true;
+							}
+						}
 					}
+
+					if (!handled) {
+						check_assignment(c, &operand, elem_type, context_name);
+						if (is_constant) {
+							is_constant = check_is_operand_compound_lit_constant(c, &operand, elem_type);
+						}
+					}
+				}
+
+				if (t->kind == Type_Matrix && max_type_count >= 0 && max+1 > max_type_count) {
+					error(e, "Matrix literal has too many values, expected %lld scalar values", cast(long long)max_type_count);
 				}
 			}
 		}
@@ -12958,8 +12997,10 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 	}
 
 	if (type_hint != nullptr && is_type_matrix(t)) {
-		// TODO(bill): allow matrix columns to be assignable to other types which are the same internally
-		// if a type hint exists
+		Operand cast_probe = *o;
+		if (check_is_castable_to(c, &cast_probe, type_hint)) {
+			o->type = type_hint;
+		}
 	}
 	return kind;
 }

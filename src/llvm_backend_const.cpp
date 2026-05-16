@@ -2193,6 +2193,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 			
 			i64 max_count = type->Matrix.row_count*type->Matrix.column_count;
 			i64 total_count = matrix_type_total_internal_elems(type);
+			i64 matrix_vector_elem_count = type->Matrix.is_row_major ? type->Matrix.column_count : type->Matrix.row_count;
+			Type *matrix_vector_type = alloc_type_array(elem_type, matrix_vector_elem_count);
 			
 			LLVMValueRef *values = gb_alloc_array(temporary_allocator(), LLVMValueRef, cast(isize)total_count);
 			if (cl->elems[0]->kind == Ast_FieldValue) {
@@ -2246,15 +2248,32 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 				res.value = lb_build_constant_array_values(m, type, elem_type, cast(isize)total_count, values, cc);
 				return res;
 			} else {
-				GB_ASSERT_MSG(elem_count == max_count, "%td != %td", elem_count, max_count);
+				i64 matrix_vector_component_index = 0;
+				i64 matrix_elem_index = 0;
 
-				LLVMValueRef *values = gb_alloc_array(temporary_allocator(), LLVMValueRef, cast(isize)total_count);
 				for_array(i, cl->elems) {
 					TypeAndValue tav = cl->elems[i]->tav;
 					GB_ASSERT(tav.mode != Addressing_Invalid);
-					i64 offset = 0;
-					offset = matrix_row_major_index_to_offset(type, i);
-					values[offset] = lb_const_value(m, elem_type, tav.value, tav.type, cc).value;
+					Type *tav_base = base_type(type_deref(tav.type));
+					if (tav_base != nullptr && tav_base->kind == Type_Array && tav_base->Array.count == matrix_vector_elem_count) {
+						LLVMValueRef vector_value = lb_const_value(m, matrix_vector_type, tav.value, tav.type, cc).value;
+						for (i64 j = 0; j < matrix_vector_elem_count; j++) {
+							LLVMValueRef vector_elem = llvm_const_extract_value(m, vector_value, cast(unsigned)j);
+							i64 row = type->Matrix.is_row_major ? matrix_vector_component_index : j;
+							i64 col = type->Matrix.is_row_major ? j : matrix_vector_component_index;
+							i64 linear_index = row*type->Matrix.column_count + col;
+							i64 offset = matrix_row_major_index_to_offset(type, linear_index);
+							GB_ASSERT(values[offset] == nullptr);
+							values[offset] = vector_elem;
+						}
+						matrix_vector_component_index += 1;
+						matrix_elem_index += matrix_vector_elem_count;
+					} else {
+						i64 offset = matrix_row_major_index_to_offset(type, matrix_elem_index);
+						GB_ASSERT(values[offset] == nullptr);
+						values[offset] = lb_const_value(m, elem_type, tav.value, tav.type, cc).value;
+						matrix_elem_index += 1;
+					}
 				}
 				for (isize i = 0; i < total_count; i++) {
 					if (values[i] == nullptr) {
