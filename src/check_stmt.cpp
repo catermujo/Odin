@@ -657,7 +657,26 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 		ctx->bit_field_bit_size = lhs_e->Variable.bit_field_bit_size;
 	}
 
-	check_assignment(ctx, rhs, assignment_type, context_name);
+	bool assigned_via_matrix_component_cast = false;
+	if (assignment_type != nullptr && rhs->mode != Addressing_Invalid) {
+		Ast *lhs_expr = unparen_expr(lhs->expr);
+		if (lhs_expr != nullptr && lhs_expr->kind == Ast_IndexExpr) {
+			Type *indexed_type = type_of_expr(lhs_expr->IndexExpr.expr);
+			Type *indexed_base = base_type(type_deref(indexed_type));
+			if (indexed_base != nullptr && indexed_base->kind == Type_Matrix) {
+				Operand rhs_probe = *rhs;
+				if (!check_is_assignable_to(ctx, &rhs_probe, assignment_type) &&
+				    check_is_castable_to(ctx, &rhs_probe, assignment_type)) {
+					check_cast(ctx, rhs, assignment_type);
+					assigned_via_matrix_component_cast = rhs->mode != Addressing_Invalid;
+				}
+			}
+		}
+	}
+
+	if (!assigned_via_matrix_component_cast) {
+		check_assignment(ctx, rhs, assignment_type, context_name);
+	}
 
 	ctx->bit_field_bit_size = prev_bit_field_bit_size;
 
