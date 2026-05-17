@@ -67,6 +67,88 @@ gb_internal void lb_mem_copy_non_overlapping(lbProcedure *p, lbValue dst, lbValu
 }
 
 
+gb_internal lbValue lb_emit_abs(lbProcedure *p, lbValue x) {
+	Type *t = x.type;
+	if (is_type_array_like(t)) {
+		i64 count = get_array_type_count(t);
+		bool inline_array_arith = lb_can_try_to_inline_array_arith(t);
+		lbValue src_addr = lb_address_from_load_or_generate_local(p, x);
+		lbAddr dst = lb_add_local_generated(p, t, false);
+
+		if (inline_array_arith) {
+			for (i64 i = 0; i < count; i++) {
+				lbValue v = lb_emit_load(p, lb_emit_array_epi(p, src_addr, cast(i32)i));
+				lb_emit_store(p, lb_emit_array_epi(p, dst.addr, cast(i32)i), lb_emit_abs(p, v));
+			}
+		} else {
+			auto loop_data = lb_loop_start(p, cast(isize)count, t_i32);
+			{
+				lbValue i = loop_data.idx;
+				lbValue v = lb_emit_load(p, lb_emit_array_ep(p, src_addr, i));
+				lb_emit_store(p, lb_emit_array_ep(p, dst.addr, i), lb_emit_abs(p, v));
+			}
+			lb_loop_end(p, loop_data);
+		}
+
+		return lb_addr_load(p, dst);
+	}
+
+	if (is_type_unsigned(t)) {
+		return x;
+	}
+	if (is_type_quaternion(t)) {
+		i64 sz = 8*type_size_of(t);
+		auto args = array_make<lbValue>(permanent_allocator(), 1);
+		args[0] = x;
+		switch (sz) {
+		case 64:  return lb_emit_runtime_call(p, "abs_quaternion64", args);
+		case 128: return lb_emit_runtime_call(p, "abs_quaternion128", args);
+		case 256: return lb_emit_runtime_call(p, "abs_quaternion256", args);
+		}
+		GB_PANIC("Unknown complex type");
+	} else if (is_type_complex(t)) {
+		i64 sz = 8*type_size_of(t);
+		auto args = array_make<lbValue>(permanent_allocator(), 1);
+		args[0] = x;
+		switch (sz) {
+		case 32:  return lb_emit_runtime_call(p, "abs_complex32",  args);
+		case 64:  return lb_emit_runtime_call(p, "abs_complex64",  args);
+		case 128: return lb_emit_runtime_call(p, "abs_complex128", args);
+		}
+		GB_PANIC("Unknown complex type");
+	} else if (is_type_float(t)) {
+		bool little = is_type_endian_little(t) || (is_type_endian_platform(t) && build_context.endian_kind == TargetEndian_Little);
+		Type *t_unsigned = nullptr;
+		lbValue mask = {0};
+		switch (type_size_of(t)) {
+		case 2:
+			t_unsigned = t_u16;
+			mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFF : 0xFF7F);
+			break;
+		case 4:
+			t_unsigned = t_u32;
+			mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFF : 0xFFFFFF7F);
+			break;
+		case 8:
+			t_unsigned = t_u64;
+			mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFFFFFFFFFF : 0xFFFFFFFFFFFFFF7F);
+			break;
+		default:
+			GB_PANIC("abs: unhandled float size");
+		}
+
+		lbValue as_unsigned = lb_emit_transmute(p, x, t_unsigned);
+		lbValue abs = lb_emit_arith(p, Token_And, as_unsigned, mask, t_unsigned);
+		return lb_emit_transmute(p, abs, t);
+	}
+
+	lbValue zero = lb_const_nil(p->module, t);
+	lbValue cond = lb_emit_comp(p, Token_Lt, x, zero);
+	lbValue neg = lb_emit_unary_arith(p, Token_Sub, x, t);
+	return lb_emit_select(p, cond, neg, x);
+}
+
+
 gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool ignore_body) {
 	GB_ASSERT(entity != nullptr);
 	GB_ASSERT(entity->kind == Entity_Procedure);
@@ -3216,61 +3298,7 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 	}
 
 	case BuiltinProc_abs: {
-		lbValue x = lb_build_expr(p, ce->args[0]);
-		Type *t = x.type;
-		if (is_type_unsigned(t)) {
-			return x;
-		}
-		if (is_type_quaternion(t)) {
-			i64 sz = 8*type_size_of(t);
-			auto args = array_make<lbValue>(permanent_allocator(), 1);
-			args[0] = x;
-			switch (sz) {
-			case 64:  return lb_emit_runtime_call(p, "abs_quaternion64", args);
-			case 128: return lb_emit_runtime_call(p, "abs_quaternion128", args);
-			case 256: return lb_emit_runtime_call(p, "abs_quaternion256", args);
-			}
-			GB_PANIC("Unknown complex type");
-		} else if (is_type_complex(t)) {
-			i64 sz = 8*type_size_of(t);
-			auto args = array_make<lbValue>(permanent_allocator(), 1);
-			args[0] = x;
-			switch (sz) {
-			case 32:  return lb_emit_runtime_call(p, "abs_complex32",  args);
-			case 64:  return lb_emit_runtime_call(p, "abs_complex64",  args);
-			case 128: return lb_emit_runtime_call(p, "abs_complex128", args);
-			}
-			GB_PANIC("Unknown complex type");
-		} else if (is_type_float(t)) {
-			bool little = is_type_endian_little(t) || (is_type_endian_platform(t) && build_context.endian_kind == TargetEndian_Little);
-			Type *t_unsigned = nullptr;
-			lbValue mask = {0};
-			switch (type_size_of(t)) {
-			case 2:
-				t_unsigned = t_u16;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFF : 0xFF7F);
-				break;
-			case 4:
-				t_unsigned = t_u32;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFF : 0xFFFFFF7F);
-				break;
-			case 8:
-				t_unsigned = t_u64;
-				mask = lb_const_int(p->module, t_unsigned, little ? 0x7FFFFFFFFFFFFFFF : 0xFFFFFFFFFFFFFF7F);
-				break;
-			default:
-				GB_PANIC("abs: unhandled float size");
-			}
-
-			lbValue as_unsigned = lb_emit_transmute(p, x, t_unsigned);
-			lbValue abs = lb_emit_arith(p, Token_And, as_unsigned, mask, t_unsigned);
-			return lb_emit_transmute(p, abs, t);
-		}
-
-		lbValue zero = lb_const_nil(p->module, t);
-		lbValue cond = lb_emit_comp(p, Token_Lt, x, zero);
-		lbValue neg = lb_emit_unary_arith(p, Token_Sub, x, t);
-		return lb_emit_select(p, cond, neg, x);
+		return lb_emit_abs(p, lb_build_expr(p, ce->args[0]));
 	}
 
 	case BuiltinProc_clamp:
