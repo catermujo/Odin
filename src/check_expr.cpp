@@ -4403,6 +4403,54 @@ gb_internal void check_binary_expr_dependency(CheckerContext *c, Token op, Type 
 	}
 }
 
+gb_internal bool check_binary_expr_promote_scalar_to_complex_or_quaternion(CheckerContext *c, Token op, Operand *x, Operand *y) {
+	switch (op.kind) {
+	case Token_Add:
+	case Token_Sub:
+	case Token_Mul:
+	case Token_Quo:
+		break;
+	default:
+		return false;
+	}
+
+	Type *xt = base_type(x->type);
+	Type *yt = base_type(y->type);
+
+	bool x_is_complex_or_quaternion = is_type_complex(xt) || is_type_quaternion(xt);
+	bool y_is_complex_or_quaternion = is_type_complex(yt) || is_type_quaternion(yt);
+	if (x_is_complex_or_quaternion == y_is_complex_or_quaternion) {
+		return false;
+	}
+
+	if (x_is_complex_or_quaternion) {
+		Operand probe = *y;
+		if (!check_is_assignable_to(c, &probe, x->type, false)) {
+			return false;
+		}
+
+		y->type = x->type;
+		if (y->mode == Addressing_Constant) {
+			check_is_expressible(c, y, y->type);
+			if (y->mode == Addressing_Invalid) {
+				x->mode = Addressing_Invalid;
+			}
+		}
+		return true;
+	}
+
+	Operand probe = *x;
+	if (!check_is_assignable_to(c, &probe, y->type, false)) {
+		return false;
+	}
+
+	x->type = y->type;
+	if (x->mode == Addressing_Constant) {
+		check_is_expressible(c, x, x->type);
+	}
+	return true;
+}
+
 gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Type *type_hint, bool use_lhs_as_type_hint=false) {
 	GB_ASSERT(node->kind == Ast_BinaryExpr);
 	Operand y_ = {}, *y = &y_;
@@ -4682,18 +4730,24 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 	    	// of a comparison will always be an untyped boolean, and allowing
 	    	// any boolean between these two simplifies a lot of expressions
 	} else if (!are_types_identical(x->type, y->type)) {
-		if (x->type != t_invalid &&
-		    y->type != t_invalid) {
-			gbString xt = type_to_string(x->type);
-			gbString yt = type_to_string(y->type);
-			gbString expr_str = expr_to_string(node);
-			error(op, "Mismatched types in binary expression '%s' : '%s' vs '%s'", expr_str, xt, yt);
-			gb_string_free(expr_str);
-			gb_string_free(yt);
-			gb_string_free(xt);
+		bool promoted = check_binary_expr_promote_scalar_to_complex_or_quaternion(c, op, x, y);
+		if (x->mode == Addressing_Invalid) {
+			return;
 		}
-		x->mode = Addressing_Invalid;
-		return;
+		if (!(promoted && are_types_identical(x->type, y->type))) {
+			if (x->type != t_invalid &&
+			    y->type != t_invalid) {
+				gbString xt = type_to_string(x->type);
+				gbString yt = type_to_string(y->type);
+				gbString expr_str = expr_to_string(node);
+				error(op, "Mismatched types in binary expression '%s' : '%s' vs '%s'", expr_str, xt, yt);
+				gb_string_free(expr_str);
+				gb_string_free(yt);
+				gb_string_free(xt);
+			}
+			x->mode = Addressing_Invalid;
+			return;
+		}
 	}
 
 	if (!check_binary_op(c, x, op)) {
