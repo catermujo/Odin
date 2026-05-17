@@ -69,6 +69,34 @@ gb_global BuiltinTypeIsProc *builtin_type_is_procs[BuiltinProc__type_simple_bool
 	type_has_nil,
 };
 
+gb_internal bool is_min_max_clamp_ordered_operand_type(Type *type) {
+	type = base_type(type);
+	if (type == nullptr) {
+		return false;
+	}
+	if (is_type_ordered(type) && (is_type_numeric(type) || is_type_string(type))) {
+		return true;
+	}
+	if (!is_type_array_like(type)) {
+		return false;
+	}
+	Type *elem = core_array_type(type);
+	return is_type_ordered(elem) && (is_type_numeric(elem) || is_type_string(elem));
+}
+
+gb_internal bool is_abs_operand_type(Type *type) {
+	type = base_type(type);
+	if (type == nullptr) {
+		return false;
+	}
+	if (!is_type_array_like(type)) {
+		return is_type_numeric(type);
+	}
+
+	Type *elem = base_array_type(type);
+	return is_type_numeric(elem) && !is_type_complex_or_quaternion(elem);
+}
+
 
 gb_internal void check_or_else_right_type(CheckerContext *c, Ast *expr, String const &name, Type *right_type) {
 	if (right_type == nullptr) {
@@ -4490,9 +4518,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 		if (operand->mode == Addressing_Type && is_type_enumerated_array(type)) {
 			// Okay
-		} else if (!is_type_ordered(type) || !(is_type_numeric(type) || is_type_string(type))) {
+		} else if (!is_min_max_clamp_ordered_operand_type(type)) {
 			gbString type_str = type_to_string(original_type);
-			error(call, "Expected an ordered numeric type to 'min', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'min', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4590,11 +4618,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (b.mode == Addressing_Invalid) {
 				return false;
 			}
-
-			if (!is_type_ordered(b.type) || !(is_type_numeric(b.type) || is_type_string(b.type))) {
+			if (!is_min_max_clamp_ordered_operand_type(b.type)) {
 				gbString type_str = type_to_string(b.type);
 				error(call,
-				      "Expected an ordered numeric type to 'min', got '%s'",
+				      "Expected an ordered numeric, string, or fixed-size array thereof to 'min', got '%s'",
 				      type_str);
 				gb_string_free(type_str);
 				return false;
@@ -4642,7 +4669,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 		}
 
-		if (all_constant) {
+		if (all_constant && !is_type_array_like(operands[0].type)) {
 			ExactValue value = operands[0].value;
 			for (isize i = 1; i < operands.count; i++) {
 				Operand y = operands[i];
@@ -4680,9 +4707,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 		if (operand->mode == Addressing_Type && is_type_enumerated_array(type)) {
 			// Okay
-		} else if (!is_type_ordered(type) || !(is_type_numeric(type) || is_type_string(type))) {
+		} else if (!is_min_max_clamp_ordered_operand_type(type)) {
 			gbString type_str = type_to_string(original_type);
-			error(call, "Expected an ordered numeric type to 'max', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'max', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4784,10 +4811,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (b.mode == Addressing_Invalid) {
 				return false;
 			}
-			if (!is_type_ordered(b.type) || !(is_type_numeric(b.type) || is_type_string(b.type))) {
+			if (!is_min_max_clamp_ordered_operand_type(b.type)) {
 				gbString type_str = type_to_string(b.type);
 				error(arg,
-				      "Expected an ordered numeric type to 'max', got '%s'",
+				      "Expected an ordered numeric, string, or fixed-size array thereof to 'max', got '%s'",
 				      type_str);
 				gb_string_free(type_str);
 				return false;
@@ -4834,7 +4861,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 		}
 
-		if (all_constant) {
+		if (all_constant && !is_type_array_like(operands[0].type)) {
 			ExactValue value = operands[0].value;
 			for (isize i = 1; i < operands.count; i++) {
 				Operand y = operands[i];
@@ -4858,14 +4885,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			return false;
 		}
 
-		if (!(is_type_numeric(operand->type) && !is_type_array(operand->type))) {
+		if (!is_abs_operand_type(operand->type)) {
 			gbString type_str = type_to_string(operand->type);
-			error(call, "Expected a numeric type to 'abs', got '%s'", type_str);
+			error(call, "Expected a numeric type or fixed-size array of non-complex numeric types to 'abs', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
 
-		if (operand->mode == Addressing_Constant) {
+		if (operand->mode == Addressing_Constant && !is_type_array_like(operand->type)) {
 			switch (operand->value.kind) {
 			case ExactValue_Integer:
 				mp_abs(&operand->value.value_integer, &operand->value.value_integer);
@@ -4904,7 +4931,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		} else {
 			operand->mode = Addressing_Value;
 
-			{
+			if (!is_type_array_like(operand->type)) {
 				Type *bt = base_type(operand->type);
 				if (are_types_identical(bt, t_complex64))  add_package_dependency(c, "runtime", "abs_complex64");
 				if (are_types_identical(bt, t_complex128)) add_package_dependency(c, "runtime", "abs_complex128");
@@ -4946,9 +4973,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (o->mode == Addressing_Invalid) {
 				return false;
 			}
-			if (!is_type_ordered(o->type) || !(is_type_numeric(o->type) || is_type_string(o->type))) {
+			if (!is_min_max_clamp_ordered_operand_type(o->type)) {
 				gbString type_str = type_to_string(o->type);
-				error(call, "Expected an ordered numeric or string type to 'clamp', got '%s'", type_str);
+				error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'clamp', got '%s'", type_str);
 				gb_string_free(type_str);
 				return false;
 			}
@@ -4986,7 +5013,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 		if (x.mode == Addressing_Constant &&
 		    y.mode == Addressing_Constant &&
-		    z.mode == Addressing_Constant) {
+		    z.mode == Addressing_Constant &&
+		    !is_type_array_like(x.type)) {
 			ExactValue a = x.value;
 			ExactValue b = y.value;
 			ExactValue c = z.value;
