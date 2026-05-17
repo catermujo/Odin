@@ -388,7 +388,10 @@ tan :: proc{
 	tan_f64, tan_f64le, tan_f64be,
 }
 
-@(require_results) lerp :: proc "contextless" (a, b: $T, t: $E) -> (x: T) { return a*(1-t) + b*t }
+@(require_results) lerp :: proc "contextless" (a, b: $T, t: $E) -> (x: T) {
+	tt := T(t)
+	return a*(1-tt) + b*tt
+}
 @(require_results) saturate :: proc "contextless" (a: $T) -> (x: T) { return clamp(a, 0, 1) }
 
 @(require_results)

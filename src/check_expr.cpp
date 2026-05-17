@@ -3298,6 +3298,25 @@ gb_internal void add_comparison_procedures_for_fields(CheckerContext *c, Type *t
 	}
 }
 
+gb_internal Type *make_bool_array_like_type(Type *type) {
+	Type *bt = base_type(type);
+	GB_ASSERT(is_type_array_like(bt));
+
+	if (bt->kind == Type_Array) {
+		return alloc_type_array(t_bool, bt->Array.count, bt->Array.generic_count);
+	}
+
+	GB_ASSERT(bt->kind == Type_EnumeratedArray);
+	Type *res = alloc_type_enumerated_array(t_bool,
+	                                        bt->EnumeratedArray.index,
+	                                        bt->EnumeratedArray.min_value,
+	                                        bt->EnumeratedArray.max_value,
+	                                        bt->EnumeratedArray.count,
+	                                        bt->EnumeratedArray.op);
+	res->EnumeratedArray.is_sparse = bt->EnumeratedArray.is_sparse;
+	return res;
+}
+
 
 gb_internal Operand make_operand_from_node(Ast *node);
 
@@ -3419,6 +3438,7 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 
 	TEMPORARY_ALLOCATOR_GUARD();
 	gbString err_str = nullptr;
+	bool ordered_array_like_comparison = false;
 
 	if (check_is_assignable_to(c, x, y->type) ||
 	    check_is_assignable_to(c, y, x->type)) {
@@ -3444,6 +3464,13 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 		case Token_GtEq:
 			if (are_types_identical(x->type, y->type) && is_type_bit_set(x->type)) {
 				defined = true;
+			} else if (are_types_identical(x->type, y->type) &&
+			           is_type_array_like(x->type) &&
+			           is_type_array_like(y->type)) {
+				Type *xe = base_array_type(x->type);
+				Type *ye = base_array_type(y->type);
+				defined = is_type_ordered(xe) && is_type_ordered(ye);
+				ordered_array_like_comparison = defined;
 			} else {
 				defined = is_type_ordered(x->type) && is_type_ordered(y->type);
 			}
@@ -3617,7 +3644,13 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 			}
 		}
 
-		x->type = t_untyped_bool;
+		if (ordered_array_like_comparison) {
+			x->mode = Addressing_Value;
+			x->value = {};
+			x->type = make_bool_array_like_type(x->type);
+		} else {
+			x->type = t_untyped_bool;
+		}
 	}
 
 }

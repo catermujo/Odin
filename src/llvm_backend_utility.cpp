@@ -150,37 +150,88 @@ gb_internal lbValue lb_emit_select(lbProcedure *p, lbValue cond, lbValue x, lbVa
 	return res;
 }
 
-gb_internal lbValue lb_emit_min(lbProcedure *p, Type *t, lbValue x, lbValue y) {
+gb_internal lbValue lb_emit_min_max(lbProcedure *p, Type *t, lbValue x, lbValue y, bool want_min) {
 	x = lb_emit_conv(p, x, t);
 	y = lb_emit_conv(p, y, t);
-	bool use_llvm_intrinsic = !is_arch_wasm() && is_type_float(t);
+
+	if (is_type_array_like(t)) {
+		Type *elem_type = base_array_type(t);
+		i64 count = get_array_type_count(t);
+		unsigned n = cast(unsigned)count;
+
+		bool inline_array_arith = lb_can_try_to_inline_array_arith(t);
+		if (inline_array_arith) {
+			auto dst_ptrs = slice_make<lbValue>(temporary_allocator(), n);
+
+			auto a_loads = slice_make<lbValue>(temporary_allocator(), n);
+			auto b_loads = slice_make<lbValue>(temporary_allocator(), n);
+			auto c_ops = slice_make<lbValue>(temporary_allocator(), n);
+
+			for (unsigned i = 0; i < n; i++) {
+				a_loads[i].value = LLVMBuildExtractValue(p->builder, x.value, i, "");
+				a_loads[i].type = elem_type;
+			}
+			for (unsigned i = 0; i < n; i++) {
+				b_loads[i].value = LLVMBuildExtractValue(p->builder, y.value, i, "");
+				b_loads[i].type = elem_type;
+			}
+			for (unsigned i = 0; i < n; i++) {
+				c_ops[i] = lb_emit_min_max(p, elem_type, a_loads[i], b_loads[i], want_min);
+			}
+
+			lbAddr res = lb_add_local_generated(p, t, false);
+			for (unsigned i = 0; i < n; i++) {
+				dst_ptrs[i] = lb_emit_array_epi(p, res.addr, i);
+			}
+			for (unsigned i = 0; i < n; i++) {
+				lb_emit_store(p, dst_ptrs[i], c_ops[i]);
+			}
+
+			return lb_addr_load(p, res);
+		} else {
+			lbValue lhs_addr = lb_address_from_load_or_generate_local(p, x);
+			lbValue rhs_addr = lb_address_from_load_or_generate_local(p, y);
+
+			lbAddr res = lb_add_local_generated(p, t, false);
+
+			auto loop_data = lb_loop_start(p, cast(isize)count, t_i32);
+
+			lbValue a_ptr = lb_emit_array_ep(p, lhs_addr, loop_data.idx);
+			lbValue b_ptr = lb_emit_array_ep(p, rhs_addr, loop_data.idx);
+			lbValue dst_ptr = lb_emit_array_ep(p, res.addr, loop_data.idx);
+
+			lbValue a = lb_emit_load(p, a_ptr);
+			lbValue b = lb_emit_load(p, b_ptr);
+			lbValue c = lb_emit_min_max(p, elem_type, a, b, want_min);
+			lb_emit_store(p, dst_ptr, c);
+
+			lb_loop_end(p, loop_data);
+
+			return lb_addr_load(p, res);
+		}
+	}
+
+	bool use_llvm_intrinsic = !is_arch_wasm() && (is_type_float(t) || (is_type_simd_vector(t) && is_type_float(base_array_type(t))));
 	if (use_llvm_intrinsic) {
 		LLVMValueRef args[2] = {x.value, y.value};
 		LLVMTypeRef types[1] = {lb_type(p->module, t)};
 
-		// NOTE(bill): f either operand is a NaN, returns NaN. Otherwise returns the lesser of the two arguments.
+		// NOTE(bill): If either operand is a NaN, returns NaN. Otherwise returns the selected argument.
 		// -0.0 is considered to be less than +0.0 for this intrinsic.
 		// These semantics are specified by IEEE 754-2008.
-		LLVMValueRef v = lb_call_intrinsic(p, "llvm.minnum", args, gb_count_of(args), types, gb_count_of(types));
+		char const *intrinsic_name = want_min ? "llvm.minnum" : "llvm.maxnum";
+		LLVMValueRef v = lb_call_intrinsic(p, intrinsic_name, args, gb_count_of(args), types, gb_count_of(types));
 		return {v, t};
 	}
-	return lb_emit_select(p, lb_emit_comp(p, Token_Lt, x, y), x, y);
+	TokenKind cmp = want_min ? Token_Lt : Token_Gt;
+	return lb_emit_select(p, lb_emit_comp(p, cmp, x, y), x, y);
+}
+
+gb_internal lbValue lb_emit_min(lbProcedure *p, Type *t, lbValue x, lbValue y) {
+	return lb_emit_min_max(p, t, x, y, true);
 }
 gb_internal lbValue lb_emit_max(lbProcedure *p, Type *t, lbValue x, lbValue y) {
-	x = lb_emit_conv(p, x, t);
-	y = lb_emit_conv(p, y, t);
-	bool use_llvm_intrinsic = !is_arch_wasm() && is_type_float(t);
-	if (use_llvm_intrinsic) {
-		LLVMValueRef args[2] = {x.value, y.value};
-		LLVMTypeRef types[1] = {lb_type(p->module, t)};
-
-		// NOTE(bill): If either operand is a NaN, returns NaN. Otherwise returns the greater of the two arguments.
-		// -0.0 is considered to be less than +0.0 for this intrinsic.
-		// These semantics are specified by IEEE 754-2008.
-		LLVMValueRef v = lb_call_intrinsic(p, "llvm.maxnum", args, gb_count_of(args), types, gb_count_of(types));
-		return {v, t};
-	}
-	return lb_emit_select(p, lb_emit_comp(p, Token_Gt, x, y), x, y);
+	return lb_emit_min_max(p, t, x, y, false);
 }
 
 

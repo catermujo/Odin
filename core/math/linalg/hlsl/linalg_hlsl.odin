@@ -987,387 +987,120 @@ degrees :: proc{
 @(require_results) degrees_double3 :: proc "c" (radians: double3) -> double3 { return radians * 360.0 / TAU }
 @(require_results) degrees_double4 :: proc "c" (radians: double4) -> double4 { return radians * 360.0 / TAU }
 
-min :: proc{
-	min_half,
-	min_int,  
-	min_uint,  
-	min_float,  
-	min_double,
-	min_half2,
-	min_half3,
-	min_half4,
-	min_float2, 
-	min_float3, 
-	min_float4, 
-	min_double2, 
-	min_double3, 
-	min_double4, 
-	min_int2,
-	min_int3,
-	min_int4,
-	min_uint2,
-	min_uint3,
-	min_uint4,
+min :: builtin.min
+
+max :: builtin.max
+
+clamp :: builtin.clamp
+
+@(private)
+@(require_results)
+saturate_scalar :: proc "c" (v: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return builtin.clamp(v, 0, 1)
 }
-@(require_results) min_int  :: proc "c" (x, y: int) -> int   { return builtin.min(x, y) }
-@(require_results) min_uint  :: proc "c" (x, y: uint) -> uint   { return builtin.min(x, y) }
-@(require_results) min_half  :: proc "c" (x, y: half) -> half   { return builtin.min(x, y) }
-@(require_results) min_float  :: proc "c" (x, y: float) -> float   { return builtin.min(x, y) }
-@(require_results) min_double  :: proc "c" (x, y: double) -> double   { return builtin.min(x, y) }
-@(require_results) min_half2 :: proc "c" (x, y: half2) -> half2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_half3 :: proc "c" (x, y: half3) -> half3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_half4 :: proc "c" (x, y: half4) -> half4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_float2 :: proc "c" (x, y: float2) -> float2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_float3 :: proc "c" (x, y: float3) -> float3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_float4 :: proc "c" (x, y: float4) -> float4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_double2 :: proc "c" (x, y: double2) -> double2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_double3 :: proc "c" (x, y: double3) -> double3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_double4 :: proc "c" (x, y: double4) -> double4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_int2 :: proc "c" (x, y: int2) -> int2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_int3 :: proc "c" (x, y: int3) -> int3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_int4 :: proc "c" (x, y: int4) -> int4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_uint2 :: proc "c" (x, y: uint2) -> uint2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_uint3 :: proc "c" (x, y: uint3) -> uint3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_uint4 :: proc "c" (x, y: uint4) -> uint4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-
-
-max :: proc{
-	max_int,  
-	max_uint,
-	max_half,
-	max_float,  
-	max_double,
-	max_half2,
-	max_half3,
-	max_half4,
-	max_float2, 
-	max_float3, 
-	max_float4, 
-	max_double2, 
-	max_double3, 
-	max_double4, 
-	max_int2,
-	max_int3,
-	max_int4,
-	max_uint2,
-	max_uint3,
-	max_uint4,
+@(private)
+@(require_results)
+saturate_array :: proc "c" (v: $A/[$N]$T) -> A where intrinsics.type_is_numeric(T) {
+	return builtin.clamp(v, 0, 1)
 }
-@(require_results) max_int  :: proc "c" (x, y: int) -> int   { return builtin.max(x, y) }
-@(require_results) max_uint  :: proc "c" (x, y: uint) -> uint   { return builtin.max(x, y) }
-@(require_results) max_float  :: proc "c" (x, y: float) -> float   { return builtin.max(x, y) }
-@(require_results) max_half  :: proc "c" (x, y: half) -> half   { return builtin.max(x, y) }
-@(require_results) max_double  :: proc "c" (x, y: double) -> double   { return builtin.max(x, y) }
-@(require_results) max_half2 :: proc "c" (x, y: half2) -> half2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_half3 :: proc "c" (x, y: half3) -> half3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_half4 :: proc "c" (x, y: half4) -> half4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_float2 :: proc "c" (x, y: float2) -> float2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_float3 :: proc "c" (x, y: float3) -> float3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_float4 :: proc "c" (x, y: float4) -> float4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_double2 :: proc "c" (x, y: double2) -> double2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_double3 :: proc "c" (x, y: double3) -> double3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_double4 :: proc "c" (x, y: double4) -> double4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_int2 :: proc "c" (x, y: int2) -> int2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_int3 :: proc "c" (x, y: int3) -> int3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_int4 :: proc "c" (x, y: int4) -> int4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_uint2 :: proc "c" (x, y: uint2) -> uint2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_uint3 :: proc "c" (x, y: uint3) -> uint3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_uint4 :: proc "c" (x, y: uint4) -> uint4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
+saturate :: proc{saturate_scalar, saturate_array}
 
-
-
-clamp :: proc{
-	clamp_int, 
-	clamp_uint, 
-	clamp_half,
-	clamp_float,
-	clamp_double,
-	clamp_half2,
-	clamp_half3,
-	clamp_half4,
-	clamp_float2, 
-	clamp_float3, 
-	clamp_float4, 
-	clamp_double2, 
-	clamp_double3, 
-	clamp_double4, 
-	clamp_int2,
-	clamp_int3,
-	clamp_int4,
-	clamp_uint2,
-	clamp_uint3,
-	clamp_uint4,
+@(private)
+@(require_results)
+lerp_scalar :: proc "c" (x, y, t: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return x*(1-t) + y*t
 }
-@(require_results) clamp_int  :: proc "c" (x, y, z: int) -> int   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_uint  :: proc "c" (x, y, z: uint) -> uint   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_half  :: proc "c" (x, y, z: half) -> half   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_float  :: proc "c" (x, y, z: float) -> float   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_double  :: proc "c" (x, y, z: double) -> double   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_half2 :: proc "c" (x, y, z: half2) -> half2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_half3 :: proc "c" (x, y, z: half3) -> half3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_half4 :: proc "c" (x, y, z: half4) -> half4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_float2 :: proc "c" (x, y, z: float2) -> float2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_float3 :: proc "c" (x, y, z: float3) -> float3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_float4 :: proc "c" (x, y, z: float4) -> float4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_double2 :: proc "c" (x, y, z: double2) -> double2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_double3 :: proc "c" (x, y, z: double3) -> double3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_double4 :: proc "c" (x, y, z: double4) -> double4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_int2 :: proc "c" (x, y, z: int2) -> int2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_int3 :: proc "c" (x, y, z: int3) -> int3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_int4 :: proc "c" (x, y, z: int4) -> int4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_uint2 :: proc "c" (x, y, z: uint2) -> uint2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_uint3 :: proc "c" (x, y, z: uint3) -> uint3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_uint4 :: proc "c" (x, y, z: uint4) -> uint4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-
-saturate :: proc{
-	saturate_int,
-	saturate_uint,
-	saturate_half,
-	saturate_float,
-	saturate_double,
-	saturate_half2,
-	saturate_half3,
-	saturate_half4,
-	saturate_float2,
-	saturate_float3,
-	saturate_float4,
-	saturate_double2,
-	saturate_double3,
-	saturate_double4,
-	saturate_int2,
-	saturate_int3,
-	saturate_int4,
-	saturate_uint2,
-	saturate_uint3,
-	saturate_uint4,
+@(private)
+@(require_results)
+lerp_array :: proc "c" (x, y, t: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	return x*(1-t) + y*t
 }
-@(require_results) saturate_int  :: proc "c" (v: int) -> int   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_uint  :: proc "c" (v: uint) -> uint   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_half  :: proc "c" (v: half) -> half   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_float  :: proc "c" (v: float) -> float   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_double  :: proc "c" (v: double) -> double   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_half2 :: proc "c" (v: half2) -> half2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_half3 :: proc "c" (v: half3) -> half3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_half4 :: proc "c" (v: half4) -> half4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_float2 :: proc "c" (v: float2) -> float2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_float3 :: proc "c" (v: float3) -> float3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_float4 :: proc "c" (v: float4) -> float4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_double2 :: proc "c" (v: double2) -> double2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_double3 :: proc "c" (v: double3) -> double3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_double4 :: proc "c" (v: double4) -> double4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_int2 :: proc "c" (v: int2) -> int2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_int3 :: proc "c" (v: int3) -> int3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_int4 :: proc "c" (v: int4) -> int4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_uint2 :: proc "c" (v: uint2) -> uint2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_uint3 :: proc "c" (v: uint3) -> uint3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_uint4 :: proc "c" (v: uint4) -> uint4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
+lerp :: proc{lerp_scalar, lerp_array}
 
-
-lerp :: proc{
-	lerp_half,
-	lerp_float,
-	lerp_double,
-	lerp_half2,
-	lerp_half3,
-	lerp_half4,
-	lerp_float2,
-	lerp_float3,
-	lerp_float4,
-	lerp_double2,
-	lerp_double3,
-	lerp_double4,
+@(private)
+@(require_results)
+step_scalar :: proc "c" (edge, x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return 0 if x < edge else 1
 }
-@(require_results) lerp_half  :: proc "c" (x, y, t: half) -> half   { return x*(1-t) + y*t }
-@(require_results) lerp_float  :: proc "c" (x, y, t: float) -> float   { return x*(1-t) + y*t }
-@(require_results) lerp_double  :: proc "c" (x, y, t: double) -> double   { return x*(1-t) + y*t }
-@(require_results) lerp_half2 :: proc "c" (x, y, t: half2) -> half2 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y)} }
-@(require_results) lerp_half3 :: proc "c" (x, y, t: half3) -> half3 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z)} }
-@(require_results) lerp_half4 :: proc "c" (x, y, t: half4) -> half4 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, y.y), lerp(x.z, y.z, t.z), lerp(x.w, y.w, t.w)} }
-@(require_results) lerp_float2 :: proc "c" (x, y, t: float2) -> float2 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y)} }
-@(require_results) lerp_float3 :: proc "c" (x, y, t: float3) -> float3 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z)} }
-@(require_results) lerp_float4 :: proc "c" (x, y, t: float4) -> float4 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, y.y), lerp(x.z, y.z, t.z), lerp(x.w, y.w, t.w)} }
-@(require_results) lerp_double2 :: proc "c" (x, y, t: double2) -> double2 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y)} }
-@(require_results) lerp_double3 :: proc "c" (x, y, t: double3) -> double3 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z)} }
-@(require_results) lerp_double4 :: proc "c" (x, y, t: double4) -> double4 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, y.y), lerp(x.z, y.z, t.z), lerp(x.w, y.w, t.w)} }
-
-
-step :: proc{
-	step_half,
-	step_float,
-	step_double,
-	step_half2,
-	step_half3,
-	step_half4,
-	step_float2,
-	step_float3,
-	step_float4,
-	step_double2,
-	step_double3,
-	step_double4,
+@(private)
+@(require_results)
+step_array :: proc "c" (edge, x: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	out: A
+	for i in 0..<N {
+		out[i] = step_scalar(edge[i], x[i])
+	}
+	return out
 }
-@(require_results) step_half  :: proc "c" (edge, x: half) -> half   { return 0 if x < edge else 1 }
-@(require_results) step_float  :: proc "c" (edge, x: float) -> float   { return 0 if x < edge else 1 }
-@(require_results) step_double  :: proc "c" (edge, x: double) -> double   { return 0 if x < edge else 1 }
-@(require_results) step_half2 :: proc "c" (edge, x: half2) -> half2 { return {step(edge.x, x.x), step(edge.y, x.y)} }
-@(require_results) step_half3 :: proc "c" (edge, x: half3) -> half3 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z)} }
-@(require_results) step_half4 :: proc "c" (edge, x: half4) -> half4 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z), step(edge.w, x.w)} }
-@(require_results) step_float2 :: proc "c" (edge, x: float2) -> float2 { return {step(edge.x, x.x), step(edge.y, x.y)} }
-@(require_results) step_float3 :: proc "c" (edge, x: float3) -> float3 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z)} }
-@(require_results) step_float4 :: proc "c" (edge, x: float4) -> float4 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z), step(edge.w, x.w)} }
-@(require_results) step_double2 :: proc "c" (edge, x: double2) -> double2 { return {step(edge.x, x.x), step(edge.y, x.y)} }
-@(require_results) step_double3 :: proc "c" (edge, x: double3) -> double3 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z)} }
-@(require_results) step_double4 :: proc "c" (edge, x: double4) -> double4 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z), step(edge.w, x.w)} }
+step :: proc{step_scalar, step_array}
 
-smoothstep :: proc{
-	smoothstep_half,
-	smoothstep_float,
-	smoothstep_double,
-	smoothstep_half2,
-	smoothstep_half3,
-	smoothstep_half4,
-	smoothstep_float2,
-	smoothstep_float3,
-	smoothstep_float4,
-	smoothstep_double2,
-	smoothstep_double3,
-	smoothstep_double4,
-}
-@(require_results) smoothstep_half :: proc "c" (edge0, edge1, x: half) -> half {
-	y := clamp(((x-edge0) / (edge1 - edge0)), 0, 1)
+@(private)
+@(require_results)
+smoothstep_scalar :: proc "c" (edge0, edge1, x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	y := clamp(((x-edge0) / (edge1-edge0)), 0, 1)
 	return y * y * (3 - 2*y)
 }
-@(require_results) smoothstep_float :: proc "c" (edge0, edge1, x: float) -> float {
-	y := clamp(((x-edge0) / (edge1 - edge0)), 0, 1)
+@(private)
+@(require_results)
+smoothstep_array :: proc "c" (edge0, edge1, x: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	y := clamp(((x-edge0) / (edge1-edge0)), 0, 1)
 	return y * y * (3 - 2*y)
 }
-@(require_results) smoothstep_double :: proc "c" (edge0, edge1, x: double) -> double {
-	y := clamp(((x-edge0) / (edge1 - edge0)), 0, 1)
-	return y * y * (3 - 2*y)
+smoothstep :: proc{smoothstep_scalar, smoothstep_array}
+
+@(private)
+@(require_results)
+abs_numeric_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_unsigned(T), !intrinsics.type_is_array(T) {
+	return builtin.abs(x)
 }
-@(require_results) smoothstep_half2  :: proc "c" (edge0, edge1, x: half2) -> half2   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y)} }
-@(require_results) smoothstep_half3  :: proc "c" (edge0, edge1, x: half3) -> half3   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z)} }
-@(require_results) smoothstep_half4  :: proc "c" (edge0, edge1, x: half4) -> half4   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z), smoothstep(edge0.w, edge1.w, x.w)} }
-@(require_results) smoothstep_float2  :: proc "c" (edge0, edge1, x: float2) -> float2   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y)} }
-@(require_results) smoothstep_float3  :: proc "c" (edge0, edge1, x: float3) -> float3   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z)} }
-@(require_results) smoothstep_float4  :: proc "c" (edge0, edge1, x: float4) -> float4   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z), smoothstep(edge0.w, edge1.w, x.w)} }
-@(require_results) smoothstep_double2 :: proc "c" (edge0, edge1, x: double2) -> double2 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y)} }
-@(require_results) smoothstep_double3 :: proc "c" (edge0, edge1, x: double3) -> double3 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z)} }
-@(require_results) smoothstep_double4 :: proc "c" (edge0, edge1, x: double4) -> double4 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z), smoothstep(edge0.w, edge1.w, x.w)} }
-
-
+@(private)
+@(require_results)
+abs_numeric_array :: proc "c" (x: $A/[$N]$T) -> A where intrinsics.type_is_numeric(T), !intrinsics.type_is_unsigned(T) {
+	return builtin.abs(x)
+}
+@(private)
+@(require_results)
+abs_unsigned_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_unsigned(T), !intrinsics.type_is_array(T) {
+	return x
+}
+@(private)
+@(require_results)
+abs_unsigned_array :: proc "c" (x: $A/[$N]$T) -> A where intrinsics.type_is_unsigned(T) {
+	return x
+}
 abs :: proc{
-	abs_int,
-	abs_uint,
-	abs_half,
-	abs_float,
-	abs_double,
-	abs_half2,
-	abs_half3,
-	abs_half4,
-	abs_float2,
-	abs_float3,
-	abs_float4,
-	abs_double2,
-	abs_double3,
-	abs_double4,
-	abs_int2,
-	abs_int3,
-	abs_int4,
-	abs_uint2,
-	abs_uint3,
-	abs_uint4,
+	abs_numeric_scalar,
+	abs_numeric_array,
+	abs_unsigned_scalar,
+	abs_unsigned_array,
 }
-@(require_results) abs_int  :: proc "c" (x: int)  -> int  { return builtin.abs(x) }
-@(require_results) abs_uint  :: proc "c" (x: uint)  -> uint  { return x }
-@(require_results) abs_half  :: proc "c" (x: half)  -> half  { return builtin.abs(x) }
-@(require_results) abs_float  :: proc "c" (x: float)  -> float  { return builtin.abs(x) }
-@(require_results) abs_double  :: proc "c" (x: double)  -> double  { return builtin.abs(x) }
-@(require_results) abs_half2 :: proc "c" (x: half2) -> half2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_half3 :: proc "c" (x: half3) -> half3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_half4 :: proc "c" (x: half4) -> half4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_float2 :: proc "c" (x: float2) -> float2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_float3 :: proc "c" (x: float3) -> float3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_float4 :: proc "c" (x: float4) -> float4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_double2 :: proc "c" (x: double2) -> double2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_double3 :: proc "c" (x: double3) -> double3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_double4 :: proc "c" (x: double4) -> double4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_int2 :: proc "c" (x: int2) -> int2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_int3 :: proc "c" (x: int3) -> int3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_int4 :: proc "c" (x: int4) -> int4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_uint2 :: proc "c" (x: uint2) -> uint2 { return x }
-@(require_results) abs_uint3 :: proc "c" (x: uint3) -> uint3 { return x }
-@(require_results) abs_uint4 :: proc "c" (x: uint4) -> uint4 { return x }
 
-dot :: proc{
-	dot_int,
-	dot_uint,
-	dot_half,
-	dot_float,
-	dot_double,
-	dot_half2,
-	dot_half3,
-	dot_half4,
-	dot_float2,
-	dot_float3,
-	dot_float4,
-	dot_double2,
-	dot_double3,
-	dot_double4,
-	dot_int2,
-	dot_int3,
-	dot_int4,
-	dot_uint2,
-	dot_uint3,
-	dot_uint4,
+@(private)
+@(require_results)
+dot_scalar :: proc "c" (a, b: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a * b
 }
-@(require_results) dot_int  :: proc "c" (a, b: int)  -> int { return a*b }
-@(require_results) dot_uint  :: proc "c" (a, b: uint)  -> uint { return a*b }
-@(require_results) dot_half  :: proc "c" (a, b: half)  -> half { return a*b }
-@(require_results) dot_float  :: proc "c" (a, b: float)  -> float { return a*b }
-@(require_results) dot_double  :: proc "c" (a, b: double)  -> double { return a*b }
-@(require_results) dot_half2 :: proc "c" (a, b: half2) -> half { return a.x*b.x + a.y*b.y }
-@(require_results) dot_half3 :: proc "c" (a, b: half3) -> half { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_half4 :: proc "c" (a, b: half4) -> half { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_float2 :: proc "c" (a, b: float2) -> float { return a.x*b.x + a.y*b.y }
-@(require_results) dot_float3 :: proc "c" (a, b: float3) -> float { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_float4 :: proc "c" (a, b: float4) -> float { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_double2 :: proc "c" (a, b: double2) -> double { return a.x*b.x + a.y*b.y }
-@(require_results) dot_double3 :: proc "c" (a, b: double3) -> double { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_double4 :: proc "c" (a, b: double4) -> double { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_int2 :: proc "c" (a, b: int2) -> int { return a.x*b.x + a.y*b.y }
-@(require_results) dot_int3 :: proc "c" (a, b: int3) -> int { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_int4 :: proc "c" (a, b: int4) -> int { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_uint2 :: proc "c" (a, b: uint2) -> uint { return a.x*b.x + a.y*b.y }
-@(require_results) dot_uint3 :: proc "c" (a, b: uint3) -> uint { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_uint4 :: proc "c" (a, b: uint4) -> uint { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-
-length :: proc{
-	length_half,
-	length_float,
-	length_double,
-	length_half2,
-	length_half3,
-	length_half4,
-	length_float2,
-	length_float3,
-	length_float4,
-	length_double2,
-	length_double3,
-	length_double4,
+@(private)
+@(require_results)
+dot_array :: proc "c" (a, b: $A/[$N]$T) -> T where intrinsics.type_is_numeric(T) {
+	out: T
+	for i in 0..<N {
+		out += a[i] * b[i]
+	}
+	return out
 }
-@(require_results) length_half  :: proc "c" (x: half)  -> half { return builtin.abs(x) }
-@(require_results) length_float  :: proc "c" (x: float)  -> float { return builtin.abs(x) }
-@(require_results) length_double  :: proc "c" (x: double)  -> double { return builtin.abs(x) }
-@(require_results) length_half2 :: proc "c" (x: half2) -> half { return sqrt(x.x*x.x + x.y*x.y) }
-@(require_results) length_half3 :: proc "c" (x: half3) -> half { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z) }
-@(require_results) length_half4 :: proc "c" (x: half4) -> half { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-@(require_results) length_float2 :: proc "c" (x: float2) -> float { return sqrt(x.x*x.x + x.y*x.y) }
-@(require_results) length_float3 :: proc "c" (x: float3) -> float { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z) }
-@(require_results) length_float4 :: proc "c" (x: float4) -> float { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-@(require_results) length_double2 :: proc "c" (x: double2) -> double { return sqrt(x.x*x.x + x.y*x.y) }
-@(require_results) length_double3 :: proc "c" (x: double3) -> double { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z) }
-@(require_results) length_double4 :: proc "c" (x: double4) -> double { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
+dot :: proc{dot_scalar, dot_array}
 
+@(private)
+@(require_results)
+length_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return builtin.abs(x)
+}
+@(private)
+@(require_results)
+length_array :: proc "c" (x: $A/[$N]$T) -> T where intrinsics.type_is_float(T) {
+	return sqrt(dot(x, x))
+}
+length :: proc{length_scalar, length_array}
 
 distance :: proc{
 	distance_half,
@@ -1639,267 +1372,77 @@ vectorTripleProduct :: proc {
 
 // Vector Relational Procedures
 
-lessThan :: proc{
-	lessThan_half,
-	lessThan_float,
-	lessThan_double,
-	lessThan_int,
-	lessThan_uint,
-	lessThan_half2,
-	lessThan_float2,
-	lessThan_double2,
-	lessThan_int2,
-	lessThan_uint2,
-	lessThan_half3,
-	lessThan_float3,
-	lessThan_double3,
-	lessThan_int3,
-	lessThan_uint3,
-	lessThan_half4,
-	lessThan_float4,
-	lessThan_double4,
-	lessThan_int4,
-	lessThan_uint4,
+@(private)
+@(require_results)
+less_than_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a < b
 }
-@(require_results) lessThan_half   :: proc "c" (a, b: half) -> bool { return a < b }
-@(require_results) lessThan_float   :: proc "c" (a, b: float) -> bool { return a < b }
-@(require_results) lessThan_double   :: proc "c" (a, b: double) -> bool { return a < b }
-@(require_results) lessThan_int   :: proc "c" (a, b: int) -> bool { return a < b }
-@(require_results) lessThan_uint   :: proc "c" (a, b: uint) -> bool { return a < b }
-@(require_results) lessThan_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_double2 :: proc "c" (a, b: double2) -> bool2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-
-
-lessThanEqual :: proc{
-	lessThanEqual_half,
-	lessThanEqual_float,
-	lessThanEqual_double,
-	lessThanEqual_int,
-	lessThanEqual_uint,
-	lessThanEqual_half2,
-	lessThanEqual_float2,
-	lessThanEqual_double2,
-	lessThanEqual_int2,
-	lessThanEqual_uint2,
-	lessThanEqual_half3,
-	lessThanEqual_float3,
-	lessThanEqual_double3,
-	lessThanEqual_int3,
-	lessThanEqual_uint3,
-	lessThanEqual_half4,
-	lessThanEqual_float4,
-	lessThanEqual_double4,
-	lessThanEqual_int4,
-	lessThanEqual_uint4,
+@(private)
+@(require_results)
+less_than_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a < b
 }
-@(require_results) lessThanEqual_half   :: proc "c" (a, b: half) -> bool { return a <= b }
-@(require_results) lessThanEqual_float   :: proc "c" (a, b: float) -> bool { return a <= b }
-@(require_results) lessThanEqual_double   :: proc "c" (a, b: double) -> bool { return a <= b }
-@(require_results) lessThanEqual_int   :: proc "c" (a, b: int) -> bool { return a <= b }
-@(require_results) lessThanEqual_uint   :: proc "c" (a, b: uint) -> bool { return a <= b }
-@(require_results) lessThanEqual_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_double2  :: proc "c" (a, b: double2) -> bool2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
+lessThan :: proc{less_than_scalar, less_than_array}
 
-
-greaterThan :: proc{
-	greaterThan_half,
-	greaterThan_float,
-	greaterThan_double,
-	greaterThan_int,
-	greaterThan_uint,
-	greaterThan_half2,
-	greaterThan_float2,
-	greaterThan_double2,
-	greaterThan_int2,
-	greaterThan_uint2,
-	greaterThan_half3,
-	greaterThan_float3,
-	greaterThan_double3,
-	greaterThan_int3,
-	greaterThan_uint3,
-	greaterThan_half4,
-	greaterThan_float4,
-	greaterThan_double4,
-	greaterThan_int4,
-	greaterThan_uint4,
+@(private)
+@(require_results)
+less_than_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a <= b
 }
-@(require_results) greaterThan_half   :: proc "c" (a, b: half) -> bool { return a > b }
-@(require_results) greaterThan_float   :: proc "c" (a, b: float) -> bool { return a > b }
-@(require_results) greaterThan_double   :: proc "c" (a, b: double) -> bool { return a > b }
-@(require_results) greaterThan_int   :: proc "c" (a, b: int) -> bool { return a > b }
-@(require_results) greaterThan_uint   :: proc "c" (a, b: uint) -> bool { return a > b }
-@(require_results) greaterThan_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_double2  :: proc "c" (a, b: double2) -> bool2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-
-
-greaterThanEqual :: proc{
-	greaterThanEqual_half,
-	greaterThanEqual_float,
-	greaterThanEqual_double,
-	greaterThanEqual_int,
-	greaterThanEqual_uint,
-	greaterThanEqual_half2,
-	greaterThanEqual_float2,
-	greaterThanEqual_double2,
-	greaterThanEqual_int2,
-	greaterThanEqual_uint2,
-	greaterThanEqual_half3,
-	greaterThanEqual_float3,
-	greaterThanEqual_double3,
-	greaterThanEqual_int3,
-	greaterThanEqual_uint3,
-	greaterThanEqual_half4,
-	greaterThanEqual_float4,
-	greaterThanEqual_double4,
-	greaterThanEqual_int4,
-	greaterThanEqual_uint4,
+@(private)
+@(require_results)
+less_than_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a <= b
 }
-@(require_results) greaterThanEqual_half   :: proc "c" (a, b: half) -> bool { return a >= b }
-@(require_results) greaterThanEqual_float   :: proc "c" (a, b: float) -> bool { return a >= b }
-@(require_results) greaterThanEqual_double   :: proc "c" (a, b: double) -> bool { return a >= b }
-@(require_results) greaterThanEqual_int   :: proc "c" (a, b: int) -> bool { return a >= b }
-@(require_results) greaterThanEqual_uint   :: proc "c" (a, b: uint) -> bool { return a >= b }
-@(require_results) greaterThanEqual_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_double2  :: proc "c" (a, b: double2) -> bool2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
+lessThanEqual :: proc{less_than_equal_scalar, less_than_equal_array}
 
-
-equal :: proc{
-	equal_half,
-	equal_float,
-	equal_double,
-	equal_int,
-	equal_uint,
-	equal_half2,
-	equal_float2,
-	equal_double2,
-	equal_int2,
-	equal_uint2,
-	equal_half3,
-	equal_float3,
-	equal_double3,
-	equal_int3,
-	equal_uint3,
-	equal_half4,
-	equal_float4,
-	equal_double4,
-	equal_int4,
-	equal_uint4,
+@(private)
+@(require_results)
+greater_than_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a > b
 }
-@(require_results) equal_half   :: proc "c" (a, b: half) -> bool { return a == b }
-@(require_results) equal_float   :: proc "c" (a, b: float) -> bool { return a == b }
-@(require_results) equal_double   :: proc "c" (a, b: double) -> bool { return a == b }
-@(require_results) equal_int   :: proc "c" (a, b: int) -> bool { return a == b }
-@(require_results) equal_uint   :: proc "c" (a, b: uint) -> bool { return a == b }
-@(require_results) equal_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_double2  :: proc "c" (a, b: double2) -> bool2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-
-notEqual :: proc{
-	notEqual_half,
-	notEqual_float,
-	notEqual_double,
-	notEqual_int,
-	notEqual_uint,
-	notEqual_half2,
-	notEqual_float2,
-	notEqual_double2,
-	notEqual_int2,
-	notEqual_uint2,
-	notEqual_half3,
-	notEqual_float3,
-	notEqual_double3,
-	notEqual_int3,
-	notEqual_uint3,
-	notEqual_half4,
-	notEqual_float4,
-	notEqual_double4,
-	notEqual_int4,
-	notEqual_uint4,
+@(private)
+@(require_results)
+greater_than_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a > b
 }
-@(require_results) notEqual_half   :: proc "c" (a, b: half) -> bool { return a != b }
-@(require_results) notEqual_float   :: proc "c" (a, b: float) -> bool { return a != b }
-@(require_results) notEqual_double   :: proc "c" (a, b: double) -> bool { return a != b }
-@(require_results) notEqual_int   :: proc "c" (a, b: int) -> bool { return a != b }
-@(require_results) notEqual_uint   :: proc "c" (a, b: uint) -> bool { return a != b }
-@(require_results) notEqual_half2  :: proc "c" (a, b: half2) -> bool2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_float2  :: proc "c" (a, b: float2) -> bool2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_double2  :: proc "c" (a, b: double2) -> bool2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_int2 :: proc "c" (a, b: int2) -> bool2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_uint2 :: proc "c" (a, b: uint2) -> bool2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_half3  :: proc "c" (a, b: half3) -> bool3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_float3  :: proc "c" (a, b: float3) -> bool3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_double3  :: proc "c" (a, b: double3) -> bool3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_int3 :: proc "c" (a, b: int3) -> bool3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_uint3 :: proc "c" (a, b: uint3) -> bool3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_half4  :: proc "c" (a, b: half4) -> bool4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_float4  :: proc "c" (a, b: float4) -> bool4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_double4  :: proc "c" (a, b: double4) -> bool4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_int4 :: proc "c" (a, b: int4) -> bool4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_uint4 :: proc "c" (a, b: uint4) -> bool4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
+greaterThan :: proc{greater_than_scalar, greater_than_array}
+
+@(private)
+@(require_results)
+greater_than_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a >= b
+}
+@(private)
+@(require_results)
+greater_than_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a >= b
+}
+greaterThanEqual :: proc{greater_than_equal_scalar, greater_than_equal_array}
+
+@(private)
+@(require_results)
+equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a == b
+}
+@(private)
+@(require_results)
+equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a == b
+}
+equal :: proc{equal_scalar, equal_array}
+
+@(private)
+@(require_results)
+not_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a != b
+}
+@(private)
+@(require_results)
+not_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a != b
+}
+notEqual :: proc{not_equal_scalar, not_equal_array}
 
 
 any :: proc{
