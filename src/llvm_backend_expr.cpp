@@ -3636,6 +3636,25 @@ gb_internal lbValue lb_compare_records(lbProcedure *p, TokenKind op_kind, lbValu
 
 
 
+gb_internal Type *lb_make_bool_array_like_type(Type *type) {
+	Type *bt = base_type(type);
+	GB_ASSERT(is_type_array_like(bt));
+
+	if (bt->kind == Type_Array) {
+		return alloc_type_array(t_bool, bt->Array.count, bt->Array.generic_count);
+	}
+
+	GB_ASSERT(bt->kind == Type_EnumeratedArray);
+	Type *res = alloc_type_enumerated_array(t_bool,
+	                                        bt->EnumeratedArray.index,
+	                                        bt->EnumeratedArray.min_value,
+	                                        bt->EnumeratedArray.max_value,
+	                                        bt->EnumeratedArray.count,
+	                                        bt->EnumeratedArray.op);
+	res->EnumeratedArray.is_sparse = bt->EnumeratedArray.is_sparse;
+	return res;
+}
+
 gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right) {
 	Type *a = core_type(left.type);
 	Type *b = core_type(right.type);
@@ -3739,6 +3758,37 @@ gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left
 		lbValue lhs = lb_address_from_load_or_generate_local(p, left);
 		lbValue rhs = lb_address_from_load_or_generate_local(p, right);
 
+		bool reduce_to_scalar = op_kind == Token_CmpEq || op_kind == Token_NotEq;
+		i32 count = 0;
+		switch (tl->kind) {
+		case Type_Array:           count = cast(i32)tl->Array.count;           break;
+		case Type_EnumeratedArray: count = cast(i32)tl->EnumeratedArray.count; break;
+		}
+
+		if (!reduce_to_scalar) {
+			Type *result_type = lb_make_bool_array_like_type(tl);
+			lbAddr dst = lb_add_local_generated(p, result_type, false);
+
+			if (inline_array_arith) {
+				for (i32 i = 0; i < count; i++) {
+					lbValue x = lb_emit_load(p, lb_emit_array_epi(p, lhs, i));
+					lbValue y = lb_emit_load(p, lb_emit_array_epi(p, rhs, i));
+					lbValue cmp = lb_emit_comp(p, op_kind, x, y);
+					lb_emit_store(p, lb_emit_array_epi(p, dst.addr, i), lb_emit_conv(p, cmp, t_bool));
+				}
+			} else {
+				auto loop_data = lb_loop_start(p, count, t_i32);
+				{
+					lbValue i = loop_data.idx;
+					lbValue x = lb_emit_load(p, lb_emit_array_ep(p, lhs, i));
+					lbValue y = lb_emit_load(p, lb_emit_array_ep(p, rhs, i));
+					lbValue cmp = lb_emit_comp(p, op_kind, x, y);
+					lb_emit_store(p, lb_emit_array_ep(p, dst.addr, i), lb_emit_conv(p, cmp, t_bool));
+				}
+				lb_loop_end(p, loop_data);
+			}
+			return lb_addr_load(p, dst);
+		}
 
 		TokenKind cmp_op = Token_And;
 		lbValue res = lb_const_bool(p->module, t_llvm_bool, true);
@@ -3749,15 +3799,8 @@ gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left
 			res = lb_const_bool(p->module, t_llvm_bool, true);
 			cmp_op = Token_And;
 		}
-
-		i32 count = 0;
-		switch (tl->kind) {
-		case Type_Array:           count = cast(i32)tl->Array.count;           break;
-		case Type_EnumeratedArray: count = cast(i32)tl->EnumeratedArray.count; break;
-		}
-
+ 
 		if (inline_array_arith) {
-			// inline
 			lbAddr val = lb_add_local_generated(p, t_bool, false);
 			lb_addr_store(p, val, res);
 			for (i32 i = 0; i < count; i++) {

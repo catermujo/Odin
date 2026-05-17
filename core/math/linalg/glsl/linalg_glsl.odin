@@ -603,350 +603,142 @@ degrees :: proc{
 @(require_results) degrees_dvec3 :: proc "c" (radians: dvec3) -> dvec3 { return radians * 360.0 / TAU }
 @(require_results) degrees_dvec4 :: proc "c" (radians: dvec4) -> dvec4 { return radians * 360.0 / TAU }
 
-min :: proc{
-	min_i32,  
-	min_u32,  
-	min_f32,  
-	min_f64,
-	min_vec2, 
-	min_vec3, 
-	min_vec4, 
-	min_dvec2, 
-	min_dvec3, 
-	min_dvec4, 
-	min_ivec2,
-	min_ivec3,
-	min_ivec4,
-	min_uvec2,
-	min_uvec3,
-	min_uvec4,
+min :: builtin.min
+max :: builtin.max
+clamp :: builtin.clamp
+
+@(private)
+@(require_results)
+saturate_scalar :: proc "c" (v: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return builtin.clamp(v, 0, 1)
 }
-@(require_results) min_i32  :: proc "c" (x, y: i32) -> i32   { return builtin.min(x, y) }
-@(require_results) min_u32  :: proc "c" (x, y: u32) -> u32   { return builtin.min(x, y) }
-@(require_results) min_f32  :: proc "c" (x, y: f32) -> f32   { return builtin.min(x, y) }
-@(require_results) min_f64  :: proc "c" (x, y: f64) -> f64   { return builtin.min(x, y) }
-@(require_results) min_vec2 :: proc "c" (x, y: vec2) -> vec2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_vec3 :: proc "c" (x, y: vec3) -> vec3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_vec4 :: proc "c" (x, y: vec4) -> vec4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_dvec2 :: proc "c" (x, y: dvec2) -> dvec2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_dvec3 :: proc "c" (x, y: dvec3) -> dvec3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_dvec4 :: proc "c" (x, y: dvec4) -> dvec4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_ivec2 :: proc "c" (x, y: ivec2) -> ivec2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_ivec3 :: proc "c" (x, y: ivec3) -> ivec3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_ivec4 :: proc "c" (x, y: ivec4) -> ivec4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-@(require_results) min_uvec2 :: proc "c" (x, y: uvec2) -> uvec2 { return {min(x.x, y.x), min(x.y, y.y)} }
-@(require_results) min_uvec3 :: proc "c" (x, y: uvec3) -> uvec3 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z)} }
-@(require_results) min_uvec4 :: proc "c" (x, y: uvec4) -> uvec4 { return {min(x.x, y.x), min(x.y, y.y), min(x.z, y.z), min(x.w, y.w)} }
-
-
-max :: proc{
-	max_i32,  
-	max_u32,  
-	max_f32,  
-	max_f64,
-	max_vec2, 
-	max_vec3, 
-	max_vec4, 
-	max_dvec2, 
-	max_dvec3, 
-	max_dvec4, 
-	max_ivec2,
-	max_ivec3,
-	max_ivec4,
-	max_uvec2,
-	max_uvec3,
-	max_uvec4,
+@(private)
+@(require_results)
+saturate_array :: proc "c" (v: $A/[$N]$T) -> A where intrinsics.type_is_numeric(T) {
+	return builtin.clamp(v, 0, 1)
 }
-@(require_results) max_i32  :: proc "c" (x, y: i32) -> i32   { return builtin.max(x, y) }
-@(require_results) max_u32  :: proc "c" (x, y: u32) -> u32   { return builtin.max(x, y) }
-@(require_results) max_f32  :: proc "c" (x, y: f32) -> f32   { return builtin.max(x, y) }
-@(require_results) max_f64  :: proc "c" (x, y: f64) -> f64   { return builtin.max(x, y) }
-@(require_results) max_vec2 :: proc "c" (x, y: vec2) -> vec2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_vec3 :: proc "c" (x, y: vec3) -> vec3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_vec4 :: proc "c" (x, y: vec4) -> vec4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_dvec2 :: proc "c" (x, y: dvec2) -> dvec2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_dvec3 :: proc "c" (x, y: dvec3) -> dvec3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_dvec4 :: proc "c" (x, y: dvec4) -> dvec4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_ivec2 :: proc "c" (x, y: ivec2) -> ivec2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_ivec3 :: proc "c" (x, y: ivec3) -> ivec3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_ivec4 :: proc "c" (x, y: ivec4) -> ivec4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
-@(require_results) max_uvec2 :: proc "c" (x, y: uvec2) -> uvec2 { return {max(x.x, y.x), max(x.y, y.y)} }
-@(require_results) max_uvec3 :: proc "c" (x, y: uvec3) -> uvec3 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z)} }
-@(require_results) max_uvec4 :: proc "c" (x, y: uvec4) -> uvec4 { return {max(x.x, y.x), max(x.y, y.y), max(x.z, y.z), max(x.w, y.w)} }
+saturate :: proc{saturate_scalar, saturate_array}
 
-
-
-clamp :: proc{
-	clamp_i32, 
-	clamp_u32, 
-	clamp_f32,  
-	clamp_f64,
-	clamp_vec2, 
-	clamp_vec3, 
-	clamp_vec4, 
-	clamp_dvec2, 
-	clamp_dvec3, 
-	clamp_dvec4, 
-	clamp_ivec2,
-	clamp_ivec3,
-	clamp_ivec4,
-	clamp_uvec2,
-	clamp_uvec3,
-	clamp_uvec4,
+@(private)
+@(require_results)
+mix_scalar :: proc "c" (x, y, t: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return x*(1-t) + y*t
 }
-@(require_results) clamp_i32  :: proc "c" (x, y, z: i32) -> i32   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_u32  :: proc "c" (x, y, z: u32) -> u32   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_f32  :: proc "c" (x, y, z: f32) -> f32   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_f64  :: proc "c" (x, y, z: f64) -> f64   { return builtin.clamp(x, y, z) }
-@(require_results) clamp_vec2 :: proc "c" (x, y, z: vec2) -> vec2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_vec3 :: proc "c" (x, y, z: vec3) -> vec3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_vec4 :: proc "c" (x, y, z: vec4) -> vec4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_dvec2 :: proc "c" (x, y, z: dvec2) -> dvec2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_dvec3 :: proc "c" (x, y, z: dvec3) -> dvec3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_dvec4 :: proc "c" (x, y, z: dvec4) -> dvec4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_ivec2 :: proc "c" (x, y, z: ivec2) -> ivec2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_ivec3 :: proc "c" (x, y, z: ivec3) -> ivec3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_ivec4 :: proc "c" (x, y, z: ivec4) -> ivec4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-@(require_results) clamp_uvec2 :: proc "c" (x, y, z: uvec2) -> uvec2 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y)} }
-@(require_results) clamp_uvec3 :: proc "c" (x, y, z: uvec3) -> uvec3 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z)} }
-@(require_results) clamp_uvec4 :: proc "c" (x, y, z: uvec4) -> uvec4 { return {clamp(x.x, y.x, z.x), clamp(x.y, y.y, z.y), clamp(x.z, y.z, z.z), clamp(x.w, y.w, z.w)} }
-
-saturate :: proc{
-	saturate_i32,
-	saturate_u32,
-	saturate_f32,
-	saturate_f64,
-	saturate_vec2,
-	saturate_vec3,
-	saturate_vec4,
-	saturate_dvec2,
-	saturate_dvec3,
-	saturate_dvec4,
-	saturate_ivec2,
-	saturate_ivec3,
-	saturate_ivec4,
-	saturate_uvec2,
-	saturate_uvec3,
-	saturate_uvec4,
+@(private)
+@(require_results)
+mix_array :: proc "c" (x, y, t: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	return x*(1-t) + y*t
 }
-@(require_results) saturate_i32  :: proc "c" (v: i32) -> i32   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_u32  :: proc "c" (v: u32) -> u32   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_f32  :: proc "c" (v: f32) -> f32   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_f64  :: proc "c" (v: f64) -> f64   { return builtin.clamp(v, 0, 1) }
-@(require_results) saturate_vec2 :: proc "c" (v: vec2) -> vec2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_vec3 :: proc "c" (v: vec3) -> vec3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_vec4 :: proc "c" (v: vec4) -> vec4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_dvec2 :: proc "c" (v: dvec2) -> dvec2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_dvec3 :: proc "c" (v: dvec3) -> dvec3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_dvec4 :: proc "c" (v: dvec4) -> dvec4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_ivec2 :: proc "c" (v: ivec2) -> ivec2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_ivec3 :: proc "c" (v: ivec3) -> ivec3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_ivec4 :: proc "c" (v: ivec4) -> ivec4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
-@(require_results) saturate_uvec2 :: proc "c" (v: uvec2) -> uvec2 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1)} }
-@(require_results) saturate_uvec3 :: proc "c" (v: uvec3) -> uvec3 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1)} }
-@(require_results) saturate_uvec4 :: proc "c" (v: uvec4) -> uvec4 { return {builtin.clamp(v.x, 0, 1), builtin.clamp(v.y, 0, 1), builtin.clamp(v.z, 0, 1), builtin.clamp(v.w, 0, 1)} }
+mix :: proc{mix_scalar, mix_array}
+lerp :: mix
 
-mix :: proc{
-	mix_f32,
-	mix_f64,
-	mix_vec2,
-	mix_vec3,
-	mix_vec4,
-	mix_dvec2,
-	mix_dvec3,
-	mix_dvec4,
+@(private)
+@(require_results)
+step_scalar :: proc "c" (edge, x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return 0 if x < edge else 1
 }
-@(require_results) mix_f32  :: proc "c" (x, y, t: f32) -> f32   { return x*(1-t) + y*t }
-@(require_results) mix_f64  :: proc "c" (x, y, t: f64) -> f64   { return x*(1-t) + y*t }
-@(require_results) mix_vec2 :: proc "c" (x, y, t: vec2) -> vec2 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, t.y)} }
-@(require_results) mix_vec3 :: proc "c" (x, y, t: vec3) -> vec3 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, t.y), mix(x.z, y.z, t.z)} }
-@(require_results) mix_vec4 :: proc "c" (x, y, t: vec4) -> vec4 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, y.y), mix(x.z, y.z, t.z), mix(x.w, y.w, t.w)} }
-@(require_results) mix_dvec2 :: proc "c" (x, y, t: dvec2) -> dvec2 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, t.y)} }
-@(require_results) mix_dvec3 :: proc "c" (x, y, t: dvec3) -> dvec3 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, t.y), mix(x.z, y.z, t.z)} }
-@(require_results) mix_dvec4 :: proc "c" (x, y, t: dvec4) -> dvec4 { return {mix(x.x, y.x, t.x), mix(x.y, y.y, y.y), mix(x.z, y.z, t.z), mix(x.w, y.w, t.w)} }
-
-lerp :: proc{
-	lerp_f32,
-	lerp_f64,
-	lerp_vec2,
-	lerp_vec3,
-	lerp_vec4,
-	lerp_dvec2,
-	lerp_dvec3,
-	lerp_dvec4,
+@(private)
+@(require_results)
+step_array :: proc "c" (edge, x: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	out: A
+	for i in 0..<N {
+		out[i] = step_scalar(edge[i], x[i])
+	}
+	return out
 }
-@(require_results) lerp_f32  :: proc "c" (x, y, t: f32) -> f32   { return x*(1-t) + y*t }
-@(require_results) lerp_f64  :: proc "c" (x, y, t: f64) -> f64   { return x*(1-t) + y*t }
-@(require_results) lerp_vec2 :: proc "c" (x, y, t: vec2) -> vec2 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y)} }
-@(require_results) lerp_vec3 :: proc "c" (x, y, t: vec3) -> vec3 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z)} }
-@(require_results) lerp_vec4 :: proc "c" (x, y, t: vec4) -> vec4 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z), lerp(x.w, y.w, t.w)} }
-@(require_results) lerp_dvec2 :: proc "c" (x, y, t: dvec2) -> dvec2 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y)} }
-@(require_results) lerp_dvec3 :: proc "c" (x, y, t: dvec3) -> dvec3 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z)} }
-@(require_results) lerp_dvec4 :: proc "c" (x, y, t: dvec4) -> dvec4 { return {lerp(x.x, y.x, t.x), lerp(x.y, y.y, t.y), lerp(x.z, y.z, t.z), lerp(x.w, y.w, t.w)} }
+step :: proc{step_scalar, step_array}
 
-
-step :: proc{
-	step_f32,
-	step_f64,
-	step_vec2,
-	step_vec3,
-	step_vec4,
-	step_dvec2,
-	step_dvec3,
-	step_dvec4,
-}
-@(require_results) step_f32  :: proc "c" (edge, x: f32) -> f32   { return 0 if x < edge else 1 }
-@(require_results) step_f64  :: proc "c" (edge, x: f64) -> f64   { return 0 if x < edge else 1 }
-@(require_results) step_vec2 :: proc "c" (edge, x: vec2) -> vec2 { return {step(edge.x, x.x), step(edge.y, x.y)} }
-@(require_results) step_vec3 :: proc "c" (edge, x: vec3) -> vec3 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z)} }
-@(require_results) step_vec4 :: proc "c" (edge, x: vec4) -> vec4 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z), step(edge.w, x.w)} }
-@(require_results) step_dvec2 :: proc "c" (edge, x: dvec2) -> dvec2 { return {step(edge.x, x.x), step(edge.y, x.y)} }
-@(require_results) step_dvec3 :: proc "c" (edge, x: dvec3) -> dvec3 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z)} }
-@(require_results) step_dvec4 :: proc "c" (edge, x: dvec4) -> dvec4 { return {step(edge.x, x.x), step(edge.y, x.y), step(edge.z, x.z), step(edge.w, x.w)} }
-
-smoothstep :: proc{
-	smoothstep_f32,
-	smoothstep_f64,
-	smoothstep_vec2,
-	smoothstep_vec3,
-	smoothstep_vec4,
-	smoothstep_dvec2,
-	smoothstep_dvec3,
-	smoothstep_dvec4,
-}
-@(require_results) smoothstep_f32 :: proc "c" (edge0, edge1, x: f32) -> f32 {
-	y := clamp(((x-edge0) / (edge1 - edge0)), 0, 1)
+@(private)
+@(require_results)
+smoothstep_scalar :: proc "c" (edge0, edge1, x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	y := clamp(((x-edge0) / (edge1-edge0)), 0, 1)
 	return y * y * (3 - 2*y)
 }
-@(require_results) smoothstep_f64 :: proc "c" (edge0, edge1, x: f64) -> f64 {
-	y := clamp(((x-edge0) / (edge1 - edge0)), 0, 1)
+@(private)
+@(require_results)
+smoothstep_array :: proc "c" (edge0, edge1, x: $A/[$N]$T) -> A where intrinsics.type_is_float(T) {
+	y := clamp(((x-edge0) / (edge1-edge0)), 0, 1)
 	return y * y * (3 - 2*y)
 }
-@(require_results) smoothstep_vec2  :: proc "c" (edge0, edge1, x: vec2) -> vec2   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y)} }
-@(require_results) smoothstep_vec3  :: proc "c" (edge0, edge1, x: vec3) -> vec3   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z)} }
-@(require_results) smoothstep_vec4  :: proc "c" (edge0, edge1, x: vec4) -> vec4   { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z), smoothstep(edge0.w, edge1.w, x.w)} }
-@(require_results) smoothstep_dvec2 :: proc "c" (edge0, edge1, x: dvec2) -> dvec2 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y)} }
-@(require_results) smoothstep_dvec3 :: proc "c" (edge0, edge1, x: dvec3) -> dvec3 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z)} }
-@(require_results) smoothstep_dvec4 :: proc "c" (edge0, edge1, x: dvec4) -> dvec4 { return {smoothstep(edge0.x, edge1.x, x.x), smoothstep(edge0.y, edge1.y, x.y), smoothstep(edge0.z, edge1.z, x.z), smoothstep(edge0.w, edge1.w, x.w)} }
+smoothstep :: proc{smoothstep_scalar, smoothstep_array}
 
-
+@(private)
+@(require_results)
+abs_numeric_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_unsigned(T), !intrinsics.type_is_array(T) {
+	return builtin.abs(x)
+}
+@(private)
+@(require_results)
+abs_numeric_array :: proc "c" (x: $A/[$N]$T) -> A where intrinsics.type_is_numeric(T), !intrinsics.type_is_unsigned(T) {
+	return builtin.abs(x)
+}
+@(private)
+@(require_results)
+abs_unsigned_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_unsigned(T), !intrinsics.type_is_array(T) {
+	return x
+}
+@(private)
+@(require_results)
+abs_unsigned_array :: proc "c" (x: $A/[$N]$T) -> A where intrinsics.type_is_unsigned(T) {
+	return x
+}
 abs :: proc{
-	abs_i32,
-	abs_u32,
-	abs_f32,
-	abs_f64,
-	abs_vec2,
-	abs_vec3,
-	abs_vec4,
-	abs_dvec2,
-	abs_dvec3,
-	abs_dvec4,
-	abs_ivec2,
-	abs_ivec3,
-	abs_ivec4,
-	abs_uvec2,
-	abs_uvec3,
-	abs_uvec4,
+	abs_numeric_scalar,
+	abs_numeric_array,
+	abs_unsigned_scalar,
+	abs_unsigned_array,
 }
-@(require_results) abs_i32  :: proc "c" (x: i32)  -> i32  { return builtin.abs(x) }
-@(require_results) abs_u32  :: proc "c" (x: u32)  -> u32  { return x }
-@(require_results) abs_f32  :: proc "c" (x: f32)  -> f32  { return builtin.abs(x) }
-@(require_results) abs_f64  :: proc "c" (x: f64)  -> f64  { return builtin.abs(x) }
-@(require_results) abs_vec2 :: proc "c" (x: vec2) -> vec2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_vec3 :: proc "c" (x: vec3) -> vec3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_vec4 :: proc "c" (x: vec4) -> vec4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_dvec2 :: proc "c" (x: dvec2) -> dvec2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_dvec3 :: proc "c" (x: dvec3) -> dvec3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_dvec4 :: proc "c" (x: dvec4) -> dvec4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_ivec2 :: proc "c" (x: ivec2) -> ivec2 { return {abs(x.x), abs(x.y)} }
-@(require_results) abs_ivec3 :: proc "c" (x: ivec3) -> ivec3 { return {abs(x.x), abs(x.y), abs(x.z)} }
-@(require_results) abs_ivec4 :: proc "c" (x: ivec4) -> ivec4 { return {abs(x.x), abs(x.y), abs(x.z), abs(x.w)} }
-@(require_results) abs_uvec2 :: proc "c" (x: uvec2) -> uvec2 { return x }
-@(require_results) abs_uvec3 :: proc "c" (x: uvec3) -> uvec3 { return x }
-@(require_results) abs_uvec4 :: proc "c" (x: uvec4) -> uvec4 { return x }
 
-dot :: proc{
-	dot_i32,
-	dot_u32,
-	dot_f32,
-	dot_f64,
-	dot_vec2,
-	dot_vec3,
-	dot_vec4,
-	dot_dvec2,
-	dot_dvec3,
-	dot_dvec4,
-	dot_ivec2,
-	dot_ivec3,
-	dot_ivec4,
-	dot_uvec2,
-	dot_uvec3,
-	dot_uvec4,
-	dot_quat,
-	dot_dquat,
+@(private)
+@(require_results)
+dot_scalar :: proc "c" (a, b: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T), !intrinsics.type_is_quaternion(T) {
+	return a * b
 }
-@(require_results) dot_i32  :: proc "c" (a, b: i32)  -> i32 { return a*b }
-@(require_results) dot_u32  :: proc "c" (a, b: u32)  -> u32 { return a*b }
-@(require_results) dot_f32  :: proc "c" (a, b: f32)  -> f32 { return a*b }
-@(require_results) dot_f64  :: proc "c" (a, b: f64)  -> f64 { return a*b }
-@(require_results) dot_vec2 :: proc "c" (a, b: vec2) -> f32 { return a.x*b.x + a.y*b.y }
-@(require_results) dot_vec3 :: proc "c" (a, b: vec3) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_vec4 :: proc "c" (a, b: vec4) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_dvec2 :: proc "c" (a, b: dvec2) -> f64 { return a.x*b.x + a.y*b.y }
-@(require_results) dot_dvec3 :: proc "c" (a, b: dvec3) -> f64 { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_dvec4 :: proc "c" (a, b: dvec4) -> f64 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_ivec2 :: proc "c" (a, b: ivec2) -> i32 { return a.x*b.x + a.y*b.y }
-@(require_results) dot_ivec3 :: proc "c" (a, b: ivec3) -> i32 { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_ivec4 :: proc "c" (a, b: ivec4) -> i32 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_uvec2 :: proc "c" (a, b: uvec2) -> u32 { return a.x*b.x + a.y*b.y }
-@(require_results) dot_uvec3 :: proc "c" (a, b: uvec3) -> u32 { return a.x*b.x + a.y*b.y + a.z*b.z }
-@(require_results) dot_uvec4 :: proc "c" (a, b: uvec4) -> u32 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_quat :: proc "c" (a, b: quat) -> f32 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-@(require_results) dot_dquat :: proc "c" (a, b: dquat) -> f64 { return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w }
-
-length :: proc{
-	length_f32,
-	length_f64,
-	length_vec2,
-	length_vec3,
-	length_vec4,
-	length_dvec2,
-	length_dvec3,
-	length_dvec4,
-	length_quat,
-	length_dquat,
+@(private)
+@(require_results)
+dot_array :: proc "c" (a, b: $A/[$N]$T) -> T where intrinsics.type_is_numeric(T) {
+	out: T
+	for i in 0..<N {
+		out += a[i] * b[i]
+	}
+	return out
 }
-@(require_results) length_f32  :: proc "c" (x: f32)  -> f32 { return builtin.abs(x) }
-@(require_results) length_f64  :: proc "c" (x: f64)  -> f64 { return builtin.abs(x) }
-@(require_results) length_vec2 :: proc "c" (x: vec2) -> f32 { return sqrt(x.x*x.x + x.y*x.y) }
-@(require_results) length_vec3 :: proc "c" (x: vec3) -> f32 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z) }
-@(require_results) length_vec4 :: proc "c" (x: vec4) -> f32 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-@(require_results) length_dvec2 :: proc "c" (x: dvec2) -> f64 { return sqrt(x.x*x.x + x.y*x.y) }
-@(require_results) length_dvec3 :: proc "c" (x: dvec3) -> f64 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z) }
-@(require_results) length_dvec4 :: proc "c" (x: dvec4) -> f64 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-@(require_results) length_quat :: proc "c" (x: quat) -> f32 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-@(require_results) length_dquat :: proc "c" (x: dquat) -> f64 { return sqrt(x.x*x.x + x.y*x.y + x.z*x.z + x.w*x.w) }
-
-
-distance :: proc{
-	distance_f32,
-	distance_f64,
-	distance_vec2,
-	distance_vec3,
-	distance_vec4,
-	distance_dvec2,
-	distance_dvec3,
-	distance_dvec4,
+@(private)
+@(require_results)
+dot_quaternion128 :: proc "c" (a, b: quat) -> f32 {
+	return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w
 }
-@(require_results) distance_f32  :: proc "c" (x, y: f32)  -> f32 { return length(y-x) }
-@(require_results) distance_f64  :: proc "c" (x, y: f64)  -> f64 { return length(y-x) }
-@(require_results) distance_vec2 :: proc "c" (x, y: vec2) -> f32 { return length(y-x) }
-@(require_results) distance_vec3 :: proc "c" (x, y: vec3) -> f32 { return length(y-x) }
-@(require_results) distance_vec4 :: proc "c" (x, y: vec4) -> f32 { return length(y-x) }
-@(require_results) distance_dvec2 :: proc "c" (x, y: dvec2) -> f64 { return length(y-x) }
-@(require_results) distance_dvec3 :: proc "c" (x, y: dvec3) -> f64 { return length(y-x) }
-@(require_results) distance_dvec4 :: proc "c" (x, y: dvec4) -> f64 { return length(y-x) }
+@(private)
+@(require_results)
+dot_quaternion256 :: proc "c" (a, b: dquat) -> f64 {
+	return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w
+}
+dot :: proc{dot_scalar, dot_array, dot_quaternion128, dot_quaternion256}
 
+@(private)
+@(require_results)
+length_scalar :: proc "c" (x: $T) -> T where intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
+	return builtin.abs(x)
+}
+@(private)
+@(require_results)
+length_array :: proc "c" (x: $A/[$N]$T) -> T where intrinsics.type_is_float(T) {
+	return sqrt(dot(x, x))
+}
+@(private)
+@(require_results)
+length_quaternion128 :: proc "c" (x: quat) -> f32 {
+	return sqrt(dot(x, x))
+}
+@(private)
+@(require_results)
+length_quaternion256 :: proc "c" (x: dquat) -> f64 {
+	return sqrt(dot(x, x))
+}
+length :: proc{length_scalar, length_array, length_quaternion128, length_quaternion256}
+
+
+@(require_results) distance :: proc "c" (x, y: $T) -> T { return length(y-x) }
 
 cross :: proc{
 	cross_vec3,
@@ -1119,220 +911,77 @@ vectorTripleProduct :: proc {
 
 // Vector Relational Procedures
 
-lessThan :: proc{
-	lessThan_f32,
-	lessThan_f64,
-	lessThan_i32,
-	lessThan_u32,
-	lessThan_vec2,
-	lessThan_dvec2,
-	lessThan_ivec2,
-	lessThan_uvec2,
-	lessThan_vec3,
-	lessThan_dvec3,
-	lessThan_ivec3,
-	lessThan_uvec3,
-	lessThan_vec4,
-	lessThan_dvec4,
-	lessThan_ivec4,
-	lessThan_uvec4,
+@(private)
+@(require_results)
+less_than_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a < b
 }
-@(require_results) lessThan_f32   :: proc "c" (a, b: f32) -> bool { return a < b }
-@(require_results) lessThan_f64   :: proc "c" (a, b: f64) -> bool { return a < b }
-@(require_results) lessThan_i32   :: proc "c" (a, b: i32) -> bool { return a < b }
-@(require_results) lessThan_u32   :: proc "c" (a, b: u32) -> bool { return a < b }
-@(require_results) lessThan_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_dvec2 :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x < b.x, a.y < b.y} }
-@(require_results) lessThan_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x < b.x, a.y < b.y, a.z < b.z} }
-@(require_results) lessThan_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-@(require_results) lessThan_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x < b.x, a.y < b.y, a.z < b.z, a.w < b.w} }
-
-
-lessThanEqual :: proc{
-	lessThanEqual_f32,
-	lessThanEqual_f64,
-	lessThanEqual_i32,
-	lessThanEqual_u32,
-	lessThanEqual_vec2,
-	lessThanEqual_dvec2,
-	lessThanEqual_ivec2,
-	lessThanEqual_uvec2,
-	lessThanEqual_vec3,
-	lessThanEqual_dvec3,
-	lessThanEqual_ivec3,
-	lessThanEqual_uvec3,
-	lessThanEqual_vec4,
-	lessThanEqual_dvec4,
-	lessThanEqual_ivec4,
-	lessThanEqual_uvec4,
+@(private)
+@(require_results)
+less_than_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a < b
 }
-@(require_results) lessThanEqual_f32   :: proc "c" (a, b: f32) -> bool { return a <= b }
-@(require_results) lessThanEqual_f64   :: proc "c" (a, b: f64) -> bool { return a <= b }
-@(require_results) lessThanEqual_i32   :: proc "c" (a, b: i32) -> bool { return a <= b }
-@(require_results) lessThanEqual_u32   :: proc "c" (a, b: u32) -> bool { return a <= b }
-@(require_results) lessThanEqual_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_dvec2  :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x <= b.x, a.y <= b.y} }
-@(require_results) lessThanEqual_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z} }
-@(require_results) lessThanEqual_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
-@(require_results) lessThanEqual_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x <= b.x, a.y <= b.y, a.z <= b.z, a.w <= b.w} }
+lessThan :: proc{less_than_scalar, less_than_array}
 
-
-greaterThan :: proc{
-	greaterThan_f32,
-	greaterThan_f64,
-	greaterThan_i32,
-	greaterThan_u32,
-	greaterThan_vec2,
-	greaterThan_dvec2,
-	greaterThan_ivec2,
-	greaterThan_uvec2,
-	greaterThan_vec3,
-	greaterThan_dvec3,
-	greaterThan_ivec3,
-	greaterThan_uvec3,
-	greaterThan_vec4,
-	greaterThan_dvec4,
-	greaterThan_ivec4,
-	greaterThan_uvec4,
+@(private)
+@(require_results)
+less_than_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a <= b
 }
-@(require_results) greaterThan_f32   :: proc "c" (a, b: f32) -> bool { return a > b }
-@(require_results) greaterThan_f64   :: proc "c" (a, b: f64) -> bool { return a > b }
-@(require_results) greaterThan_i32   :: proc "c" (a, b: i32) -> bool { return a > b }
-@(require_results) greaterThan_u32   :: proc "c" (a, b: u32) -> bool { return a > b }
-@(require_results) greaterThan_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_dvec2  :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x > b.x, a.y > b.y} }
-@(require_results) greaterThan_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x > b.x, a.y > b.y, a.z > b.z} }
-@(require_results) greaterThan_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-@(require_results) greaterThan_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x > b.x, a.y > b.y, a.z > b.z, a.w > b.w} }
-
-
-greaterThanEqual :: proc{
-	greaterThanEqual_f32,
-	greaterThanEqual_f64,
-	greaterThanEqual_i32,
-	greaterThanEqual_u32,
-	greaterThanEqual_vec2,
-	greaterThanEqual_dvec2,
-	greaterThanEqual_ivec2,
-	greaterThanEqual_uvec2,
-	greaterThanEqual_vec3,
-	greaterThanEqual_dvec3,
-	greaterThanEqual_ivec3,
-	greaterThanEqual_uvec3,
-	greaterThanEqual_vec4,
-	greaterThanEqual_dvec4,
-	greaterThanEqual_ivec4,
-	greaterThanEqual_uvec4,
+@(private)
+@(require_results)
+less_than_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a <= b
 }
-@(require_results) greaterThanEqual_f32   :: proc "c" (a, b: f32) -> bool { return a >= b }
-@(require_results) greaterThanEqual_f64   :: proc "c" (a, b: f64) -> bool { return a >= b }
-@(require_results) greaterThanEqual_i32   :: proc "c" (a, b: i32) -> bool { return a >= b }
-@(require_results) greaterThanEqual_u32   :: proc "c" (a, b: u32) -> bool { return a >= b }
-@(require_results) greaterThanEqual_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_dvec2  :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x >= b.x, a.y >= b.y} }
-@(require_results) greaterThanEqual_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z} }
-@(require_results) greaterThanEqual_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
-@(require_results) greaterThanEqual_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x >= b.x, a.y >= b.y, a.z >= b.z, a.w >= b.w} }
+lessThanEqual :: proc{less_than_equal_scalar, less_than_equal_array}
 
-
-equal :: proc{
-	equal_f32,
-	equal_f64,
-	equal_i32,
-	equal_u32,
-	equal_vec2,
-	equal_dvec2,
-	equal_ivec2,
-	equal_uvec2,
-	equal_vec3,
-	equal_dvec3,
-	equal_ivec3,
-	equal_uvec3,
-	equal_vec4,
-	equal_dvec4,
-	equal_ivec4,
-	equal_uvec4,
+@(private)
+@(require_results)
+greater_than_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a > b
 }
-@(require_results) equal_f32   :: proc "c" (a, b: f32) -> bool { return a == b }
-@(require_results) equal_f64   :: proc "c" (a, b: f64) -> bool { return a == b }
-@(require_results) equal_i32   :: proc "c" (a, b: i32) -> bool { return a == b }
-@(require_results) equal_u32   :: proc "c" (a, b: u32) -> bool { return a == b }
-@(require_results) equal_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_dvec2  :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x == b.x, a.y == b.y} }
-@(require_results) equal_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x == b.x, a.y == b.y, a.z == b.z} }
-@(require_results) equal_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-@(require_results) equal_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x == b.x, a.y == b.y, a.z == b.z, a.w == b.w} }
-
-notEqual :: proc{
-	notEqual_f32,
-	notEqual_f64,
-	notEqual_i32,
-	notEqual_u32,
-	notEqual_vec2,
-	notEqual_dvec2,
-	notEqual_ivec2,
-	notEqual_uvec2,
-	notEqual_vec3,
-	notEqual_dvec3,
-	notEqual_ivec3,
-	notEqual_uvec3,
-	notEqual_vec4,
-	notEqual_dvec4,
-	notEqual_ivec4,
-	notEqual_uvec4,
+@(private)
+@(require_results)
+greater_than_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a > b
 }
-@(require_results) notEqual_f32   :: proc "c" (a, b: f32) -> bool { return a != b }
-@(require_results) notEqual_f64   :: proc "c" (a, b: f64) -> bool { return a != b }
-@(require_results) notEqual_i32   :: proc "c" (a, b: i32) -> bool { return a != b }
-@(require_results) notEqual_u32   :: proc "c" (a, b: u32) -> bool { return a != b }
-@(require_results) notEqual_vec2  :: proc "c" (a, b: vec2) -> bvec2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_dvec2  :: proc "c" (a, b: dvec2) -> bvec2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_ivec2 :: proc "c" (a, b: ivec2) -> bvec2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_uvec2 :: proc "c" (a, b: uvec2) -> bvec2 { return {a.x != b.x, a.y != b.y} }
-@(require_results) notEqual_vec3  :: proc "c" (a, b: vec3) -> bvec3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_dvec3  :: proc "c" (a, b: dvec3) -> bvec3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_ivec3 :: proc "c" (a, b: ivec3) -> bvec3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_uvec3 :: proc "c" (a, b: uvec3) -> bvec3 { return {a.x != b.x, a.y != b.y, a.z != b.z} }
-@(require_results) notEqual_vec4  :: proc "c" (a, b: vec4) -> bvec4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_dvec4  :: proc "c" (a, b: dvec4) -> bvec4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_ivec4 :: proc "c" (a, b: ivec4) -> bvec4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
-@(require_results) notEqual_uvec4 :: proc "c" (a, b: uvec4) -> bvec4 { return {a.x != b.x, a.y != b.y, a.z != b.z, a.w != b.w} }
+greaterThan :: proc{greater_than_scalar, greater_than_array}
 
+@(private)
+@(require_results)
+greater_than_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a >= b
+}
+@(private)
+@(require_results)
+greater_than_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a >= b
+}
+greaterThanEqual :: proc{greater_than_equal_scalar, greater_than_equal_array}
+
+@(private)
+@(require_results)
+equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a == b
+}
+@(private)
+@(require_results)
+equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a == b
+}
+equal :: proc{equal_scalar, equal_array}
+
+@(private)
+@(require_results)
+not_equal_scalar :: proc "c" (a, b: $T) -> bool where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+	return a != b
+}
+@(private)
+@(require_results)
+not_equal_array :: proc "c" (a, b: $A/[$N]$T) -> [N]bool where intrinsics.type_is_numeric(T) {
+	return a != b
+}
+notEqual :: proc{not_equal_scalar, not_equal_array}
 
 any :: proc{
 	any_bool,
@@ -2180,4 +1829,3 @@ inverse_matrix4x4 :: proc "contextless" (x: $M/matrix[4, 4]$T) -> (y: M) #no_bou
 	}
 	return
 }
-
