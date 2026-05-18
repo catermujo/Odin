@@ -1322,6 +1322,11 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 		case Type_Array:
 			field_count = cast(isize)elem_type->Array.count;
 			break;
+		default:
+			if (is_type_quaternion(elem_type)) {
+				field_count = 4;
+			}
+			break;
 		}
 		for (isize i = 0; i < field_count; i++) {
 			lbValue dst = lb_emit_struct_ep(p, addr.addr, cast(i32)i);

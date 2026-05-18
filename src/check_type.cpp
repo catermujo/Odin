@@ -3283,10 +3283,12 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 	Type *bt_elem = base_type(elem);
 
 	bool is_polymorphic = is_type_polymorphic(elem);
+	bool is_small_array = is_type_array(elem) && bt_elem->Array.count <= 4;
+	bool is_quaternion = is_type_quaternion(elem);
 
-	if (!is_polymorphic && !is_type_struct(elem) && !is_type_raw_union(elem) && !(is_type_array(elem) && bt_elem->Array.count <= 4)) {
+	if (!is_polymorphic && !is_type_struct(elem) && !is_type_raw_union(elem) && !is_small_array && !is_quaternion) {
 		gbString str = type_to_string(elem);
-		error(elem_expr, "Invalid type for an #soa array, expected a struct or array of length 4 or below, got '%s'", str);
+		error(elem_expr, "Invalid type for an #soa array, expected a struct, quaternion, or array of length 4 or below, got '%s'", str);
 		gb_string_free(str);
 		return alloc_type_array(elem, count, generic_type);
 	}
@@ -3355,6 +3357,45 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 			} else {
 				field_type = alloc_type_multi_pointer(old_array->Array.elem);
 			}
+			Token token = {};
+			token.string = params_xyzw[i];
+
+			Entity *new_field = alloc_entity_field(scope, token, field_type, false, cast(i32)i);
+			soa_struct->Struct.fields[i] = new_field;
+			add_entity(ctx, scope, nullptr, new_field);
+			add_entity_use(ctx, nullptr, new_field);
+			if (soa_kind != StructSoa_Fixed) {
+				new_field->flags |= EntityFlag_SoaPtrField;
+			}
+		}
+
+		is_complete = true;
+
+	} else if (is_type_quaternion(elem)) {
+		Type *quat_elem = base_complex_elem_type(elem);
+		field_count = 4;
+
+		soa_struct->Struct.fields = permanent_slice_make<Entity *>(field_count+extra_field_count);
+		soa_struct->Struct.tags = gb_alloc_array(permanent_allocator(), String, field_count+extra_field_count);
+
+		scope_map_init(&scope->elements);
+
+		String params_xyzw[4] = {
+			str_lit("x"),
+			str_lit("y"),
+			str_lit("z"),
+			str_lit("w"),
+		};
+
+		for (isize i = 0; i < field_count; i++) {
+			Type *field_type = nullptr;
+			if (soa_kind == StructSoa_Fixed) {
+				GB_ASSERT(count >= 0);
+				field_type = alloc_type_array(quat_elem, count);
+			} else {
+				field_type = alloc_type_multi_pointer(quat_elem);
+			}
+
 			Token token = {};
 			token.string = params_xyzw[i];
 
