@@ -7,7 +7,12 @@ pushd build
 set COMMON=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-defineables -show-timings
 set ODIN=..\..\..\odin
 
+set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-defineables
+
 @echo on
+
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=false || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 
 %ODIN% run ..\test_issue_reference_range_alias.odin -file %COMMON% -debug || exit /b
 
