@@ -2221,7 +2221,7 @@ gb_internal void check_defines(BuildContext *bc, Checker *c) {
 		ExactValue value = entry.value;
 		GB_ASSERT(value.kind != ExactValue_Invalid);
 
-		bool found = false;
+		bool found = map_get(&bc->used_defined_values, entry.key) != nullptr;
 		for_array(i, c->info.defineables) {
 			Defineable *def = &c->info.defineables[i];
 			if (def->name == name) {
@@ -3943,6 +3943,7 @@ int main(int arg_count, char const **arg_ptr) {
 
 	TIME_SECTION("init args");
 	map_init(&build_context.defined_values);
+	map_init(&build_context.used_defined_values);
 	build_context.extra_packages.allocator = heap_allocator();
 	
 	init_build_context_error_pos_style();
