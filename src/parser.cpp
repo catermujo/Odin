@@ -7014,7 +7014,7 @@ gb_internal String build_tag_get_token(String s, String *out) {
 		isize width = utf8_decode(&s[n], s.len-n, &rune);
 		if (n == 0 && rune == '!') {
 
-		} else if (!rune_is_letter(rune) && !rune_is_digit(rune) && rune != ':') {
+		} else if (!rune_is_letter(rune) && !rune_is_digit(rune) && rune != ':' && rune != '_') {
 			isize k = gb_max(gb_max(n, width), 1);
 			*out = substring(s, k, s.len);
 			return substring(s, 0, k);
@@ -7060,7 +7060,6 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 
 		bool this_kind_os_seen = false;
 		bool this_kind_arch_seen = false;
-		int num_tokens = 0;
 
 		do {
 			String p = string_trim_whitespace(build_tag_get_token(s, &s));
@@ -7090,17 +7089,40 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 				continue;
 			}
 
+			String const define_prefix = str_lit("define:");
+			if (string_starts_with(p, define_prefix)) {
+				String define_name = substring(p, define_prefix.len, p.len);
+				if (!string_is_valid_identifier(define_name) || define_name == "_") {
+					syntax_error(token_for_pos, "Invalid build define name: '%.*s'. Expected an identifier after 'define:'", LIT(define_name));
+					break;
+				}
+
+				bool define_value = false;
+				char const *key = string_intern_cstring(define_name);
+				if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+					map_set(&build_context.used_defined_values, key, true);
+					if (v->kind != ExactValue_Bool) {
+						syntax_error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
+						break;
+					}
+					define_value = v->value_bool;
+				}
+				if (is_notted) {
+					define_value = !define_value;
+				}
+				this_kind_correct = this_kind_correct && define_value;
+				continue;
+			}
+
 			Subtarget subtarget     = Subtarget_Invalid;
 			String    subtarget_str = {};
 
 			TargetOsKind   os   = get_target_os_from_string(p, &subtarget, &subtarget_str);
 			TargetArchKind arch = get_target_arch_from_string(p);
-			num_tokens += 1;
 
-			// Catches 'windows linux', which is an impossible combination.
-			// Also catches usage of more than two things within a comma separated group.
-			if (num_tokens > 2 || (this_kind_os_seen && os != TargetOs_Invalid) || (this_kind_arch_seen && arch != TargetArch_Invalid)) {
-				syntax_error(token_for_pos, "Invalid build tag: Missing ',' before '%.*s'. Format: '#+build linux, windows amd64, darwin'", LIT(p));
+			// Catches 'windows linux' and 'amd64 arm64', both of which are impossible combinations.
+			if ((this_kind_os_seen && os != TargetOs_Invalid) || (this_kind_arch_seen && arch != TargetArch_Invalid)) {
+				syntax_error(token_for_pos, "Invalid build tag: Missing ',' before '%.*s'. Format: '#+build linux, windows amd64, define:FEATURE'", LIT(p));
 				break;
 			}
 

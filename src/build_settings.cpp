@@ -648,6 +648,7 @@ struct BuildContext {
 	isize      thread_count;
 
 	PtrMap<char const *, ExactValue> defined_values;
+	PtrMap<char const *, bool>       used_defined_values;
 
 	StringSet target_features_set;
 	String target_features_string;
