@@ -4,6 +4,7 @@ if not exist "build\" mkdir build
 pushd build
 
 set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused-defineables
+set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-defineables
 
 @echo on
 
@@ -34,6 +35,8 @@ set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused
 ..\..\..\odin build ..\test_issue_6401.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "3" || exit /b
 ..\..\..\odin test ..\test_pr_6470.odin %COMMON%  || exit /b
 ..\..\..\odin test ..\test_pr_6470.odin -define:TEST_EXPECT_FAILURE=true %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=false || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin test ..\test_pr_6476.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6484.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6874.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
