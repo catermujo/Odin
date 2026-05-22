@@ -40,6 +40,7 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 ..\..\..\odin test ..\test_pr_6476.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6484.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6874.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_type_switch_alias.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin check ..\test_issue_6979.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin build ..\test_issue_7037.odin %COMMON% -o:none  || exit /b
 
