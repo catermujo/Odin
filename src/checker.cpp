@@ -6105,7 +6105,7 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 				String file_str = op.value.value_string;
 				file_str = string_trim_whitespace(file_str);
 				String fullpath = file_str;
-				if (!is_arch_wasm() || string_ends_with(file_str, str_lit(".o"))) {
+				if (!is_arch_wasm() || is_wasm_foreign_library_file_path(file_str)) {
 					String foreign_path = {};
 					bool ok = determine_path_from_string(nullptr, decl, base_dir, file_str, &foreign_path, /*use error not syntax_error*/true);
 					if (ok) {
@@ -6161,7 +6161,7 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 			module_name = foreign_library->LibraryName.paths[0];
 		}
 
-		if (!string_ends_with(module_name, str_lit(".o"))) {
+		if (!is_wasm_foreign_library_file_path(module_name)) {
 			name = concatenate3_strings(permanent_allocator(), module_name, WASM_MODULE_NAME_SEPARATOR, name);
 		}
 		e->Procedure.link_name = name;
