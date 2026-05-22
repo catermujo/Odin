@@ -6388,7 +6388,7 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 				}
 
 				String fullpath = file_str;
-				if (!is_arch_wasm() || string_ends_with(fullpath, str_lit(".o"))) {
+				if (!is_arch_wasm() || is_wasm_foreign_library_file_path(fullpath)) {
 					String foreign_path = {};
 					bool ok = determine_path_from_string(&p->file_decl_mutex, node, base_dir, file_str, &foreign_path);
 					if (!ok) {

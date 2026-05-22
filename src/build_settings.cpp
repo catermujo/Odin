@@ -1076,6 +1076,26 @@ gb_internal bool is_arch_wasm(void) {
 	return false;
 }
 
+gb_internal bool is_wasm_foreign_library_file_path(String path) {
+	if (path == "") {
+		return false;
+	}
+	if (string_contains_char(path, '/') || string_contains_char(path, '\\')) {
+		return true;
+	}
+	String ext = path_extension(path);
+	return
+		str_eq_ignore_case(ext, str_lit(".o")) ||
+		str_eq_ignore_case(ext, str_lit(".obj")) ||
+		str_eq_ignore_case(ext, str_lit(".a")) ||
+		str_eq_ignore_case(ext, str_lit(".lib")) ||
+		str_eq_ignore_case(ext, str_lit(".bc")) ||
+		str_eq_ignore_case(ext, str_lit(".so")) ||
+		str_eq_ignore_case(ext, str_lit(".dylib")) ||
+		str_eq_ignore_case(ext, str_lit(".dll")) ||
+		str_eq_ignore_case(ext, str_lit(".wasm"));
+}
+
 gb_internal bool is_arch_x86(void) {
 	switch (build_context.metrics.arch) {
 	case TargetArch_i386:

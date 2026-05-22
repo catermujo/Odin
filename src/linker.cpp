@@ -88,7 +88,7 @@ gb_internal i32 linker_stage(LinkerData *gen) {
 					continue;
 				}
 
-				if (!string_ends_with(lib, str_lit(".o"))) {
+				if (!is_wasm_foreign_library_file_path(lib)) {
 					continue;
 				}
 

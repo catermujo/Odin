@@ -2391,7 +2391,7 @@ gb_internal void lb_set_wasm_procedure_import_attributes(LLVMValueRef value, Ent
 		
 		module_name = foreign_library->LibraryName.paths[0];
 
-		if (string_ends_with(module_name, str_lit(".o"))) {
+		if (is_wasm_foreign_library_file_path(module_name)) {
 			return;
 		}
 
