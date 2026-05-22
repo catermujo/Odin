@@ -149,7 +149,9 @@ gb_internal bool type_set_update(TypeSet *s, TypeInfoPair pair) { // returns tru
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -191,7 +193,9 @@ gb_internal bool type_set_update_with_mutex(TypeSet *s, TypeInfoPair pair, RWSpi
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -511,6 +515,17 @@ gb_internal u64 type_hash_canonical_type(Type *type) {
 	if (type == nullptr) {
 		return 0;
 	}
+
+	// Hash aliases identically to their base types.
+	while (type->kind == Type_Named &&
+	       type->Named.type_name != nullptr &&
+	       type->Named.type_name->TypeName.is_type_alias) {
+		type = type->Named.base;
+		if (type == nullptr) {
+			return 0;
+		}
+	}
+
 	u64 prev_hash = type->canonical_hash.load(std::memory_order_relaxed);
 	if (prev_hash != 0) {
 		return prev_hash;
