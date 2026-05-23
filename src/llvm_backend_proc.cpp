@@ -1119,7 +1119,7 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 		}
 		GB_ASSERT_MSG(lb_is_type_kind(fnp, LLVMFunctionTypeKind), "%s", LLVMPrintTypeToString(fnp));
 
-		lbFunctionType *ft = map_must_get(&p->module->function_type_map, base_type(value.type));
+		lbFunctionType *ft = lb_get_function_type(p->module, base_type(value.type));
 
 		{
 			unsigned param_count = LLVMCountParamTypes(fnp);
