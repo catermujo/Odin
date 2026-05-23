@@ -2819,30 +2819,26 @@ gb_internal LLVMTypeRef lb_type(lbModule *m, Type *type) {
 }
 
 gb_internal lbFunctionType *lb_get_function_type(lbModule *m, Type *pt) {
-	lbFunctionType **ft_found = nullptr;
-	ft_found = map_get(&m->function_type_map, pt);
-	if (!ft_found) {
+	for (;;) {
+		mutex_lock(&m->func_raw_types_mutex);
+		lbFunctionType **ft_found = map_get(&m->function_type_map, pt);
+		lbFunctionType *ft = ft_found ? *ft_found : nullptr;
+		mutex_unlock(&m->func_raw_types_mutex);
+
+		if (ft != nullptr) {
+			return ft;
+		}
+
 		LLVMTypeRef llvm_proc_type = lb_type(m, pt);
 		gb_unused(llvm_proc_type);
-		ft_found = map_get(&m->function_type_map, pt);
 	}
-	GB_ASSERT(ft_found != nullptr);
-
-	return *ft_found;
 }
 
 gb_internal void lb_ensure_abi_function_type(lbModule *m, lbProcedure *p) {
 	if (p->abi_function_type != nullptr) {
 		return;
 	}
-	lbFunctionType **ft_found = map_get(&m->function_type_map, p->type);
-	if (ft_found == nullptr) {
-		LLVMTypeRef llvm_proc_type = lb_type(p->module, p->type);
-		gb_unused(llvm_proc_type);
-		ft_found = map_get(&m->function_type_map, p->type);
-	}
-	GB_ASSERT(ft_found != nullptr);
-	p->abi_function_type = *ft_found;
+	p->abi_function_type = lb_get_function_type(m, p->type);
 	GB_ASSERT(p->abi_function_type != nullptr);
 }
 
