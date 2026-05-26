@@ -177,6 +177,7 @@ type_is_dynamic_array    :: proc($T: typeid) -> bool ---
 type_is_map              :: proc($T: typeid) -> bool ---
 type_is_struct           :: proc($T: typeid) -> bool ---
 type_is_union            :: proc($T: typeid) -> bool ---
+type_is_raw_union        :: proc($T: typeid) -> bool ---
 type_is_enum             :: proc($T: typeid) -> bool ---
 type_is_proc             :: proc($T: typeid) -> bool ---
 type_is_bit_set          :: proc($T: typeid) -> bool ---
@@ -204,6 +205,7 @@ type_variant_index_of     :: proc($U, $V: typeid)          -> int     where type
 
 type_bit_set_elem_type       :: proc($T: typeid) -> typeid where type_is_bit_set(T) ---
 type_bit_set_underlying_type :: proc($T: typeid) -> typeid where type_is_bit_set(T) ---
+type_bit_set_backing_type    :: proc($T: typeid) -> typeid where type_is_bit_set(T) ---
 
 type_has_field  :: proc($T: typeid, $name: string) -> bool ---
 type_field_type :: proc($T: typeid, $name: string) -> typeid ---
@@ -272,6 +274,7 @@ simd_add  :: proc(a, b: #simd[N]T) -> #simd[N]T ---
 simd_sub  :: proc(a, b: #simd[N]T) -> #simd[N]T ---
 simd_mul  :: proc(a, b: #simd[N]T) -> #simd[N]T ---
 simd_div  :: proc(a, b: #simd[N]T) -> #simd[N]T where type_is_float(T) ---
+simd_rem  :: proc(a, b: #simd[N]T) -> #simd[N]T ---
 
 simd_saturating_add  :: proc(a, b: #simd[N]T) -> #simd[N]T where type_is_integer(T) ---
 simd_saturating_sub  :: proc(a, b: #simd[N]T) -> #simd[N]T where type_is_integer(T) ---
@@ -412,6 +415,7 @@ wasm_memory_atomic_notify32 :: proc(ptr: ^u32, waiters: u32) -> (waiters_woken_u
 // x86 Targets (i386, amd64)
 x86_cpuid  :: proc(ax, cx: u32) -> (eax, ebx, ecx, edx: u32) ---
 x86_xgetbv :: proc(cx: u32) -> (eax, edx: u32) ---
+simd_x86__MM_SHUFFLE :: proc(z, y, x, w: int) -> int ---
 
 
 // C specific things
@@ -439,6 +443,7 @@ objc_find_selector     :: proc($name: string) -> objc_SEL   ---
 objc_register_selector :: proc($name: string) -> objc_SEL   ---
 objc_find_class        :: proc($name: string) -> objc_Class ---
 objc_register_class    :: proc($name: string) -> objc_Class ---
+objc_send              :: proc($R: typeid, self: $T, $name: string, #c_vararg args: ..any) -> R ---
 objc_ivar_get          :: proc(self: ^$T) -> ^$U ---
 objc_block             :: proc(invoke: $T, ..any) -> ^Objc_Block(T) where type_is_proc(T) ---
 objc_super             :: proc(obj: ^$T) -> ^$U where type_is_subtype_of(T, objc_object) && type_is_subtype_of(U, objc_object) ---
