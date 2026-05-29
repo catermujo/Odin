@@ -3,6 +3,14 @@ package runtime
 
 import "base:intrinsics"
 
+when ODIN_OS == .JS {
+	foreign import emscripten "env"
+
+	foreign emscripten {
+		emscripten_notify_memory_growth :: proc "contextless" (memory_index: u32) ---
+	}
+}
+
 /*
 Port of emmalloc, modified for use in Odin.
 
@@ -478,6 +486,9 @@ claim_more_memory :: proc(a: ^WASM_Allocator, num_bytes: uint) -> bool {
 	page_alloc :: proc(page_count: int) -> []byte {
 		prev_page_count := intrinsics.wasm_memory_grow(0, uintptr(page_count))
 		if prev_page_count < 0 { return nil }
+		when ODIN_OS == .JS {
+			emscripten_notify_memory_growth(0)
+		}
 
 		ptr := ([^]byte)(uintptr(prev_page_count) * PAGE_SIZE)
 		return ptr[:page_count * PAGE_SIZE]

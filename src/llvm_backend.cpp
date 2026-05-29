@@ -2547,6 +2547,23 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 	p->objc_names = objc_names;
 
 	lb_begin_procedure_body(p);
+	// Startup may be reached from multiple exported entry points in no-entry builds.
+	LLVMTypeRef startup_guard_type = LLVMInt1TypeInContext(main_module->ctx);
+	LLVMValueRef startup_guard = LLVMGetNamedGlobal(main_module->mod, "__$startup_runtime_has_run");
+	if (startup_guard == nullptr) {
+		startup_guard = LLVMAddGlobal(main_module->mod, startup_guard_type, "__$startup_runtime_has_run");
+		LLVMSetInitializer(startup_guard, LLVMConstInt(startup_guard_type, 0, false));
+		LLVMSetAlignment(startup_guard, 1);
+		LLVMSetVisibility(startup_guard, LLVMHiddenVisibility);
+		LLVM_SET_INTERNAL_WEAK_LINKAGE(startup_guard);
+	}
+
+	lbBlock *startup_run_block  = lb_create_block(p, "startup.run");
+	lbBlock *startup_done_block = lb_create_block(p, "startup.done");
+	LLVMValueRef startup_has_run = LLVMBuildLoad2(p->builder, startup_guard_type, startup_guard, "");
+	LLVMBuildCondBr(p->builder, startup_has_run, startup_done_block->block, startup_run_block->block);
+	lb_start_block(p, startup_run_block);
+	LLVMBuildStore(p->builder, LLVMConstInt(startup_guard_type, 1, false), startup_guard);
 
 	if (p->objc_names) {
 		LLVMBuildCall2(p->builder, lb_type_internal_for_procedures_raw(main_module, p->objc_names->type), p->objc_names->value, nullptr, 0, "");
@@ -2565,6 +2582,11 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 		lbValue value = lb_find_procedure_value_from_entity(main_module, e);
 		lb_emit_call(p, value, {}, ProcInlining_none, ProcTailing_none);
 	}
+
+	if (!lb_is_instr_terminating(LLVMGetLastInstruction(p->curr_block->block))) {
+		LLVMBuildBr(p->builder, startup_done_block->block);
+	}
+	lb_start_block(p, startup_done_block);
 
 	lb_end_procedure_body(p);
 
@@ -3458,6 +3480,22 @@ gb_internal void lb_generate_procedure(lbModule *m, lbProcedure *p) {
 	if (p->body != nullptr) { // Build Procedure
 		m->curr_procedure = p;
 		lb_begin_procedure_body(p);
+
+		bool needs_wasm_no_entry_startup =
+			build_context.no_entry_point &&
+			is_arch_wasm() &&
+			p->entity != nullptr &&
+			p->entity->kind == Entity_Procedure &&
+			p->entity->pkg != nullptr &&
+			(p->entity->pkg->kind == Package_Normal || p->entity->pkg->kind == Package_Init) &&
+			p->entity->Procedure.is_export &&
+			!p->entity->Procedure.is_foreign &&
+			m->gen->startup_runtime != nullptr;
+		if (needs_wasm_no_entry_startup) {
+			lbValue startup_runtime_value = {m->gen->startup_runtime->value, m->gen->startup_runtime->type};
+			lb_emit_call(p, startup_runtime_value, {}, ProcInlining_none, ProcTailing_none);
+		}
+
 		lb_build_stmt(p, p->body);
 		lb_end_procedure_body(p);
 		p->is_done.store(true, std::memory_order_relaxed);
