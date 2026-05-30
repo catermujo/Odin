@@ -5516,6 +5516,29 @@ gb_internal lbAddr lb_build_addr_soa_elem_index(lbProcedure *p, Ast *expr, lbAdd
 	return lb_addr_soa_field_elem(lb_soa_array_component_elem_ptr(p, soa_addr.addr, index, soa_addr.soa.index, component_count));
 }
 
+gb_internal void lb_build_addr_compound_lit_assign_soa(lbProcedure *p, lbValue soa_addr, Array<lbCompoundLitElemTempData> const &temp_data) {
+	for (auto const &td : temp_data) {
+		if (td.value.value == nullptr) {
+			continue;
+		}
+
+		if (td.elem_length > 0) {
+			auto loop_data = lb_loop_start(p, cast(isize)td.elem_length, t_i32);
+			{
+				lbValue offset = lb_const_int(p->module, t_i32, td.elem_index);
+				lbValue index = lb_emit_arith(p, Token_Add, offset, loop_data.idx, t_i32);
+				lbAddr dst = lb_addr_soa_variable(soa_addr, index, td.expr, nullptr, lbSoaVariable_OuterIndex);
+				lb_addr_store(p, dst, td.value);
+			}
+			lb_loop_end(p, loop_data);
+		} else {
+			lbValue index = lb_const_int(p->module, t_i32, td.elem_index);
+			lbAddr dst = lb_addr_soa_variable(soa_addr, index, td.expr, nullptr, lbSoaVariable_OuterIndex);
+			lb_addr_store(p, dst, td.value);
+		}
+	}
+}
+
 gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 	ast_node(ie, IndexExpr, expr);
 
@@ -5541,49 +5564,129 @@ gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 		}
 
 		lbValue index = lb_build_expr(p, ie->index);
-		return lb_addr_soa_variable(val, index, ie->index);
+		Type *result_type = type_of_expr(expr);
+		lbSoaVariableMode soa_mode = lbSoaVariable_OuterIndex;
+
+		Type *elem_type = base_type(t->Struct.soa_elem);
+		Type *bt_result = base_type(type_deref(result_type));
+		if (t->Struct.soa_kind == StructSoa_Fixed &&
+		    is_type_enum(t->Struct.soa_index) &&
+		    elem_type != nullptr && elem_type->kind == Type_Slice &&
+		    bt_result != nullptr && bt_result->kind == Type_EnumeratedArray &&
+		    are_types_identical(bt_result->EnumeratedArray.index, t->Struct.soa_index) &&
+		    are_types_identical(bt_result->EnumeratedArray.elem, elem_type->Slice.elem)) {
+			soa_mode = lbSoaVariable_InnerSliceRowIndex;
+		}
+
+		return lb_addr_soa_variable(val, index, ie->index, result_type, soa_mode);
 	}
 
-	if (ie->expr->tav.mode == Addressing_SoaVariable && is_type_multi_pointer(type_of_expr(ie->expr))) {
-		// soa.x[i], indexing one field's multipointer;
-		// the soa element of array type, soa[i][j] carries Addressing_SoaVariable too but has
-		// no multipointer to index; it is handled in the Type_Array case below
-		lbValue field = lb_build_expr(p, ie->expr);
-		lbValue index = lb_build_expr(p, ie->index);
+	if (ie->expr->tav.mode == Addressing_SoaVariable) {
+		Type *soa_var_type = base_type(type_of_expr(ie->expr));
+		if (!is_type_multi_pointer(type_of_expr(ie->expr)) &&
+		    (soa_var_type->kind == Type_Array || soa_var_type->kind == Type_EnumeratedArray)) {
+			// Indexing into a single #soa element component, e.g. `soa[i][k]`.
+			lbAddr base_addr = lb_build_addr(p, ie->expr);
+			GB_ASSERT(base_addr.kind == lbAddr_SoaVariable);
 
-		if (!build_context.no_bounds_check) {
-			Ast *se_expr = unparen_expr(ie->expr);
-			if (se_expr->kind == Ast_SelectorExpr) {
-				ast_node(se, SelectorExpr, se_expr);
-				lbValue len = {};
-
-				Type *type = base_type(type_deref(type_of_expr(se->expr)));
-				GB_ASSERT_MSG(is_type_soa_struct(type), "%s", type_to_string(type));
-				if (type->Struct.soa_kind == StructSoa_Fixed) {
-					len = lb_const_int(p->module, t_int, type->Struct.soa_count);
-				} else {
-					lbAddr *found = map_get(&p->selector_addr, se_expr);
-					if (found) {
-						lbAddr addr = *found;
-						lbValue parent = lb_addr_get_ptr(p, addr);
-						if (is_type_pointer(type_deref(parent.type))) {
-							parent = lb_emit_load(p, parent);
-						}
-						len = lb_soa_struct_len(p, parent);
-					}
-				}
-
-				if (len.value) {
-					lb_emit_bounds_check(p, ast_token(ie->index), index, len);
-				}
-			} else {
-				// TODO(bill): how do you even do bounds checking here?
+			auto index_tv = type_and_value_of_expr(ie->index);
+			if (index_tv.mode != Addressing_Constant) {
+				GB_PANIC("TODO(bill): indexing #soa array-like elements requires a constant component index");
 			}
+
+			i64 field_index = 0;
+			if (soa_var_type->kind == Type_Array) {
+				field_index = exact_value_to_i64(index_tv.value);
+				GB_ASSERT(0 <= field_index && field_index < soa_var_type->Array.count);
+			} else {
+				GB_ASSERT(soa_var_type->kind == Type_EnumeratedArray);
+				ExactValue adjusted_index = index_tv.value;
+				if (compare_exact_values(Token_NotEq, *soa_var_type->EnumeratedArray.min_value, exact_value_i64(0))) {
+					adjusted_index = exact_value_sub(adjusted_index, *soa_var_type->EnumeratedArray.min_value);
+				}
+				field_index = exact_value_to_i64(adjusted_index);
+				GB_ASSERT(0 <= field_index && field_index < soa_var_type->EnumeratedArray.count);
+			}
+
+			Type *soa_type = base_type(type_deref(base_addr.addr.type));
+			GB_ASSERT(is_type_soa_struct(soa_type));
+
+			if (base_addr.soa.mode == lbSoaVariable_InnerSliceRowIndex) {
+				Type *elem_type = base_type(soa_type->Struct.soa_elem);
+				GB_ASSERT(elem_type->kind == Type_Slice);
+
+				lbValue inner_index = lb_emit_conv(p, base_addr.soa.index, t_int);
+				lbValue data_fields = lb_emit_struct_ep(p, base_addr.addr, 0);
+				lbValue len_fields  = lb_emit_struct_ep(p, base_addr.addr, 1);
+
+				lbValue len_ptr = lb_emit_array_epi(p, len_fields, field_index);
+				lbValue len = lb_emit_load(p, len_ptr);
+				if (base_addr.soa.index_expr != nullptr) {
+					lb_emit_bounds_check(p, ast_token(base_addr.soa.index_expr), inner_index, len);
+				}
+
+				lbValue data_ptr_ptr = lb_emit_array_epi(p, data_fields, field_index);
+				lbValue data_ptr = lb_emit_load(p, data_ptr_ptr);
+				lbValue elem = lb_emit_ptr_offset(p, data_ptr, inner_index);
+				elem.type = alloc_type_multi_pointer_to_pointer(elem.type);
+			return lb_addr(elem);
+			}
+
+			if (base_addr.soa.index_expr != nullptr && (!lb_is_const(base_addr.soa.index) || soa_type->Struct.soa_kind != StructSoa_Fixed)) {
+				lbValue len = lb_soa_struct_len(p, base_addr.addr);
+				lb_emit_bounds_check(p, ast_token(base_addr.soa.index_expr), base_addr.soa.index, len);
+			}
+
+			lbValue field = lb_emit_struct_ep(p, base_addr.addr, cast(i32)field_index);
+			if (soa_type->Struct.soa_kind == StructSoa_Fixed) {
+				return lb_addr(lb_emit_array_ep(p, field, base_addr.soa.index));
+			}
+
+			lbValue data = lb_emit_load(p, field);
+			lbValue elem = lb_emit_ptr_offset(p, data, base_addr.soa.index);
+			elem.type = alloc_type_multi_pointer_to_pointer(elem.type);
+			return lb_addr(elem);
+			}
+
+		// SOA selector/index forms that produce a multi-pointer, e.g. `soa.field[idx]`
+		if (is_type_multi_pointer(type_of_expr(ie->expr))) {
+			lbValue field = lb_build_expr(p, ie->expr);
+			lbValue index = lb_build_expr(p, ie->index);
+
+			if (!build_context.no_bounds_check) {
+				Ast *se_expr = unparen_expr(ie->expr);
+				if (se_expr->kind == Ast_SelectorExpr) {
+					ast_node(se, SelectorExpr, se_expr);
+					lbValue len = {};
+
+					Type *type = base_type(type_deref(type_of_expr(se->expr)));
+					GB_ASSERT_MSG(is_type_soa_struct(type), "%s", type_to_string(type));
+					if (type->Struct.soa_kind == StructSoa_Fixed) {
+						len = lb_const_int(p->module, t_int, type->Struct.soa_count);
+					} else {
+						lbAddr *found = map_get(&p->selector_addr, se_expr);
+						if (found) {
+							lbAddr addr = *found;
+							lbValue parent = lb_addr_get_ptr(p, addr);
+							if (is_type_pointer(type_deref(parent.type))) {
+								parent = lb_emit_load(p, parent);
+							}
+							len = lb_soa_struct_len(p, parent);
+						}
+					}
+
+					if (len.value) {
+						lb_emit_bounds_check(p, ast_token(ie->index), index, len);
+					}
+				} else {
+					// TODO(bill): how do you even do bounds checking here?
+				}
+			}
+			lbValue val = lb_emit_ptr_offset(p, field, index);
+			// make sure it's ^T and not [^]T
+			val.type = alloc_type_multi_pointer_to_pointer(val.type);
+			return lb_addr(val);
 		}
-		lbValue val = lb_emit_ptr_offset(p, field, index);
-		// make sure it's ^T and not [^]T
-		val.type = alloc_type_multi_pointer_to_pointer(val.type);
-		return lb_addr(val);
 	}
 
 	GB_ASSERT_MSG(is_type_indexable(t), "%s %s", type_to_string(t), expr_to_string(expr));
@@ -6106,6 +6209,28 @@ gb_internal lbAddr lb_build_addr_slice_expr(lbProcedure *p, Ast *expr) {
 		return slice;
 	}
 
+	case Type_EnumeratedArray: {
+		Type *slice_type = alloc_type_slice(type->EnumeratedArray.elem);
+		lbValue len = lb_const_int(p->module, t_int, type->EnumeratedArray.count);
+
+		if (high.value == nullptr) high = len;
+
+		bool low_const  = type_and_value_of_expr(se->low).mode  == Addressing_Constant;
+		bool high_const = type_and_value_of_expr(se->high).mode == Addressing_Constant;
+
+		if (!low_const || !high_const) {
+			if (!no_indices) {
+				lb_emit_slice_bounds_check(p, se->open, low, high, len, se->low != nullptr);
+			}
+		}
+		lbValue elem    = lb_emit_ptr_offset(p, lb_array_elem(p, lb_addr_get_ptr(p, addr)), low);
+		lbValue new_len = lb_emit_arith(p, Token_Sub, high, low, t_int);
+
+		lbAddr slice = lb_add_local_generated(p, slice_type, false);
+		lb_fill_slice(p, slice, elem, new_len);
+		return slice;
+	}
+
 	case Type_FixedCapacityDynamicArray: {
 		Type *elem_type = type->FixedCapacityDynamicArray.elem;
 		Type *slice_type = alloc_type_slice(elem_type);
@@ -6609,29 +6734,12 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 	case Type_Struct:
 		if (is_type_soa_struct(type)) {
 			GB_ASSERT(bt->Struct.soa_kind == StructSoa_Fixed);
-			if (cl->elems.count == 0) {
-				break;
-			}
-			lb_addr_store(p, v, lb_const_value(p->module, type, exact_value_compound(expr)));
+			if (cl->elems.count > 0) {
+				lb_addr_store(p, v, lb_const_value(p->module, type, exact_value_compound(expr)));
 
-			auto temp_data = array_make<lbCompoundLitElemTempData>(temporary_allocator(), 0, cl->elems.count);
-			lb_build_addr_compound_lit_populate(p, cl->elems, &temp_data, type);
-			for (auto const &td : temp_data) {
-				GB_ASSERT(td.value.value != nullptr);
-				lbValue offset = lb_const_int(p->module, t_i32, td.elem_index);
-				if (td.elem_length > 0) {
-					auto loop_data = lb_loop_start(p, cast(isize)td.elem_length, t_i32);
-					{
-						lbValue index = lb_emit_arith(p, Token_Add, offset, loop_data.idx, t_i32);
-						lbAddr dst = lb_addr_soa_variable(v.addr, index, td.expr);
-						lb_addr_store(p, dst, td.value);
-					}
-					lb_loop_end(p, loop_data);
-				} else {
-					lbValue index = offset;
-					lbAddr dst = lb_addr_soa_variable(v.addr, index, td.expr);
-					lb_addr_store(p, dst, td.value);
-				}
+				auto temp_data = array_make<lbCompoundLitElemTempData>(temporary_allocator(), 0, cl->elems.count);
+				lb_build_addr_compound_lit_populate(p, cl->elems, &temp_data, type);
+				lb_build_addr_compound_lit_assign_soa(p, v.addr, temp_data);
 			}
 		} else {
 			lb_build_addr_struct_compound_lit_populate(p, expr, type, v);
