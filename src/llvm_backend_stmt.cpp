@@ -1454,7 +1454,7 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 	if (val_types[0]) {
 		Entity *e = entity_of_node(val0);
 		if (e != nullptr) {
-			lbAddr soa_val = lb_addr_soa_variable(array.addr, lb_addr_load(p, index), nullptr);
+			lbAddr soa_val = lb_addr_soa_variable(array.addr, lb_addr_load(p, index), nullptr, nullptr, lbSoaVariable_OuterIndex);
 			map_set(&p->module->soa_values, e, soa_val);
 			if (p->debug_info != nullptr && rs->vals[0]->kind == Ast_Ident) {
 				// NOTE(bill): the element has no memory of its own meaning a debugger is given a copy made each iteration
@@ -4062,6 +4062,7 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 		}
 		return;
 	} else if (lhs.kind == lbAddr_SwizzleSoa) {
+		rhs = lb_emit_conv(p, value, lhs_type);
 		// the three cases largely mirror each other,
 		// perhaps unify them?
 		GB_ASSERT(is_type_array(lhs_type));

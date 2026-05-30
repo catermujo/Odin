@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN run ../test_issue_soa_scalar_swizzle_assign.odin -file $COMMON
+
+
 if [[ $($ODIN check ../test_type_switch_alias.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
