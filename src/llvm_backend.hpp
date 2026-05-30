@@ -45,6 +45,11 @@ enum lbAddrKind {
 	lbAddr_BitField,
 };
 
+enum lbSoaVariableMode : u8 {
+	lbSoaVariable_OuterIndex,
+	lbSoaVariable_InnerSliceRowIndex,
+};
+
 struct lbAddr {
 	lbAddrKind kind;
 	lbValue addr;
@@ -60,6 +65,8 @@ struct lbAddr {
 		struct {
 			lbValue index;
 			Ast *index_expr;
+			Type *result_type;
+			lbSoaVariableMode mode;
 		} soa;
 		struct {
 			lbValue index;

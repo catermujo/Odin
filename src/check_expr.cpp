@@ -104,7 +104,7 @@ gb_internal char const *zero_value_suggestion(Operand *o, Type *type);
 gb_internal bool check_is_expressible(CheckerContext *ctx, Operand *o, Type *type);
 gb_internal void add_map_key_type_dependencies(CheckerContext *ctx, Type *key);
 
-gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type);
+gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type, Type *index_type=nullptr);
 gb_internal Type *make_soa_struct_slice(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem);
 gb_internal Type *make_soa_struct_dynamic_array(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem);
 
