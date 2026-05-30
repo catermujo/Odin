@@ -1320,7 +1320,7 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 	if (val_types[0]) {
 		Entity *e = entity_of_node(val0);
 		if (e != nullptr) {
-			lbAddr soa_val = lb_addr_soa_variable(array.addr, lb_addr_load(p, index), nullptr);
+			lbAddr soa_val = lb_addr_soa_variable(array.addr, lb_addr_load(p, index), nullptr, nullptr, lbSoaVariable_OuterIndex);
 			map_set(&p->module->soa_values, e, soa_val);
 		}
 	}

@@ -583,10 +583,22 @@ gb_internal bool lb_is_nested_possibly_constant(Type *ft, Selection const &sel, 
 }
 
 gb_internal void lb_const_array_spread(lbModule *m, lbConstContext cc, Type *array, ExactValue value, lbValue *res, Type *value_type) {
-	GB_ASSERT(array->kind == Type_Array);
+	GB_ASSERT(array->kind == Type_Array || array->kind == Type_EnumeratedArray);
 	
-	i64 count  = array->Array.count;
-	Type *elem = array->Array.elem;
+	i64 count  = 0;
+	Type *elem = nullptr;
+	switch (array->kind) {
+	case Type_Array:
+		count = array->Array.count;
+		elem = array->Array.elem;
+		break;
+	case Type_EnumeratedArray:
+		count = array->EnumeratedArray.count;
+		elem = array->EnumeratedArray.elem;
+		break;
+	default:
+		GB_PANIC("unreachable");
+	}
 
 	lbValue single_elem = lb_const_value(m, elem, value, value_type, cc);
 
@@ -1147,6 +1159,12 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 		res.value = data;
 		return res;
 	} else if (is_type_array(type) &&
+		value.kind != ExactValue_Invalid &&
+		value.kind != ExactValue_Compound) {
+			
+		lb_const_array_spread(m, cc, type, value, &res, value_type);
+		return res;
+	} else if (is_type_enumerated_array(type) &&
 		value.kind != ExactValue_Invalid &&
 		value.kind != ExactValue_Compound) {
 			

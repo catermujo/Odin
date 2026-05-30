@@ -102,7 +102,7 @@ gb_internal Type *   check_init_variable            (CheckerContext *c, Entity *
 gb_internal void check_assignment_error_suggestion(CheckerContext *c, Operand *o, Type *type, i64 max_bit_size=0);
 gb_internal void add_map_key_type_dependencies(CheckerContext *ctx, Type *key);
 
-gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type);
+gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type, Type *index_type=nullptr);
 gb_internal Type *make_soa_struct_slice(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem);
 gb_internal Type *make_soa_struct_dynamic_array(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem);
 
@@ -680,6 +680,24 @@ gb_internal bool check_proc_params_assignable(CheckerContext *c, Type *x, Type *
 
 #define MAXIMUM_TYPE_DISTANCE 10
 
+gb_internal bool is_dense_zero_start_enumerated_array_type(Type *type) {
+	Type *t = base_type(type);
+	if (t == nullptr || t->kind != Type_EnumeratedArray) {
+		return false;
+	}
+	Type *index_type = base_type(t->EnumeratedArray.index);
+	if (index_type == nullptr || index_type->kind != Type_Enum) {
+		return false;
+	}
+	if (t->EnumeratedArray.is_sparse) {
+		return false;
+	}
+	if (t->EnumeratedArray.count != index_type->Enum.fields.count) {
+		return false;
+	}
+	return compare_exact_values(Token_CmpEq, *t->EnumeratedArray.min_value, exact_value_i64(0));
+}
+
 gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand, Type *type, bool allow_array_programming) {
 	if (c == nullptr) {
 		GB_ASSERT(operand->mode == Addressing_Value);
@@ -952,6 +970,14 @@ gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand
 
 	if (allow_array_programming) {
 		if (is_type_array(dst)) {
+			Type *elem = base_array_type(dst);
+			i64 distance = check_distance_between_types(c, operand, elem, allow_array_programming);
+			if (distance >= 0) {
+				return distance + 6;
+			}
+		}
+
+		if (is_dense_zero_start_enumerated_array_type(dst)) {
 			Type *elem = base_array_type(dst);
 			i64 distance = check_distance_between_types(c, operand, elem, allow_array_programming);
 			if (distance >= 0) {
@@ -1672,7 +1698,7 @@ gb_internal bool is_polymorphic_type_assignable(CheckerContext *c, Type *poly, T
 					break;
 				case StructSoa_Fixed:
 					if (modify_type) {
-						Type *type = make_soa_struct_fixed(c, nullptr, poly->Struct.node, poly->Struct.soa_elem, poly->Struct.soa_count, nullptr);
+						Type *type = make_soa_struct_fixed(c, nullptr, poly->Struct.node, poly->Struct.soa_elem, poly->Struct.soa_count, nullptr, poly->Struct.soa_index);
 						gb_memmove(poly, type, gb_size_of(*type));
 					}
 					break;
@@ -4188,6 +4214,14 @@ gb_internal bool check_binary_array_expr(CheckerContext *c, Token op, Operand *x
 			}
 		}
 	}
+	if (is_dense_zero_start_enumerated_array_type(x->type) &&
+	    !is_type_enumerated_array(y->type)) {
+		if (check_is_assignable_to(c, y, x->type)) {
+			if (check_binary_op(c, x, op)) {
+				return true;
+			}
+		}
+	}
 	return false;
 }
 
@@ -5227,6 +5261,25 @@ gb_internal void convert_to_typed(CheckerContext *c, Operand *operand, Type *tar
 					}
 				}
 			}
+			operand->mode = Addressing_Invalid;
+			convert_untyped_error(c, operand, target_type);
+			return;
+		}
+
+		break;
+	}
+
+	case Type_EnumeratedArray: {
+		if (!is_dense_zero_start_enumerated_array_type(t)) {
+			operand->mode = Addressing_Invalid;
+			convert_untyped_error(c, operand, target_type);
+			return;
+		}
+
+		Type *elem = base_array_type(t);
+		if (check_is_assignable_to(c, operand, elem)) {
+			operand->mode = Addressing_Value;
+		} else {
 			operand->mode = Addressing_Invalid;
 			convert_untyped_error(c, operand, target_type);
 			return;
@@ -7670,7 +7723,7 @@ gb_internal bool maybe_has_binary_expr_custom_overload_candidate(CheckerContext 
 	return false;
 }
 
-gb_internal Type *get_custom_index_expr_type_hint(Type *container_type) {
+gb_internal Type *get_custom_index_expr_type_hint(Type *container_type, Ast *container_expr, Ast *index_expr) {
 	Type *t = base_type(type_deref(container_type));
 	if (t == nullptr || t == t_invalid) {
 		return nullptr;
@@ -7682,8 +7735,44 @@ gb_internal Type *get_custom_index_expr_type_hint(Type *container_type) {
 	if (is_type_enumerated_array(t)) {
 		return t->EnumeratedArray.index;
 	}
+	Ast *index_node = unparen_expr(index_expr);
+	if (index_node != nullptr && index_node->kind == Ast_ImplicitSelectorExpr) {
+		if (is_type_struct(t) &&
+		    t->Struct.soa_kind == StructSoa_Fixed &&
+		    is_type_enum(t->Struct.soa_index)) {
+			return t->Struct.soa_index;
+		}
+
+		Ast *indexed_expr = unparen_expr(container_expr);
+		if (indexed_expr != nullptr && indexed_expr->kind == Ast_SelectorExpr) {
+			Ast *base_expr = unparen_expr(indexed_expr->SelectorExpr.expr);
+			if (base_expr != nullptr) {
+				Type *base_type_ = base_type(type_deref(type_of_expr(base_expr)));
+				if (base_type_ != nullptr &&
+				    base_type_->kind == Type_Struct &&
+				    base_type_->Struct.soa_kind == StructSoa_Fixed &&
+				    is_type_enum(base_type_->Struct.soa_index)) {
+					return base_type_->Struct.soa_index;
+				}
+			}
+		}
+	}
 
 	return nullptr;
+}
+
+gb_internal bool is_soa_outer_index_expr(CheckerContext *c, Ast *index_expr, Type *index_type) {
+	Ast *node = unparen_expr(index_expr);
+	if (node != nullptr && node->kind == Ast_ImplicitSelectorExpr) {
+		return true;
+	}
+
+	Operand probe = {};
+	check_expr(c, &probe, index_expr);
+	if (probe.mode == Addressing_Invalid) {
+		return false;
+	}
+	return are_types_identical(default_type(probe.type), index_type);
 }
 
 gb_internal bool receiver_type_matches_custom_index_overload_param(CheckerContext *c, Type *param_type, Type *receiver_type) {
@@ -7772,7 +7861,7 @@ gb_internal bool check_index_expr_custom_overload(CheckerContext *c, Operand *x,
 	}
 
 	Operand index_operand = {};
-	Type *index_type_hint = get_custom_index_expr_type_hint(x->type);
+	Type *index_type_hint = get_custom_index_expr_type_hint(x->type, ie->expr, ie->index);
 	if (index_type_hint != nullptr) {
 		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
 	} else {
@@ -8197,7 +8286,7 @@ gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand
 	}
 
 	Operand index_operand = {};
-	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type);
+	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type, ie->expr, ie->index);
 	if (index_type_hint != nullptr) {
 		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
 	} else {
@@ -11879,11 +11968,21 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 			break;
 		}
 
-		if (cl->elems.count > 0 && cl->elems[0]->kind == Ast_FieldValue) {
-			RangeCache rc = range_cache_make(heap_allocator());
-			defer (range_cache_destroy(&rc));
+			if (cl->elems.count > 0 && cl->elems[0]->kind == Ast_FieldValue) {
+				RangeCache rc = range_cache_make(heap_allocator());
+				defer (range_cache_destroy(&rc));
+				Type *soa_index_type = nullptr;
+				i64 soa_index_min = 0;
+				if (t->kind == Type_Struct &&
+				    t->Struct.soa_kind == StructSoa_Fixed &&
+				    is_type_enum(t->Struct.soa_index)) {
+					soa_index_type = t->Struct.soa_index;
+					Type *et = base_type(soa_index_type);
+					GB_ASSERT(et->kind == Type_Enum);
+					soa_index_min = exact_value_to_i64(*et->Enum.min_value);
+				}
 
-			for (Ast *elem : cl->elems) {
+				for (Ast *elem : cl->elems) {
 				if (elem->kind != Ast_FieldValue) {
 					error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed");
 					continue;
@@ -11945,20 +12044,43 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 					if (is_constant) {
 						is_constant = check_is_operand_compound_lit_constant(c, &operand, elem_type);
 					}
-				} else {
-					Operand op_index = {};
-					check_expr(c, &op_index, fv->field);
+					} else {
+						Operand op_index = {};
+						if (soa_index_type != nullptr) {
+							check_expr_with_type_hint(c, &op_index, fv->field, soa_index_type);
+						} else {
+							check_expr(c, &op_index, fv->field);
+						}
 
-					if (op_index.mode != Addressing_Constant || !is_type_integer(core_type(op_index.type))) {
-						error(elem, "Expected a constant integer as an array field");
-						continue;
-					}
-					// add_type_and_value(c, op_index.expr, op_index.mode, op_index.type, op_index.value);
+						i64 index = 0;
+						if (soa_index_type != nullptr) {
+							if (op_index.mode != Addressing_Constant) {
+								gbString index_type_str = type_to_string(soa_index_type);
+								error(elem, "Expected a constant enum of type '%s' as an array field", index_type_str);
+								gb_string_free(index_type_str);
+								continue;
+							}
+							if (are_types_identical(op_index.type, soa_index_type)) {
+								index = exact_value_to_i64(op_index.value) - soa_index_min;
+							} else if (is_type_integer(core_type(op_index.type))) {
+								index = exact_value_to_i64(op_index.value);
+							} else {
+								gbString index_type_str = type_to_string(soa_index_type);
+								error(elem, "Expected a constant enum of type '%s' as an array field", index_type_str);
+								gb_string_free(index_type_str);
+								continue;
+							}
+						} else {
+							if (op_index.mode != Addressing_Constant || !is_type_integer(core_type(op_index.type))) {
+								error(elem, "Expected a constant integer as an array field");
+								continue;
+							}
+							index = exact_value_to_i64(op_index.value);
+						}
+						// add_type_and_value(c, op_index.expr, op_index.mode, op_index.type, op_index.value);
 
-					i64 index = exact_value_to_i64(op_index.value);
-
-					if (max_type_count >= 0 && (index < 0 || index >= max_type_count)) {
-						error(elem, "Index %lld is out of bounds (0..<%lld) for %.*s", index, max_type_count, LIT(context_name));
+						if (max_type_count >= 0 && (index < 0 || index >= max_type_count)) {
+							error(elem, "Index %lld is out of bounds (0..<%lld) for %.*s", index, max_type_count, LIT(context_name));
 						continue;
 					}
 
@@ -12962,6 +13084,7 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 	Type *t = base_type(type_deref(o->type));
 	bool is_ptr = is_type_pointer(o->type);
 	bool is_const = o->mode == Addressing_Constant;
+	bool indexed_from_soa_variable = o->mode == Addressing_SoaVariable;
 
 	if (check_index_expr_custom_overload(c, o, node, ie)) {
 		return kind;
@@ -13041,14 +13164,88 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 	}
 
 	Type *index_type_hint = nullptr;
+	Type *soa_index_type_hint = nullptr;
+	Type *soa_outer_index_type = nullptr;
+	Type *soa_inner_slice_row_type = nullptr;
+	bool soa_outer_index_selected = false;
 	if (is_type_enumerated_array(t)) {
 		Type *bt = base_type(t);
 		GB_ASSERT(bt->kind == Type_EnumeratedArray);
 		index_type_hint = bt->EnumeratedArray.index;
+	} else if (is_type_struct(t) &&
+	           t->Struct.soa_kind == StructSoa_Fixed &&
+	           is_type_enum(t->Struct.soa_index)) {
+		soa_index_type_hint = t->Struct.soa_index;
+		soa_outer_index_type = t->Struct.soa_index;
+		soa_outer_index_selected = is_soa_outer_index_expr(c, ie->index, soa_outer_index_type);
+
+		if (!soa_outer_index_selected) {
+			Type *indexed_elem = base_type(type_deref(o->type));
+			if (indexed_elem != nullptr && indexed_elem->kind == Type_Slice) {
+				Type *et = base_type(soa_outer_index_type);
+				GB_ASSERT(et->kind == Type_Enum);
+				soa_inner_slice_row_type = alloc_type_enumerated_array(
+					indexed_elem->Slice.elem,
+					soa_outer_index_type,
+					et->Enum.min_value,
+					et->Enum.max_value,
+					et->Enum.fields.count,
+					Token_Invalid
+				);
+			}
+		}
 	}
+	if (soa_index_type_hint == nullptr) {
+		Ast *indexed_expr = unparen_expr(ie->expr);
+		if (indexed_expr != nullptr && indexed_expr->kind == Ast_SelectorExpr) {
+			Ast *base_expr = unparen_expr(indexed_expr->SelectorExpr.expr);
+			if (base_expr != nullptr) {
+				Type *base_type_ = base_type(type_deref(type_of_expr(base_expr)));
+				if (base_type_ != nullptr &&
+				    base_type_->kind == Type_Struct &&
+				    base_type_->Struct.soa_kind == StructSoa_Fixed &&
+				    is_type_enum(base_type_->Struct.soa_index)) {
+					soa_index_type_hint = base_type_->Struct.soa_index;
+				}
+			}
+		}
+	}
+	if (soa_index_type_hint != nullptr) {
+		if (soa_outer_index_selected) {
+			index_type_hint = soa_index_type_hint;
+		} else {
+			Ast *index_expr = unparen_expr(ie->index);
+			if (index_expr != nullptr && index_expr->kind == Ast_ImplicitSelectorExpr) {
+				index_type_hint = soa_index_type_hint;
+			}
+		}
+	}
+	bool use_soa_inner_slice_row_indexing = soa_inner_slice_row_type != nullptr && !soa_outer_index_selected;
 
 	i64 index = 0;
-	bool ok = check_index_value(c, t, false, ie->index, max_count, &index, index_type_hint);
+	Type *index_main_type = t;
+	i64 index_max_count = max_count;
+	if (use_soa_inner_slice_row_indexing) {
+		index_main_type = o->type;
+		index_max_count = -1;
+		index_type_hint = nullptr;
+	}
+	bool ok = check_index_value(c, index_main_type, false, ie->index, index_max_count, &index, index_type_hint);
+
+	if (use_soa_inner_slice_row_indexing && o->mode != Addressing_Invalid) {
+		o->type = soa_inner_slice_row_type;
+		o->mode = Addressing_SoaVariable;
+	}
+
+	if (indexed_from_soa_variable &&
+	    (is_type_array(t) || is_type_enumerated_array(t)) &&
+	    type_and_value_of_expr(ie->index).mode != Addressing_Constant) {
+		error(ie->index, "Indexing into #soa array-like elements requires a constant component index");
+		o->mode = Addressing_Invalid;
+		o->expr = node;
+		return kind;
+	}
+
 	if (is_const) {
 		if (index < 0) {
 			ERROR_BLOCK();
@@ -13188,6 +13385,21 @@ gb_internal ExprKind check_slice_expr(CheckerContext *c, Operand *o, Ast *node, 
 
 	case Type_EnumeratedArray:
 		{
+			if (is_dense_zero_start_enumerated_array_type(t)) {
+				valid = true;
+				max_count = t->EnumeratedArray.count;
+				if (o->mode != Addressing_Variable && !is_type_pointer(o->type)) {
+					gbString str = expr_to_string(node);
+					error(node, "Cannot slice enumerated array '%s', value is not addressable", str);
+					gb_string_free(str);
+					o->mode = Addressing_Invalid;
+					o->expr = node;
+					return kind;
+				}
+				o->type = alloc_type_slice(t->EnumeratedArray.elem);
+				break;
+			}
+
 			ERROR_BLOCK();
 
 			gbString str = expr_to_string(o->expr);
