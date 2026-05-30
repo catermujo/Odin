@@ -3309,16 +3309,26 @@ gb_internal WORKER_TASK_PROC(complete_soa_type_worker) {
 
 
 
-gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type, StructSoaKind soa_kind) {
+gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type, StructSoaKind soa_kind, Type *index_type) {
 	Type *bt_elem = base_type(elem);
 
 	bool is_polymorphic = is_type_polymorphic(elem);
 	bool is_small_array = is_type_array(elem) && bt_elem->Array.count <= 4;
+	bool is_dense_enumerated_array = false;
+	if (is_type_enumerated_array(elem)) {
+		Type *old_ea = base_type(elem);
+		Type *old_et = base_type(old_ea->EnumeratedArray.index);
+		is_dense_enumerated_array = !old_ea->EnumeratedArray.is_sparse &&
+		                            old_et != nullptr &&
+		                            old_et->kind == Type_Enum &&
+		                            old_ea->EnumeratedArray.count == old_et->Enum.fields.count;
+	}
 	bool is_quaternion = is_type_quaternion(elem);
+	bool is_slice = is_type_slice(elem);
 
-	if (!is_polymorphic && !is_type_struct(elem) && !is_type_raw_union(elem) && !is_small_array && !is_quaternion) {
+	if (!is_polymorphic && !is_type_struct(elem) && !is_type_raw_union(elem) && !is_small_array && !is_dense_enumerated_array && !is_quaternion && !is_slice) {
 		gbString str = type_to_string(elem);
-		error(elem_expr, "Invalid type for an #soa array, expected a struct, quaternion, or array of length 4 or below, got '%s'", str);
+		error(elem_expr, "Invalid type for an #soa array, expected a struct, quaternion, array of length 4 or below, or a dense non-sparse enumerated array, got '%s'", str);
 		gb_string_free(str);
 		return alloc_type_array(elem, count, generic_type);
 	}
@@ -3338,6 +3348,7 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 	soa_struct = alloc_type_struct();
 	soa_struct->Struct.soa_kind = soa_kind;
 	soa_struct->Struct.soa_elem = elem;
+	soa_struct->Struct.soa_index = index_type;
 	soa_struct->Struct.is_polymorphic = is_polymorphic;
 	soa_struct->Struct.node = array_typ_expr;
 
@@ -3401,9 +3412,57 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 
 		is_complete = true;
 
-	} else if (is_type_quaternion(elem)) {
-		Type *quat_elem = base_complex_elem_type(elem);
-		field_count = 4;
+	} else if (is_dense_enumerated_array) {
+		Type *old_ea = base_type(elem);
+		Type *old_et = base_type(old_ea->EnumeratedArray.index);
+		GB_ASSERT(old_et->kind == Type_Enum);
+
+		field_count = cast(isize)old_ea->EnumeratedArray.count;
+
+		soa_struct->Struct.fields = permanent_slice_make<Entity *>(field_count+extra_field_count);
+		soa_struct->Struct.tags = gb_alloc_array(permanent_allocator(), String, field_count+extra_field_count);
+
+		scope_map_init(&scope->elements);
+
+		String *field_names = gb_alloc_array(temporary_allocator(), String, field_count);
+		gb_zero_array(field_names, field_count);
+
+		for (Entity *old_field : old_et->Enum.fields) {
+			GB_ASSERT(old_field->kind == Entity_Constant);
+			ExactValue field_index_value = exact_value_sub(old_field->Constant.value, *old_et->Enum.min_value);
+			i64 field_index = exact_value_to_i64(field_index_value);
+			if (0 <= field_index && field_index < field_count) {
+				field_names[field_index] = old_field->token.string;
+			}
+		}
+
+		for (isize i = 0; i < field_count; i++) {
+			Type *field_type = nullptr;
+			if (soa_kind == StructSoa_Fixed) {
+				GB_ASSERT(count >= 0);
+				field_type = alloc_type_array(old_ea->EnumeratedArray.elem, count);
+			} else {
+				field_type = alloc_type_multi_pointer(old_ea->EnumeratedArray.elem);
+			}
+
+			Token token = {};
+			token.string = field_names[i];
+			GB_ASSERT(token.string.len > 0);
+
+			Entity *new_field = alloc_entity_field(scope, token, field_type, false, cast(i32)i);
+			soa_struct->Struct.fields[i] = new_field;
+			add_entity(ctx, scope, nullptr, new_field);
+			add_entity_use(ctx, nullptr, new_field);
+			if (soa_kind != StructSoa_Fixed) {
+				new_field->flags |= EntityFlag_SoaPtrField;
+			}
+		}
+
+		is_complete = true;
+
+		} else if (is_type_quaternion(elem)) {
+			Type *quat_elem = base_complex_elem_type(elem);
+			field_count = 4;
 
 		soa_struct->Struct.fields = permanent_slice_make<Entity *>(field_count+extra_field_count);
 		soa_struct->Struct.tags = gb_alloc_array(permanent_allocator(), String, field_count+extra_field_count);
@@ -3436,12 +3495,51 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 			if (soa_kind != StructSoa_Fixed) {
 				new_field->flags |= EntityFlag_SoaPtrField;
 			}
-		}
+			}
 
-		is_complete = true;
+			is_complete = true;
 
-	} else {
-		GB_ASSERT(is_type_struct(elem));
+		} else if (is_type_slice(elem)) {
+			Type *old_slice = base_type(elem);
+			field_count = 2;
+
+			soa_struct->Struct.fields = permanent_slice_make<Entity *>(field_count+extra_field_count);
+			soa_struct->Struct.tags = gb_alloc_array(permanent_allocator(), String, field_count+extra_field_count);
+
+			scope_map_init(&scope->elements);
+
+			Type *field_types[2] = {};
+			if (soa_kind == StructSoa_Fixed) {
+				GB_ASSERT(count >= 0);
+				field_types[0] = alloc_type_array(alloc_type_pointer(old_slice->Slice.elem), count);
+				field_types[1] = alloc_type_array(t_int, count);
+			} else {
+				field_types[0] = alloc_type_multi_pointer(alloc_type_pointer(old_slice->Slice.elem));
+				field_types[1] = alloc_type_multi_pointer(t_int);
+			}
+
+			String field_names[2] = {
+				str_lit("data"),
+				str_lit("len"),
+			};
+
+			for (isize i = 0; i < field_count; i++) {
+				Token token = {};
+				token.string = field_names[i];
+
+				Entity *new_field = alloc_entity_field(scope, token, field_types[i], false, cast(i32)i);
+				soa_struct->Struct.fields[i] = new_field;
+				add_entity(ctx, scope, nullptr, new_field);
+				add_entity_use(ctx, nullptr, new_field);
+				if (soa_kind != StructSoa_Fixed) {
+					new_field->flags |= EntityFlag_SoaPtrField;
+				}
+			}
+
+			is_complete = true;
+
+		} else {
+			GB_ASSERT(is_type_struct(elem));
 
 		Type *old_struct = base_type(elem);
 
@@ -3520,17 +3618,17 @@ gb_internal Type *make_soa_struct_internal(CheckerContext *ctx, Ast *array_typ_e
 }
 
 
-gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type) {
-	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, count, generic_type, StructSoa_Fixed);
+gb_internal Type *make_soa_struct_fixed(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem, i64 count, Type *generic_type, Type *index_type) {
+	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, count, generic_type, StructSoa_Fixed, index_type);
 }
 
 gb_internal Type *make_soa_struct_slice(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem) {
-	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, -1, nullptr, StructSoa_Slice);
+	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, -1, nullptr, StructSoa_Slice, nullptr);
 }
 
 
 gb_internal Type *make_soa_struct_dynamic_array(CheckerContext *ctx, Ast *array_typ_expr, Ast *elem_expr, Type *elem) {
-	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, -1, nullptr, StructSoa_Dynamic);
+	return make_soa_struct_internal(ctx, array_typ_expr, elem_expr, elem, -1, nullptr, StructSoa_Dynamic, nullptr);
 }
 
 gb_internal void check_array_type_internal(CheckerContext *ctx, Ast *e, Type **type, Type *named_type) {
@@ -3561,6 +3659,20 @@ gb_internal void check_array_type_internal(CheckerContext *ctx, Ast *e, Type **t
 					error(e, "Enumerated array length too large, %.*s", LIT(str));
 					gb_free(a, str.text);
 					*type = t_invalid;
+					return;
+				}
+			}
+
+			if (at->tag != nullptr) {
+				GB_ASSERT(at->tag->kind == Ast_BasicDirective);
+				String name = at->tag->BasicDirective.name.string;
+				if (name == "soa") {
+					i64 enum_range_count = 1 + exact_value_to_i64(exact_value_sub(*bt->Enum.max_value, *bt->Enum.min_value));
+					if (enum_range_count != bt->Enum.fields.count) {
+						error(at->count, "Non-contiguous enumeration cannot be used as #soa length");
+						return;
+					}
+					*type = make_soa_struct_fixed(ctx, e, at->elem, elem, cast(i64)bt->Enum.fields.count, nullptr, index);
 					return;
 				}
 			}
@@ -3612,7 +3724,7 @@ gb_internal void check_array_type_internal(CheckerContext *ctx, Ast *e, Type **t
 			GB_ASSERT(at->tag->kind == Ast_BasicDirective);
 			String name = at->tag->BasicDirective.name.string;
 			if (name == "soa") {
-				*type = make_soa_struct_fixed(ctx, e, at->elem, elem, count, generic_type);
+				*type = make_soa_struct_fixed(ctx, e, at->elem, elem, count, generic_type, nullptr);
 			} else if (name == "simd") {
 				if (!is_type_valid_vector_elem(elem) && !is_type_polymorphic(elem)) {
 					gbString str = type_to_string(elem);

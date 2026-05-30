@@ -1391,7 +1391,7 @@ gb_internal lbValue lb_emit_struct_ep(lbProcedure *p, lbValue s, i32 index) {
 		case 1: result_type = get_struct_field_type(t_raw_map, 1); break;
 		case 2: result_type = get_struct_field_type(t_raw_map, 2); break;
 		}
-	} else if (is_type_array(t)) {
+	} else if (is_type_array(t) || is_type_enumerated_array(t)) {
 		return lb_emit_array_epi(p, s, index);
 	} else if (is_type_soa_pointer(t)) {
 		switch (index) {
@@ -1571,6 +1571,9 @@ gb_internal lbValue lb_emit_struct_ev(lbProcedure *p, lbValue s, i32 index) {
 
 	case Type_Array:
 		result_type = t->Array.elem;
+		break;
+	case Type_EnumeratedArray:
+		result_type = t->EnumeratedArray.elem;
 		break;
 
 	case Type_SoaPointer:
@@ -1939,7 +1942,7 @@ gb_internal lbValue lb_cstring16_len(lbProcedure *p, lbValue value) {
 
 gb_internal lbValue lb_array_elem(lbProcedure *p, lbValue array_ptr) {
 	Type *t = type_deref(array_ptr.type);
-	GB_ASSERT(is_type_array(t));
+	GB_ASSERT(is_type_array(t) || is_type_enumerated_array(t));
 	return lb_emit_struct_ep(p, array_ptr, 0);
 }
 
@@ -2032,6 +2035,10 @@ gb_internal lbValue lb_soa_struct_len(lbProcedure *p, lbValue value) {
 		n = cast(isize)elem->Struct.fields.count;
 	} else if (elem->kind == Type_Array) {
 		n = cast(isize)elem->Array.count;
+	} else if (elem->kind == Type_EnumeratedArray) {
+		n = cast(isize)elem->EnumeratedArray.count;
+	} else if (elem->kind == Type_Slice) {
+		n = 2;
 	} else {
 		GB_PANIC("Unreachable");
 	}
@@ -2064,6 +2071,10 @@ gb_internal lbValue lb_soa_struct_cap(lbProcedure *p, lbValue value) {
 		n = cast(isize)elem->Struct.fields.count+1;
 	} else if (elem->kind == Type_Array) {
 		n = cast(isize)elem->Array.count+1;
+	} else if (elem->kind == Type_EnumeratedArray) {
+		n = cast(isize)elem->EnumeratedArray.count+1;
+	} else if (elem->kind == Type_Slice) {
+		n = 3;
 	} else {
 		GB_PANIC("Unreachable");
 	}
