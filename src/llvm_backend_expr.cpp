@@ -3160,8 +3160,20 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 
 
 
+	// a closure is a {fn, env} aggregate, not a bare pointer. Converting between identical closure
+	// types is a no-op; pointer-casting the aggregate (as the proc cases below do) would corrupt the value.
+	if (is_type_closure(src) || is_type_closure(dst)) {
+		if (are_types_identical(src, dst)) {
+			lbValue res = value;
+			res.type = t;
+			return res;
+		}
+	}
+
 	// proc <-> proc
-	if (is_type_proc(src) && is_type_proc(dst)) {
+	// these pointer-cast paths are for bare function pointers only; a closure is a 2-word aggregate
+	// and its only valid conversion (identical closure type) was handled as a no-op above.
+	if (is_type_proc(src) && is_type_proc(dst) && !is_type_closure(src) && !is_type_closure(dst)) {
 		lbValue res = {};
 		res.type = t;
 		res.value = LLVMBuildPointerCast(p->builder, value.value, lb_type(m, t), "");
@@ -3169,14 +3181,14 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 	}
 
 	// pointer -> proc
-	if (is_type_pointer(src) && is_type_proc(dst)) {
+	if (is_type_pointer(src) && is_type_proc(dst) && !is_type_closure(dst)) {
 		lbValue res = {};
 		res.type = t;
 		res.value = LLVMBuildPointerCast(p->builder, value.value, lb_type(m, t), "");
 		return res;
 	}
 	// proc -> pointer
-	if (is_type_proc(src) && is_type_pointer(dst)) {
+	if (is_type_proc(src) && is_type_pointer(dst) && !is_type_closure(src)) {
 		lbValue res = {};
 		res.type = t;
 		res.value = LLVMBuildPointerCast(p->builder, value.value, lb_type(m, t), "");
@@ -5089,6 +5101,9 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	case_end;
 
 	case_ast_node(pl, ProcLit, expr);
+		if (is_type_closure(type_of_expr(expr))) {
+			return lb_build_closure_lit(p, expr);
+		}
 		return lb_generate_anonymous_proc_lit(p->module, p->name, expr, p);
 	case_end;
 
@@ -5189,8 +5204,32 @@ gb_internal lbValue lb_get_using_variable(lbProcedure *p, Entity *e) {
 
 
 
+gb_internal lbAddr lb_closure_capture_addr(lbProcedure *p, Entity *e) {
+	GB_ASSERT(e->flags & EntityFlag_Captured);
+	GB_ASSERT_MSG(p->closure_env_ptr != nullptr, "capture '%.*s' referenced outside a closure body", LIT(e->token.string));
+	Type *env_type = p->type->Proc.env_type;
+	GB_ASSERT(env_type != nullptr);
+
+	lbValue env = {};
+	env.value = p->closure_env_ptr;
+	env.type  = alloc_type_pointer(env_type);
+
+	lbValue field_ptr = lb_emit_struct_ep(p, env, e->Variable.field_index);
+	if (e->flags & EntityFlag_CaptureByRef) {
+		// the env slot holds ^T; loading it yields the address of the original variable, so writes
+		// through this lvalue mutate the captured-by-reference variable in the enclosing frame.
+		lbValue ptr = lb_emit_load(p, field_ptr);
+		return lb_addr(ptr);
+	}
+	// by-value capture; the env slot is the storage itself (a private copy taken at creation).
+	return lb_addr(field_ptr);
+}
+
 gb_internal lbAddr lb_build_addr_from_entity(lbProcedure *p, Entity *e, Ast *expr) {
 	GB_ASSERT(e != nullptr);
+	if (e->flags & EntityFlag_Captured) {
+		return lb_closure_capture_addr(p, e);
+	}
 	if (e->kind == Entity_Constant) {
 		Type *t = default_type(type_of_expr(expr));
 		lbValue v = lb_const_value(p->module, t, e->Constant.value, LB_CONST_CONTEXT_DEFAULT_NO_LOCAL);
@@ -5228,6 +5267,54 @@ gb_internal lbAddr lb_build_addr_from_entity(lbProcedure *p, Entity *e, Ast *exp
 	}
 
 	return lb_addr(v);
+}
+
+gb_internal lbValue lb_build_closure_lit(lbProcedure *p, Ast *expr) {
+	ast_node(pl, ProcLit, expr);
+	lbModule *m = p->module;
+	Type *closure_type = type_of_expr(expr);
+	GB_ASSERT(is_type_closure(closure_type));
+	Type *bt = base_type(closure_type);
+
+	// emit the underlying function. It is created from the closure type, so its signature already
+	// carries the implicit environment-pointer parameter (see lb_get_abi_info / lb_begin_procedure_body).
+	lbValue fn = lb_generate_anonymous_proc_lit(m, p->name, expr, p);
+
+	LLVMTypeRef i8ptr = LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0);
+	LLVMValueRef env_i8 = LLVMConstNull(i8ptr);
+
+	Type *env_type = bt->Proc.env_type;
+	if (env_type != nullptr && bt->Proc.captures.count > 0) {
+		// the environment lives on this (the creating) frame's stack. By-value captures copy the
+		// current value; by-reference captures store the address of the original variable.
+		lbAddr env_addr = lb_add_local_generated(p, env_type, true);
+		for_array(i, bt->Proc.captures) {
+			Entity *shadow = bt->Proc.captures[i];
+			Entity *outer  = shadow->aliased_of;
+			GB_ASSERT(outer != nullptr);
+			lbValue dst = lb_emit_struct_ep(p, env_addr.addr, cast(i32)i);
+			if (shadow->flags & EntityFlag_CaptureByRef) {
+				// by reference: store the address of the original variable so the closure sees/mutates it live
+				lb_emit_store(p, dst, lb_addr_get_ptr(p, lb_build_addr_from_entity(p, outer, nullptr)));
+			} else {
+				// by value: copy the current value (works for both locals and direct parameters)
+				lb_emit_store(p, dst, lb_find_ident(p, m, outer, nullptr));
+			}
+		}
+		env_i8 = LLVMBuildPointerCast(p->builder, lb_addr_get_ptr(p, env_addr).value, i8ptr, "");
+	}
+
+	LLVMValueRef fn_i8 = LLVMBuildPointerCast(p->builder, fn.value, i8ptr, "");
+
+	// assemble the fat pointer { fn_ptr, env_ptr }.
+	LLVMValueRef agg = LLVMGetUndef(lb_type(m, closure_type));
+	agg = LLVMBuildInsertValue(p->builder, agg, fn_i8,  0, "");
+	agg = LLVMBuildInsertValue(p->builder, agg, env_i8, 1, "");
+
+	lbValue result = {};
+	result.value = agg;
+	result.type  = closure_type;
+	return result;
 }
 
 gb_internal lbAddr lb_build_array_swizzle_addr(lbProcedure *p, AstCallExpr *ce, TypeAndValue const &tv) {

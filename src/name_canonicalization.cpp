@@ -997,7 +997,9 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		return;
 
 	case Type_Proc:
-		type_writer_appendc(w, "proc");
+		// a closure ('lambda') is a distinct type from a same-signature proc (2-word value, captures an
+		// environment). It must hash and compare differently, otherwise the two collide in type-keyed caches.
+		type_writer_appendc(w, type->Proc.is_closure ? "lambda" : "proc");
 		if (default_calling_convention() != type->Proc.calling_convention) {
 			type_writer_appendc(w, "\"");
 			type_writer_appendc(w, proc_calling_convention_strings[type->Proc.calling_convention]);

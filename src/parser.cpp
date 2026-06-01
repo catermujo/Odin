@@ -503,8 +503,9 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 		n->DistinctType.type = clone_ast(n->DistinctType.type, f);
 		break;
 	case Ast_ProcType:
-		n->ProcType.params  = clone_ast(n->ProcType.params, f);
-		n->ProcType.results = clone_ast(n->ProcType.results, f);
+		n->ProcType.params   = clone_ast(n->ProcType.params, f);
+		n->ProcType.results  = clone_ast(n->ProcType.results, f);
+		n->ProcType.captures = clone_ast_array(n->ProcType.captures, f);
 		break;
 	case Ast_RelativeType:
 		n->RelativeType.tag  = clone_ast(n->RelativeType.tag, f);
@@ -1362,7 +1363,7 @@ gb_internal Ast *ast_poly_type(AstFile *f, Token token, Ast *type, Ast *speciali
 }
 
 
-gb_internal Ast *ast_proc_type(AstFile *f, Token token, Ast *params, Ast *results, u64 tags, ProcCallingConvention calling_convention, bool generic, bool diverging) {
+gb_internal Ast *ast_proc_type(AstFile *f, Token token, Ast *params, Ast *results, u64 tags, ProcCallingConvention calling_convention, bool generic, bool diverging, bool is_lambda, Array<Ast *> const &captures) {
 	Ast *result = alloc_ast_node(f, Ast_ProcType);
 	result->ProcType.token = token;
 	result->ProcType.params = params;
@@ -1371,6 +1372,8 @@ gb_internal Ast *ast_proc_type(AstFile *f, Token token, Ast *params, Ast *result
 	result->ProcType.calling_convention = calling_convention;
 	result->ProcType.generic = generic;
 	result->ProcType.diverging = diverging;
+	result->ProcType.is_lambda = is_lambda;
+	result->ProcType.captures = slice_from_array(captures);
 	return result;
 }
 
@@ -2031,7 +2034,7 @@ gb_internal void expect_semicolon(AstFile *f) {
 
 
 gb_internal Ast *        parse_expr(AstFile *f, bool lhs);
-gb_internal Ast *        parse_proc_type(AstFile *f, Token proc_token);
+gb_internal Ast *        parse_proc_type(AstFile *f, Token proc_token, bool is_lambda);
 gb_internal Array<Ast *> parse_stmt_list(AstFile *f);
 gb_internal Ast *        parse_stmt(AstFile *f);
 gb_internal Ast *        parse_body(AstFile *f);
@@ -3217,7 +3220,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		}
 
 
-		Ast *type = parse_proc_type(f, token);
+		Ast *type = parse_proc_type(f, token, false);
 		Token where_token = {};
 		Array<Ast *> where_clauses = {};
 		u64 tags = 0;
@@ -3303,6 +3306,34 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		}
 		if (where_token.kind != Token_Invalid) {
 			syntax_error(where_token, "'where' clauses are not allowed on procedure types");
+		}
+
+		return type;
+	}
+
+	// 'lambda' mirrors 'proc' but takes a capture list and produces a closure value/type.
+	// There is no lambda-group form, and suffix tags/where-clauses are rejected to keep the surface small.
+	case Token_lambda: {
+		Token token = expect_token(f, Token_lambda);
+
+		Ast *type = parse_proc_type(f, token, true);
+
+		skip_possible_newline_for_literal(f);
+
+		if (f->allow_type && f->expr_level < 0) {
+			return type;
+		}
+
+		skip_possible_newline_for_literal(f);
+
+		if (f->curr_token.kind == Token_OpenBrace) {
+			Ast *curr_proc = f->curr_proc;
+			Ast *body = nullptr;
+			f->curr_proc = type;
+			body = parse_body(f);
+			f->curr_proc = curr_proc;
+
+			return ast_proc_lit(f, type, body, 0, {}, {});
 		}
 
 		return type;
@@ -4761,13 +4792,35 @@ end:
 	return is_generic;
 }
 
-gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token) {
+// parse a 'lambda' capture list: '[' (('&')? ident),* ']'. By-value entries are stored as
+// bare Ast_Ident, by-reference entries ('&x') as an Ast_UnaryExpr so the checker can tell them apart.
+gb_internal Array<Ast *> parse_lambda_capture_list(AstFile *f) {
+	auto captures = array_make<Ast *>(ast_allocator(f));
+	expect_token(f, Token_OpenBracket);
+	while (f->curr_token.kind != Token_CloseBracket &&
+	       f->curr_token.kind != Token_EOF) {
+		if (f->curr_token.kind == Token_And) {
+			Token amp = expect_token(f, Token_And);
+			Ast *name = ast_ident(f, expect_token(f, Token_Ident));
+			array_add(&captures, ast_unary_expr(f, amp, name));
+		} else {
+			array_add(&captures, ast_ident(f, expect_token(f, Token_Ident)));
+		}
+		if (!allow_field_separator(f)) {
+			break;
+		}
+	}
+	expect_token(f, Token_CloseBracket);
+	return captures;
+}
+
+gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token, bool is_lambda) {
 	Ast *params = nullptr;
 	Ast *results = nullptr;
 	bool diverging = false;
 
 	ProcCallingConvention cc = ProcCC_Invalid;
-	if (f->curr_token.kind == Token_String) {
+	if (!is_lambda && f->curr_token.kind == Token_String) {
 		Token token = expect_token(f, Token_String);
 		auto c = string_to_calling_convention(string_value_from_token(f, token));
 		if (c == ProcCC_Invalid) {
@@ -4784,6 +4837,12 @@ gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token) {
 		}
 	}
 
+	// the capture list sits between the keyword and the parameter list, e.g. lambda [x, &y](...).
+	// It is optional: lambda types (lambda(int) -> int) and capture-less literals omit the '[ ]' entirely.
+	auto captures = array_make<Ast *>(ast_allocator(f));
+	if (is_lambda && f->curr_token.kind == Token_OpenBracket) {
+		captures = parse_lambda_capture_list(f);
+	}
 
 	expect_token(f, Token_OpenParen);
 	f->expr_level += 1;
@@ -4801,7 +4860,7 @@ gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token) {
 		is_generic = is_field_list_generic(&results->FieldList, false);
 	}
 
-	return ast_proc_type(f, proc_token, params, results, tags, cc, is_generic, diverging);
+	return ast_proc_type(f, proc_token, params, results, tags, cc, is_generic, diverging, is_lambda, captures);
 }
 
 gb_internal Ast *parse_var_type(AstFile *f, bool allow_ellipsis, bool allow_typeid_token) {
