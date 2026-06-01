@@ -104,6 +104,7 @@ TOKEN_KIND(Token__KeywordBegin, ""), \
 	TOKEN_KIND(Token_defer,       "defer"),       \
 	TOKEN_KIND(Token_return,      "return"),      \
 	TOKEN_KIND(Token_proc,        "proc"),        \
+	TOKEN_KIND(Token_lambda,      "lambda"),      \
 	TOKEN_KIND(Token_struct,      "struct"),      \
 	TOKEN_KIND(Token_union,       "union"),       \
 	TOKEN_KIND(Token_enum,        "enum"),        \
@@ -146,7 +147,7 @@ struct KeywordHashEntry {
 };
 
 enum {
-	KEYWORD_HASH_TABLE_COUNT = 1<<9,
+	KEYWORD_HASH_TABLE_COUNT = 1<<10,
 	KEYWORD_HASH_TABLE_MASK = KEYWORD_HASH_TABLE_COUNT-1,
 };
 gb_global KeywordHashEntry keyword_hash_table[KEYWORD_HASH_TABLE_COUNT] = {};
