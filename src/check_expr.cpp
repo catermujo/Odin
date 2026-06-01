@@ -1936,7 +1936,12 @@ gb_internal Entity *check_ident(CheckerContext *c, Operand *o, Ast *n, Type *nam
 		return nullptr;
 	}
 
-	GB_ASSERT((e->flags & EntityFlag_Overridden) == 0);
+	if ((e->flags & EntityFlag_Overridden) != 0) {
+		// NOTE: Procedure/proc-group constant aliases are overridden in place.
+		// Later stages already know how to handle these alias entities directly.
+		GB_ASSERT(e->aliased_of != nullptr);
+		GB_ASSERT(e->kind == Entity_Procedure || e->kind == Entity_ProcGroup);
+	}
 
 	if (e->parent_proc_decl != nullptr &&
 	    e->parent_proc_decl != c->curr_proc_decl) {
