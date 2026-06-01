@@ -68,22 +68,22 @@ float32_log_normal :: proc(mean, stddev: f32, gen := context.random_generator) -
 
 
 // Exponential Distribution
-// `lambda` is 1.0/(desired mean). It should be non-zero.
+// `rate` (lambda) is 1.0/(desired mean). It should be non-zero.
 // Return values range from
-//     0 to positive infinity if lambda >  0
-//     negative infinity to 0 if lambda <= 0
+//     0 to positive infinity if rate >  0
+//     negative infinity to 0 if rate <= 0
 @(require_results)
-float64_exponential :: proc(lambda: f64, gen := context.random_generator) -> f64 {
-	return - math.ln(1 - float64(gen)) / lambda
+float64_exponential :: proc(rate: f64, gen := context.random_generator) -> f64 {
+	return - math.ln(1 - float64(gen)) / rate
 }
 // Exponential Distribution
-// `lambda` is 1.0/(desired mean). It should be non-zero.
+// `rate` (lambda) is 1.0/(desired mean). It should be non-zero.
 // Return values range from
-//     0 to positive infinity if lambda >  0
-//     negative infinity to 0 if lambda <= 0
+//     0 to positive infinity if rate >  0
+//     negative infinity to 0 if rate <= 0
 @(require_results)
-float32_exponential :: proc(lambda: f32, gen := context.random_generator) -> f32 {
-	return f32(float64_exponential(f64(lambda), gen))
+float32_exponential :: proc(rate: f32, gen := context.random_generator) -> f32 {
+	return f32(float64_exponential(f64(rate), gen))
 }
 
 
