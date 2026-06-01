@@ -47,6 +47,9 @@ enum EntityFlag : u64 {
 
 	EntityFlag_NoCapture = 1ull<<13, // #no_capture
 
+	EntityFlag_Captured     = 1ull<<14, // shadow var captured by an enclosing 'lambda' closure environment
+	EntityFlag_CaptureByRef = 1ull<<35, // capture is by reference: the env slot holds a pointer to the original
+
 	EntityFlag_PolyConst     = 1ull<<15,
 	EntityFlag_NotExported   = 1ull<<16,
 	EntityFlag_ConstInput    = 1ull<<17,

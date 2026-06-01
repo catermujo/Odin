@@ -750,6 +750,8 @@ AST_KIND(_TypeBegin, "", bool) \
 		ProcCallingConvention calling_convention; \
 		bool generic; \
 		bool diverging; \
+		bool is_lambda; /* 'lambda' keyword variant; carries a capture list and lowers to a closure */ \
+		Slice<Ast *> captures; /* capture entries: Ast_Ident = by value, &ident (UnaryExpr) = by reference */ \
 	}) \
 	AST_KIND(PointerType, "pointer type", struct { \
 		Token token; \

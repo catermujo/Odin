@@ -374,6 +374,10 @@ struct lbProcedure {
 	Array<lbScopeDebugInfo> debug_scope_metadata;
 	Array<lbContextData> context_stack;
 
+	// for closure ('lambda') bodies, the implicit environment pointer parameter, already cast to the
+	// env struct's pointer type. nullptr for ordinary procedures.
+	LLVMValueRef closure_env_ptr;
+
 	LLVMMetadataRef debug_info;
 
 	PtrMap<Ast *, lbValue> selector_values;
@@ -448,6 +452,10 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 gb_internal lbValue lb_emit_epi(lbModule *m, lbValue const &value, isize index);
 gb_internal lbValue lb_emit_array_epi(lbModule *m, lbValue s, isize index);
 gb_internal lbValue lb_emit_struct_ep(lbProcedure *p, lbValue s, i32 index);
+// address of a 'lambda' capture inside a closure body, resolved through the environment pointer.
+gb_internal lbAddr lb_closure_capture_addr(lbProcedure *p, Entity *e);
+// build a closure value: emit the function, allocate+fill the environment, return the {fn, env} pair.
+gb_internal lbValue lb_build_closure_lit(lbProcedure *p, Ast *expr);
 gb_internal lbValue lb_emit_struct_ev(lbProcedure *p, lbValue s, i32 index);
 gb_internal lbValue lb_emit_tuple_ev(lbProcedure *p, lbValue value, i32 index);
 gb_internal lbValue lb_emit_array_epi(lbProcedure *p, lbValue value, isize index);

@@ -2046,7 +2046,9 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 			var.init = init;
 		} else if (lb_is_const_or_global(init)) {
 			if (!var.is_initialized) {
-				if (is_type_proc(init.type)) {
+				// closures are non-constant 2-word aggregates and never reach this constant-global
+				// initializer path; only bare proc pointers do.
+				if (is_type_proc(init.type) && !is_type_closure(init.type)) {
 					init.value = LLVMConstPointerCast(init.value, lb_type(p->module, init.type));
 				}
 				LLVMSetInitializer(var.var.value, init.value);

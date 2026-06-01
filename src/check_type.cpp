@@ -2775,6 +2775,82 @@ gb_internal bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc
 	}
 	type->Proc.is_polymorphic = is_polymorphic;
 
+	if (pt->is_lambda) {
+		// mark this as a closure type. Every 'lambda' is a 2-word {fn, env} value regardless of
+		// how many variables it captures, so that lambda(sig) is a single uniform type (like proc(sig)).
+		type->Proc.is_closure = true;
+
+		// keep the initial closure surface small and predictable.
+		if (is_polymorphic) {
+			error(proc_type_node, "'lambda' closures cannot be polymorphic");
+		}
+		if (cc != ProcCC_Odin && cc != ProcCC_Contextless) {
+			error(proc_type_node, "'lambda' closures must use the default calling convention");
+		}
+
+		isize cap_count = pt->captures.count;
+		auto shadows = slice_make<Entity *>(permanent_allocator(), cap_count);
+		for (isize i = 0; i < cap_count; i++) {
+			Ast *entry = pt->captures[i];
+			bool by_ref = false;
+			Ast *ident = entry;
+			if (entry->kind == Ast_UnaryExpr) {
+				// '&name' captures by reference; the env slot stores a pointer to the original.
+				by_ref = true;
+				ident = entry->UnaryExpr.expr;
+			}
+			GB_ASSERT(ident->kind == Ast_Ident);
+
+			// resolve the captured name in the ENCLOSING scope (the lambda's parent), not the body,
+			// so the normal nested-procedure capture restriction does not filter the variable out.
+			Entity *outer = scope_lookup(c->scope->parent, ident->Ident.interned, ident->Ident.hash);
+			if (outer == nullptr) {
+				error(ident, "Undeclared name in 'lambda' capture list: %.*s", LIT(ident->Ident.token.string));
+				continue;
+			}
+			if (outer->kind != Entity_Variable) {
+				error(ident, "Only variables can be captured by a 'lambda', got '%.*s'", LIT(ident->Ident.token.string));
+				continue;
+			}
+			add_entity_use(c, ident, outer);
+
+			// a body-local shadow entity masks the outer variable inside the lambda. Body references
+			// resolve to this shadow (which belongs to the lambda's own decl), so the capture restriction is
+			// never triggered; codegen turns reads/writes into env-struct accesses via field_index.
+			Entity *shadow = alloc_entity_variable(c->scope, ident->Ident.token, outer->type, EntityState_Resolved);
+			shadow->flags |= EntityFlag_Captured;
+			if (by_ref) {
+				shadow->flags |= EntityFlag_CaptureByRef;
+			}
+			shadow->aliased_of = outer;
+			shadow->Variable.field_index = cast(i32)i;
+			shadow->parent_proc_decl = c->decl;
+			add_entity(c, c->scope, ident, shadow);
+			shadows[i] = shadow;
+		}
+		type->Proc.captures = shadows;
+
+		// lay out the captured environment as an anonymous struct: by-value captures store the value
+		// directly, by-reference captures store a pointer to the original. Codegen allocates and fills it.
+		if (cap_count > 0) {
+			Type *env = alloc_type_struct();
+			Scope *env_scope = create_scope(c->info, nullptr);
+			env->Struct.fields = permanent_slice_make<Entity *>(cap_count);
+			for (isize i = 0; i < cap_count; i++) {
+				Entity *shadow = shadows[i];
+				Type *field_type = shadow->type;
+				if (shadow != nullptr && (shadow->flags & EntityFlag_CaptureByRef)) {
+					field_type = alloc_type_pointer(shadow->type);
+				}
+				env->Struct.fields[i] = alloc_entity_field(env_scope, shadow->token, field_type, false, cast(i32)i, EntityState_Resolved);
+			}
+			env->Struct.scope = env_scope;
+			wait_signal_set(&env->Struct.fields_wait_signal);
+			gb_unused(type_size_of(env));
+			type->Proc.env_type = env;
+		}
+	}
+
 	return success;
 }
 

@@ -1941,7 +1941,9 @@ gb_internal Entity *check_ident(CheckerContext *c, Operand *o, Ast *n, Type *nam
 	if (e->parent_proc_decl != nullptr &&
 	    e->parent_proc_decl != c->curr_proc_decl) {
 		if (e->kind == Entity_Variable) {
-			if ((e->flags & EntityFlag_Static) == 0) {
+			// 'lambda' capture shadows are exempt: they intentionally stand in for an enclosing
+			// variable and are accessed through the closure environment rather than the parent's stack.
+			if ((e->flags & (EntityFlag_Static|EntityFlag_Captured)) == 0) {
 				error(n, "Nested procedures do not capture its parent's variables: %.*s", LIT(name));
 				return nullptr;
 			}
@@ -10439,7 +10441,9 @@ gb_internal bool check_is_operand_compound_lit_constant(CheckerContext *c, Opera
 		if (e != nullptr && e->kind == Entity_Procedure) {
 			return true;
 		}
-		if (expr->kind == Ast_ProcLit) {
+		if (expr->kind == Ast_ProcLit && !is_type_closure(type_of_expr(expr))) {
+			// a closure literal captures runtime state, so it is not a constant procedure value and
+			// must be built at runtime (lb_build_closure_lit) even inside a compound literal.
 			add_type_and_value(c, expr, Addressing_Constant, type_of_expr(expr), exact_value_procedure(expr));
 			return true;
 		}
@@ -13697,7 +13701,12 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 
 		o->mode = Addressing_Value;
 		o->type = type;
-		o->value = exact_value_procedure(node);
+		// a closure captures runtime state, so it is not a compile-time constant. Leaving its exact
+		// value invalid forces every use through the runtime builder (lb_build_closure_lit) instead of the
+		// constant proc-pointer path, which only knows how to emit a bare function pointer.
+		if (!type->Proc.is_closure) {
+			o->value = exact_value_procedure(node);
+		}
 	case_end;
 
 	case_ast_node(te, TernaryIfExpr, node);

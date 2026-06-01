@@ -677,6 +677,19 @@ gb_internal void lb_begin_procedure_body(lbProcedure *p) {
 	if (p->type->Proc.calling_convention == ProcCC_Odin) {
 		lb_push_context_onto_stack_from_implicit_parameter(p);
 	}
+	if (p->type->Proc.is_closure) {
+		// recover the environment pointer implicit parameter (placed just before the context pointer
+		// by lb_get_abi_info) and cast it to the env struct's pointer type for capture field access.
+		unsigned n = LLVMCountParams(p->value);
+		unsigned env_index = n - (p->type->Proc.calling_convention == ProcCC_Odin ? 2 : 1);
+		LLVMValueRef env_ptr = LLVMGetParam(p->value, env_index);
+		LLVMSetValueName2(env_ptr, "__.closure_env", 14);
+		Type *env_type = p->type->Proc.env_type;
+		if (env_type != nullptr) {
+			env_ptr = LLVMBuildPointerCast(p->builder, env_ptr, LLVMPointerType(lb_type(p->module, env_type), 0), "");
+		}
+		p->closure_env_ptr = env_ptr;
+	}
 	{
 		lbFunctionType *ft = p->abi_function_type;
 
@@ -991,11 +1004,14 @@ gb_internal Array<lbValue> lb_value_to_array(lbProcedure *p, gbAllocator const &
 
 
 
-gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue return_ptr, Array<lbValue> const &processed_args, Type *abi_rt, lbAddr context_ptr, ProcInlining inlining, ProcTailing tailing) {
+gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue return_ptr, Array<lbValue> const &processed_args, Type *abi_rt, lbAddr context_ptr, ProcInlining inlining, ProcTailing tailing, LLVMValueRef closure_env = nullptr) {
 	GB_ASSERT(p->module->ctx == LLVMGetTypeContext(LLVMTypeOf(value.value)));
 
 	unsigned arg_count = cast(unsigned)processed_args.count;
 	if (return_ptr.value != nullptr) {
+		arg_count += 1;
+	}
+	if (closure_env != nullptr) {
 		arg_count += 1;
 	}
 	if (context_ptr.addr.value != nullptr) {
@@ -1010,10 +1026,19 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 
 	for_array(i, processed_args) {
 		lbValue arg = processed_args[i];
-		if (is_type_proc(arg.type)) {
+		// a bare proc value is a single function pointer and may need a pointer cast; a closure is a
+		// 2-word {fn,env} aggregate already ABI-coerced by the caller above, so it must NOT be pointer-cast.
+		if (is_type_proc(arg.type) && !is_type_closure(arg.type)) {
 			arg.value = LLVMBuildPointerCast(p->builder, arg.value, lb_type(p->module, arg.type), "");
 		}
 		args[arg_index++] = arg.value;
+	}
+
+	if (closure_env != nullptr) {
+		// the closure environment pointer is passed just before the context pointer, matching the
+		// implicit-parameter ordering established in lb_get_abi_info.
+		LLVMValueRef ep = LLVMBuildPointerCast(p->builder, closure_env, lb_type(p->module, t_rawptr), "");
+		args[arg_index++] = ep;
 	}
 
 	if (context_ptr.addr.value != nullptr) {
@@ -1199,6 +1224,15 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 	GB_ASSERT(pt->kind == Type_Proc);
 	Type *results = pt->Proc.results;
 
+	// a closure value is a {fn, env} fat pointer. Split it: call through `fn` and thread `env` to the
+	// callee as an implicit parameter. value.type stays the closure type so the raw function type matches.
+	LLVMValueRef closure_env = nullptr;
+	if (pt->Proc.is_closure) {
+		LLVMValueRef agg = value.value;
+		closure_env = LLVMBuildExtractValue(p->builder, agg, 1, "");
+		value.value = LLVMBuildExtractValue(p->builder, agg, 0, "");
+	}
+
 	lbAddr context_ptr = {};
 	if (pt->Proc.calling_convention == ProcCC_Odin) {
 		context_ptr = lb_find_or_generate_context_ptr(p);
@@ -1320,10 +1354,10 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 			} else {
 				return_ptr = lb_add_local_generated(p, rt, true).addr;
 			}
-			lb_emit_call_internal(p, value, return_ptr, processed_args, nullptr, context_ptr, inlining, tailing);
+			lb_emit_call_internal(p, value, return_ptr, processed_args, nullptr, context_ptr, inlining, tailing, closure_env);
 			result = lb_emit_load(p, return_ptr);
 		} else if (rt != nullptr) {
-			result = lb_emit_call_internal(p, value, {}, processed_args, rt, context_ptr, inlining, tailing);
+			result = lb_emit_call_internal(p, value, {}, processed_args, rt, context_ptr, inlining, tailing, closure_env);
 			if (ft->ret.cast_type) {
 				result.value = OdinLLVMBuildTransmute(p, result.value, ft->ret.cast_type);
 			}
@@ -1336,7 +1370,7 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 				result = lb_emit_conv(p, result, rt);
 			}
 		} else {
-			lb_emit_call_internal(p, value, {}, processed_args, nullptr, context_ptr, inlining, tailing);
+			lb_emit_call_internal(p, value, {}, processed_args, nullptr, context_ptr, inlining, tailing, closure_env);
 		}
 
 		if (original_rt != rt) {
@@ -3345,6 +3379,67 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 	case BuiltinProc_unreachable:
 		lb_emit_unreachable(p);
 		return {};
+
+	case BuiltinProc_closure_clone:
+		{
+			// copy the closure's environment to the given allocator and return a new closure value
+			// pointing at the heap copy, so it can safely escape the frame that created it.
+			lbValue x = lb_build_expr(p, ce->args[0]);
+			Type *ct = base_type(x.type);
+			LLVMTypeRef i8ptr = LLVMPointerType(LLVMInt8TypeInContext(p->module->ctx), 0);
+
+			LLVMValueRef fn  = LLVMBuildExtractValue(p->builder, x.value, 0, "");
+			LLVMValueRef env = LLVMBuildExtractValue(p->builder, x.value, 1, "");
+
+			Type *env_type = ct->Proc.env_type;
+			if (env_type == nullptr || type_size_of(env_type) == 0) {
+				// No captured environment: nothing to clone, the value is already self-contained.
+				return x;
+			}
+
+			i64 sz = type_size_of(env_type);
+			i64 al = type_align_of(env_type);
+
+			lbValue allocator = lb_emit_conv(p, lb_build_expr(p, ce->args[1]), t_allocator);
+			auto args = array_make<lbValue>(permanent_allocator(), 0, 4);
+			array_add(&args, lb_const_int(p->module, t_int, cast(u64)sz));
+			array_add(&args, lb_const_int(p->module, t_int, cast(u64)al));
+			array_add(&args, allocator);
+			array_add(&args, lb_emit_source_code_location_const(p, p->name, ast_token(expr).pos));
+			lbValue alloced = lb_emit_runtime_call(p, "mem_alloc_bytes", args);
+
+			lbValue bytes   = lb_emit_tuple_ev(p, alloced, 0);   // []byte
+			lbValue new_env = lb_slice_elem(p, bytes);           // ^u8 to the heap memory
+			LLVMValueRef new_env_i8 = LLVMBuildPointerCast(p->builder, new_env.value, i8ptr, "");
+
+			lb_mem_copy_non_overlapping(p, lbValue{new_env_i8, t_rawptr}, lbValue{env, t_rawptr}, lb_const_int(p->module, t_int, cast(u64)sz), false);
+
+			LLVMValueRef out = LLVMGetUndef(lb_type(p->module, x.type));
+			out = LLVMBuildInsertValue(p->builder, out, fn,          0, "");
+			out = LLVMBuildInsertValue(p->builder, out, new_env_i8,  1, "");
+			return lbValue{out, x.type};
+		}
+		break;
+
+	case BuiltinProc_closure_free:
+		{
+			// release a cloned closure's environment via the given allocator.
+			lbValue x = lb_build_expr(p, ce->args[0]);
+			Type *ct = base_type(x.type);
+			LLVMValueRef env = LLVMBuildExtractValue(p->builder, x.value, 1, "");
+
+			Type *env_type = ct->Proc.env_type;
+			if (env_type != nullptr && type_size_of(env_type) != 0) {
+				lbValue allocator = lb_emit_conv(p, lb_build_expr(p, ce->args[1]), t_allocator);
+				auto args = array_make<lbValue>(permanent_allocator(), 0, 3);
+				array_add(&args, lbValue{LLVMBuildPointerCast(p->builder, env, LLVMPointerType(LLVMInt8TypeInContext(p->module->ctx), 0), ""), t_rawptr});
+				array_add(&args, allocator);
+				array_add(&args, lb_emit_source_code_location_const(p, p->name, ast_token(expr).pos));
+				lb_emit_runtime_call(p, "mem_free", args);
+			}
+			return lbValue{};
+		}
+		break;
 
 	case BuiltinProc_raw_data:
 		{
