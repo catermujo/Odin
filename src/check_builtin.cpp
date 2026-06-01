@@ -5685,6 +5685,47 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		}
 		break;
 
+	case BuiltinProc_closure_clone:
+	case BuiltinProc_closure_free:
+		{
+			// closure_clone(f, allocator) copies a closure's environment to the heap so it can escape
+			// its defining scope; closure_free(f, allocator) releases that environment. Both take a closure
+			// value and an allocator.
+			Operand x = {};
+			check_expr(c, &x, ce->args[0]);
+			if (x.mode == Addressing_Invalid) {
+				return false;
+			}
+			if (!is_type_closure(x.type)) {
+				gbString s = type_to_string(x.type);
+				error(call, "'%.*s' expects a 'lambda' closure value, got %s", LIT(builtin_name), s);
+				gb_string_free(s);
+				return false;
+			}
+
+			init_mem_allocator(c->checker);
+			Operand a = {};
+			check_expr(c, &a, ce->args[1]);
+			if (a.mode == Addressing_Invalid) {
+				return false;
+			}
+			if (!check_is_assignable_to(c, &a, t_allocator)) {
+				gbString s = type_to_string(a.type);
+				error(call, "'%.*s' expects an allocator as its second argument, got %s", LIT(builtin_name), s);
+				gb_string_free(s);
+				return false;
+			}
+
+			if (id == BuiltinProc_closure_clone) {
+				operand->mode = Addressing_Value;
+				operand->type = x.type;
+			} else {
+				operand->mode = Addressing_NoValue;
+				operand->type = nullptr;
+			}
+		}
+		break;
+
 	case BuiltinProc_read_cycle_counter_frequency:
 		if (build_context.metrics.arch != TargetArch_arm64) {
 			error(call, "'%.*s' is only allowed on arm64 targets", LIT(builtin_name));
