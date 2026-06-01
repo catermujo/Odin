@@ -634,7 +634,8 @@ gb_internal LLVMValueRef lb_build_constant_array_values(lbModule *m, Type *type,
 		lbValue ptr = lb_addr_get_ptr(p, v);
 		for (isize i = 0; i < count; i++) {
 			lbValue elem = lb_emit_array_epi(p, ptr, i);
-			if (is_type_proc(elem_type)) {
+			// closures are non-constant aggregates and never reach here; only bare proc pointers do.
+			if (is_type_proc(elem_type) && !is_type_closure(elem_type)) {
 				values[i] = LLVMConstPointerCast(values[i], llvm_elem_type);
 			}
 			LLVMBuildStore(p->builder, values[i], elem.value);
@@ -1464,7 +1465,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 
 
 	case ExactValue_Integer:
-		if (is_type_pointer(type) || is_type_multi_pointer(type) || is_type_proc(type)) {
+		// a closure is a 2-word aggregate, not an integer-castable pointer; only bare procs are.
+		if (is_type_pointer(type) || is_type_multi_pointer(type) || (is_type_proc(type) && !is_type_closure(type))) {
 			LLVMTypeRef t = lb_type(m, original_type);
 			LLVMValueRef i = lb_big_int_to_llvm(m, t_uintptr, &value.value_integer);
 			res.value = LLVMConstIntToPtr(i, t);

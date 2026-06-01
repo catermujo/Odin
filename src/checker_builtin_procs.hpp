@@ -40,6 +40,9 @@ enum BuiltinProcId {
 
 	BuiltinProc_raw_data,
 
+	BuiltinProc_closure_clone, // copy a closure's environment to an allocator so it can escape its scope
+	BuiltinProc_closure_free,  // free a cloned closure's environment
+
 	BuiltinProc_DIRECTIVE, // NOTE(bill): This is used for specialized hash-prefixed procedures
 
 	// "Intrinsics"
@@ -449,6 +452,9 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("unreachable"),      0, false, Expr_Expr, BuiltinProcPkg_builtin, /*diverging*/true},
 
 	{STR_LIT("raw_data"),         1, false, Expr_Expr, BuiltinProcPkg_builtin},
+
+	{STR_LIT("closure_clone"),    2, false, Expr_Expr, BuiltinProcPkg_builtin},
+	{STR_LIT("closure_free"),     2, false, Expr_Stmt, BuiltinProcPkg_builtin},
 
 	{STR_LIT(""),                 0, true,  Expr_Expr, BuiltinProcPkg_builtin}, // DIRECTIVE
 
