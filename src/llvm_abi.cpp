@@ -2763,6 +2763,16 @@ gb_internal LB_ABI_INFO(lb_get_abi_info) {
 
 	// NOTE(bill): this is handled here rather than when developing the type in `lb_type_internal_for_procedures_raw`
 	// This is to make it consistent when and how it is handled
+
+	// closures receive the environment pointer as an implicit parameter, placed just before the
+	// context pointer. Final ordering is: ...user args..., env_ptr, [context_ptr]. Keep this in lock-step
+	// with lb_begin_procedure_body (which reads it back) and lb_emit_call_internal (which appends it).
+	Type *bt = base_type(original_type);
+	if (bt != nullptr && bt->kind == Type_Proc && bt->Proc.is_closure) {
+		lbArgType env_param = lb_arg_type_direct(LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0));
+		array_add(&ft->args, env_param);
+	}
+
 	if (calling_convention == ProcCC_Odin) {
 		// append the `context` pointer
 		lbArgType context_param = lb_arg_type_direct(LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0));
