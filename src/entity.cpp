@@ -507,6 +507,11 @@ gb_internal Entity *strip_entity_wrapping(Entity *e) {
 	if (e == nullptr) {
 		return nullptr;
 	}
+	if ((e->flags & EntityFlag_Overridden) != 0 &&
+	    e->aliased_of != nullptr &&
+	    (e->kind == Entity_Procedure || e->kind == Entity_ProcGroup)) {
+		return strip_entity_wrapping(e->aliased_of);
+	}
 	if (e->kind != Entity_Constant) {
 		return e;
 	}

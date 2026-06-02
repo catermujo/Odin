@@ -150,6 +150,7 @@ gb_internal lbValue lb_emit_abs(lbProcedure *p, lbValue x) {
 
 
 gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool ignore_body) {
+	entity = strip_entity_wrapping(entity);
 	GB_ASSERT(entity != nullptr);
 	GB_ASSERT(entity->kind == Entity_Procedure);
 	// Skip codegen for unspecialized polymorphic procedures
