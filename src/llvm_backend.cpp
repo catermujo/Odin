@@ -2351,9 +2351,17 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 		// 	continue;
 		// }
 
+		Entity *codegen_entity = e;
+		if (e->kind == Entity_Procedure) {
+			codegen_entity = strip_entity_wrapping(e);
+			if (codegen_entity == nullptr) {
+				continue;
+			}
+		}
+
 		lbModule *m = &gen->default_module;
 		if (USE_SEPARATE_MODULES) {
-			m = lb_module_of_entity(gen, e, m);
+			m = lb_module_of_entity(gen, codegen_entity, m);
 		}
 		GB_ASSERT(m != nullptr);
 
@@ -2363,7 +2371,7 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 				continue;
 			}
 
-			array_add(&m->global_procedures_to_create, e);
+			array_add(&m->global_procedures_to_create, codegen_entity);
 		} else if (e->kind == Entity_TypeName) {
 			array_add(&m->global_types_to_create, e);
 		}
