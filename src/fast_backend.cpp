@@ -1,6 +1,13 @@
+struct FastLiteralBlob {
+	u8 *data;
+	i32 size;
+	i32 align;
+};
+
 struct FastGenerator : LinkerData {
 	CheckerInfo *info;
 	Checker *checker;
+	Array<FastLiteralBlob> literal_blobs;
 };
 
 enum FastScalarKind {
@@ -28,6 +35,7 @@ struct FastLocalSlot {
 };
 
 struct FastLeafProcPlan {
+	FastGenerator *gen;
 	Entity *entity;
 	CheckerInfo *info;
 	TypeProc *type;
@@ -47,8 +55,10 @@ struct FastLeafProcPlan {
 };
 
 struct FastGlobalVarPlan {
+	FastGenerator *gen;
 	Entity *entity;
 	Type *value_type;
+	Ast *direct_init_expr;
 	u8 *init_data;
 	i32 size;
 	i32 align;
@@ -95,6 +105,8 @@ gb_internal bool fast_backend_emit_call_expr_to_address(FastLeafProcEmitter *emi
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
 gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr);
 gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProcEmitter *emitter, Ast *lhs, Type *type, AstCompoundLit *cl);
+gb_internal bool fast_backend_expr_is_string_literal_value(Type *type, Ast *expr);
+gb_internal bool fast_backend_get_string_literal_blob(FastGenerator *gen, Type *type, Ast *expr, i32 *blob_index_, i64 *len_);
 
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -121,6 +133,7 @@ gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	linker_data_init(gen, &c->info, c->parser->init_fullpath);
 	gen->info = &c->info;
 	gen->checker = c;
+	gen->literal_blobs = array_make<FastLiteralBlob>(heap_allocator(), 0, 8);
 	return true;
 }
 
@@ -287,6 +300,64 @@ gb_internal String fast_backend_mangle_asm_name(String name) {
 		return name;
 	}
 	return concatenate_strings(permanent_allocator(), str_lit("_"), name);
+}
+
+gb_internal i32 fast_backend_add_literal_blob(FastGenerator *gen, u8 const *data, i32 size, i32 align) {
+	GB_ASSERT(gen != nullptr);
+	GB_ASSERT(size >= 0);
+	GB_ASSERT(align > 0);
+
+	FastLiteralBlob blob = {};
+	blob.size = size;
+	blob.align = align;
+	if (size > 0) {
+		blob.data = gb_alloc_array(heap_allocator(), u8, size);
+		gb_memmove(blob.data, data, size);
+	}
+	array_add(&gen->literal_blobs, blob);
+	return cast(i32)gen->literal_blobs.count-1;
+}
+
+gb_internal bool fast_backend_expr_is_string_literal_value(Type *type, Ast *expr) {
+	type = default_type(type);
+	if (type == nullptr || expr == nullptr || (!is_type_string(type) && !is_type_string16(type))) {
+		return false;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode != Addressing_Constant) {
+		return false;
+	}
+	if (is_type_string16(type)) {
+		return tv.value.kind == ExactValue_String || tv.value.kind == ExactValue_String16;
+	}
+	return tv.value.kind == ExactValue_String;
+}
+
+gb_internal bool fast_backend_get_string_literal_blob(FastGenerator *gen, Type *type, Ast *expr, i32 *blob_index_, i64 *len_) {
+	if (gen == nullptr || !fast_backend_expr_is_string_literal_value(type, expr)) {
+		return false;
+	}
+
+	type = default_type(type);
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (is_type_string16(type)) {
+		TEMPORARY_ALLOCATOR_GUARD();
+		String16 s16 = {};
+		if (tv.value.kind == ExactValue_String16) {
+			s16 = tv.value.value_string16;
+		} else {
+			s16 = string_to_string16(temporary_allocator(), tv.value.value_string);
+		}
+		if (blob_index_) *blob_index_ = s16.len == 0 ? -1 : fast_backend_add_literal_blob(gen, cast(u8 const *)s16.text, cast(i32)(s16.len*gb_size_of(u16)), 2);
+		if (len_) *len_ = s16.len;
+		return true;
+	}
+
+	String s = tv.value.value_string;
+	if (blob_index_) *blob_index_ = s.len == 0 ? -1 : fast_backend_add_literal_blob(gen, s.text, cast(i32)s.len, 1);
+	if (len_) *len_ = s.len;
+	return true;
 }
 
 gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
@@ -891,6 +962,9 @@ gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, As
 	}
 	if (fast_backend_expr_is_zero_aggregate_value(expected_type, expr)) {
 		return true;
+	}
+	if (fast_backend_expr_is_string_literal_value(expected_type, expr)) {
+		return are_types_identical(default_type(tv.type), expected_type);
 	}
 
 	expr = unparen_expr(expr);
@@ -1572,6 +1646,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	}
 
 	plan->entity = e;
+	plan->gen = gen;
 	plan->info = gen->info;
 	plan->type = pt;
 	plan->body = decl->proc_lit->ProcLit.body;
@@ -1646,7 +1721,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	return fast_backend_plan_stmt_list(gen, plan, bs->stmts);
 }
 
-gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan) {
+gb_internal bool fast_backend_plan_global_var(FastGenerator *gen, Entity *e, FastGlobalVarPlan *plan) {
 	GB_ASSERT(e != nullptr);
 	GB_ASSERT(e->kind == Entity_Variable);
 
@@ -1667,7 +1742,9 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	Ast *init_expr = decl != nullptr ? decl->init_expr : e->Variable.init_expr;
 
 	plan->entity = e;
+	plan->gen = gen;
 	plan->value_type = e->type;
+	plan->direct_init_expr = nullptr;
 	plan->init_data = nullptr;
 	plan->size = cast(i32)type_size_of(e->type);
 	plan->align = cast(i32)type_align_of(e->type);
@@ -1684,6 +1761,10 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	TypeAndValue tv = type_and_value_of_expr(init_expr);
 	if (tv.mode == Addressing_Invalid) {
 		return false;
+	}
+	if (fast_backend_expr_is_string_literal_value(e->type, init_expr)) {
+		plan->direct_init_expr = init_expr;
+		return true;
 	}
 	if (tv.mode == Addressing_Constant || is_type_untyped_nil(tv.type)) {
 		plan->init_data = gb_alloc_array(heap_allocator(), u8, plan->size);
@@ -1748,7 +1829,7 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 				return false;
 			}
 			FastGlobalVarPlan plan = {};
-			if (!fast_backend_plan_global_var(e, &plan)) {
+			if (!fast_backend_plan_global_var(gen, e, &plan)) {
 				return false;
 			}
 			array_add(globals, plan);
@@ -2288,6 +2369,34 @@ gb_internal void fast_backend_emit_arm64_load_address_of_entity(gbFile *file, Fa
 	}
 }
 
+gb_internal void fast_backend_emit_blob_label(gbFile *file, i32 blob_index) {
+	gb_fprintf(file, "Lfast_blob_%d", blob_index);
+}
+
+gb_internal void fast_backend_emit_x64_load_address_of_blob(gbFile *file, i32 blob_index, FastX64RegNames const *dst) {
+	gb_fprintf(file, "\tlea %s, [rip + ", dst->r64);
+	fast_backend_emit_blob_label(file, blob_index);
+	gb_fprintf(file, "]\n");
+}
+
+gb_internal void fast_backend_emit_arm64_load_address_of_blob(gbFile *file, i32 blob_index, char const *dst) {
+	if (build_context.metrics.os == TargetOs_darwin) {
+		gb_fprintf(file, "\tadrp %s, ", dst);
+		fast_backend_emit_blob_label(file, blob_index);
+		gb_fprintf(file, "@PAGE\n");
+		gb_fprintf(file, "\tadd %s, %s, ", dst, dst);
+		fast_backend_emit_blob_label(file, blob_index);
+		gb_fprintf(file, "@PAGEOFF\n");
+	} else {
+		gb_fprintf(file, "\tadrp %s, ", dst);
+		fast_backend_emit_blob_label(file, blob_index);
+		gb_fprintf(file, "\n");
+		gb_fprintf(file, "\tadd %s, %s, :lo12:", dst, dst);
+		fast_backend_emit_blob_label(file, blob_index);
+		gb_fprintf(file, "\n");
+	}
+}
+
 gb_internal void fast_backend_emit_x64_load_from_address(gbFile *file, FastX64RegNames const *addr, FastX64RegNames const *dst, FastScalarType type) {
 	switch (type.kind) {
 	case FastScalar_Bool:
@@ -2386,6 +2495,17 @@ gb_internal void fast_backend_emit_add_imm_to_work_reg(FastLeafProcEmitter *emit
 		gb_fprintf(emitter->file, "\tadd %s, %lld\n", fast_backend_x64_work_reg()->r64, cast(long long)offset);
 	} else {
 		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), cast(i32)offset);
+	}
+}
+
+gb_internal void fast_backend_emit_add_imm_to_tmp_reg(FastLeafProcEmitter *emitter, i64 offset) {
+	if (offset == 0) {
+		return;
+	}
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tadd %s, %lld\n", fast_backend_x64_tmp_reg()->r64, cast(long long)offset);
+	} else {
+		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_tmp_reg(), cast(i32)offset);
 	}
 }
 
@@ -3430,6 +3550,14 @@ gb_internal void fast_backend_emit_store_work_to_global(FastLeafProcEmitter *emi
 	}
 }
 
+gb_internal void fast_backend_emit_store_work_to_tmp_address(FastLeafProcEmitter *emitter, FastScalarType type) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_store_to_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), type);
+	} else {
+		fast_backend_emit_arm64_store_to_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), type);
+	}
+}
+
 gb_internal void fast_backend_emit_store_tmp_to_work_address(FastLeafProcEmitter *emitter, FastScalarType type) {
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_store_to_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_tmp_reg(), type);
@@ -3810,7 +3938,47 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProc
 	return false;
 }
 
+gb_internal bool fast_backend_emit_store_string_literal_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
+	i32 blob_index = -1;
+	i64 len = 0;
+	if (emitter == nullptr || emitter->plan == nullptr || !fast_backend_get_string_literal_blob(emitter->plan->gen, type, expr, &blob_index, &len)) {
+		return false;
+	}
+
+	FastScalarType pointer_type = fast_backend_context_scalar_type();
+	FastScalarType len_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+
+	fast_backend_emit_push_work_reg(emitter);
+	if (blob_index < 0) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\txor %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_work_reg()->r64);
+		} else {
+			gb_fprintf(emitter->file, "\tmov %s, xzr\n", fast_backend_arm64_work_reg());
+		}
+	} else if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_address_of_blob(emitter->file, blob_index, fast_backend_x64_work_reg());
+	} else {
+		fast_backend_emit_arm64_load_address_of_blob(emitter->file, blob_index, fast_backend_arm64_work_reg());
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_store_work_to_tmp_address(emitter, pointer_type);
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)len);
+	} else {
+		fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)len);
+	}
+	fast_backend_emit_add_imm_to_tmp_reg(emitter, build_context.int_size);
+	fast_backend_emit_store_work_to_tmp_address(emitter, len_type);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
+	if (fast_backend_expr_is_string_literal_value(type, expr)) {
+		return fast_backend_emit_store_string_literal_to_address(emitter, type, expr);
+	}
+
 	i32 size = cast(i32)type_size_of(type);
 	if (size <= 0) {
 		return false;
@@ -4555,6 +4723,16 @@ gb_internal void fast_backend_emit_global_section(gbFile *file, Entity *entity) 
 	}
 }
 
+gb_internal void fast_backend_emit_readonly_section(gbFile *file) {
+	if (build_context.metrics.os == TargetOs_darwin) {
+		gb_fprintf(file, ".section __TEXT,__const\n");
+	} else if (build_context.metrics.os == TargetOs_windows) {
+		gb_fprintf(file, ".section .rdata,\"dr\"\n");
+	} else {
+		gb_fprintf(file, ".section .rodata,\"a\",@progbits\n");
+	}
+}
+
 gb_internal void fast_backend_emit_global_init_value(gbFile *file, FastGlobalVarPlan const &plan) {
 	GB_ASSERT(plan.init_data != nullptr);
 	for (i32 offset = 0; offset < plan.size; ) {
@@ -4569,6 +4747,24 @@ gb_internal void fast_backend_emit_global_init_value(gbFile *file, FastGlobalVar
 		gb_fprintf(file, "\n");
 		offset += count;
 	}
+}
+
+gb_internal bool fast_backend_emit_global_string_literal_init(gbFile *file, FastGlobalVarPlan const &plan) {
+	i32 blob_index = -1;
+	i64 len = 0;
+	if (!fast_backend_get_string_literal_blob(plan.gen, plan.value_type, plan.direct_init_expr, &blob_index, &len)) {
+		return false;
+	}
+
+	if (blob_index >= 0) {
+		gb_fprintf(file, "\t.quad ");
+		fast_backend_emit_blob_label(file, blob_index);
+		gb_fprintf(file, "\n");
+	} else {
+		gb_fprintf(file, "\t.quad 0\n");
+	}
+	gb_fprintf(file, "\t.quad %lld\n", cast(long long)len);
+	return true;
 }
 
 gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan const &plan) {
@@ -4588,6 +4784,10 @@ gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan co
 	gb_fprintf(file, "\"%.*s\":\n", LIT(asm_name));
 	if (plan.has_init_data) {
 		fast_backend_emit_global_init_value(file, plan);
+	} else if (plan.direct_init_expr != nullptr) {
+		if (!fast_backend_emit_global_string_literal_init(file, plan)) {
+			return false;
+		}
 	} else {
 		gb_fprintf(file, "\t.zero %d\n", plan.size);
 	}
@@ -4596,6 +4796,39 @@ gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan co
 	}
 	gb_fprintf(file, "\n");
 	return true;
+}
+
+gb_internal void fast_backend_emit_literal_blobs(gbFile *file, FastGenerator *gen) {
+	if (gen == nullptr || gen->literal_blobs.count == 0) {
+		return;
+	}
+
+	fast_backend_emit_readonly_section(file);
+	for_array(i, gen->literal_blobs) {
+		FastLiteralBlob const &blob = gen->literal_blobs[i];
+		if (blob.align > 0 && is_power_of_two(blob.align)) {
+			gb_fprintf(file, ".p2align %u, 0x0\n", cast(unsigned)floor_log2(cast(u64)blob.align));
+		}
+		fast_backend_emit_blob_label(file, cast(i32)i);
+		gb_fprintf(file, ":\n");
+		if (blob.size == 0) {
+			gb_fprintf(file, "\n");
+			continue;
+		}
+		for (i32 offset = 0; offset < blob.size; ) {
+			i32 count = gb_min(16, blob.size-offset);
+			gb_fprintf(file, "\t.byte ");
+			for (i32 j = 0; j < count; j++) {
+				if (j != 0) {
+					gb_fprintf(file, ", ");
+				}
+				gb_fprintf(file, "%u", cast(unsigned)blob.data[offset+j]);
+			}
+			gb_fprintf(file, "\n");
+			offset += count;
+		}
+		gb_fprintf(file, "\n");
+	}
 }
 
 gb_internal bool fast_backend_write_object_assembly(FastGenerator *gen, Array<FastGlobalVarPlan> const &globals, Array<FastLeafProcPlan> const &procedures, String asm_path) {
@@ -4633,6 +4866,7 @@ gb_internal bool fast_backend_write_object_assembly(FastGenerator *gen, Array<Fa
 		}
 	}
 
+	fast_backend_emit_literal_blobs(&file, gen);
 	return true;
 }
 
