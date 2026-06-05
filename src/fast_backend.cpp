@@ -3,6 +3,37 @@ struct FastBackendGenerator : LinkerData {
 	Checker *checker;
 };
 
+enum FastScalarKind {
+	FastScalar_Invalid,
+	FastScalar_Bool,
+	FastScalar_Signed,
+	FastScalar_Unsigned,
+	FastScalar_Pointer,
+};
+
+struct FastScalarType {
+	FastScalarKind kind;
+	i64 bit_size;
+};
+
+struct FastLeafProcPlan {
+	Entity *entity;
+	TypeProc *type;
+	Array<Entity *> params;
+	Ast *return_stmt;
+	Ast *return_expr;
+	FastScalarType return_type;
+	i32 spill_depth;
+	bool has_result;
+};
+
+struct FastLeafProcEmitter {
+	gbFile *file;
+	FastLeafProcPlan *plan;
+	i32 current_spill_depth;
+	bool use_frame;
+};
+
 gb_internal bool fast_backend_is_local_entity(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
 		return false;
@@ -73,6 +104,72 @@ gb_internal bool fast_init_generator(FastBackendGenerator *gen, Checker *c) {
 	return true;
 }
 
+gb_internal bool fast_backend_supported_calling_convention(ProcCallingConvention cc) {
+	switch (cc) {
+	case ProcCC_Odin:
+	case ProcCC_Contextless:
+	case ProcCC_CDecl:
+	case ProcCC_SysV:
+	case ProcCC_Win64:
+		return true;
+	}
+	return false;
+}
+
+gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *out) {
+	Type *bt = base_type(type);
+	if (bt == nullptr) {
+		return false;
+	}
+
+	if (is_type_boolean(bt)) {
+		out->kind = FastScalar_Bool;
+		out->bit_size = 1;
+		return true;
+	}
+
+	if (bt->kind == Type_Enum) {
+		bt = bt->Enum.base_type;
+	}
+
+	if (is_type_integer(bt)) {
+		out->kind = is_type_unsigned(bt) ? FastScalar_Unsigned : FastScalar_Signed;
+		out->bit_size = 8*type_size_of(bt);
+		return out->bit_size > 0 && out->bit_size <= 64;
+	}
+
+	if (is_type_pointer(type)) {
+		out->kind = FastScalar_Pointer;
+		out->bit_size = 8*build_context.metrics.ptr_size;
+		return true;
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_scalar_is_unsigned(FastScalarType type) {
+	return type.kind == FastScalar_Unsigned || type.kind == FastScalar_Bool || type.kind == FastScalar_Pointer;
+}
+
+gb_internal bool fast_backend_scalar_is_integer_like(FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+	case FastScalar_Signed:
+	case FastScalar_Unsigned:
+		return true;
+	}
+	return false;
+}
+
+gb_internal bool fast_backend_scalar_supports_ordered_cmp(FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Signed:
+	case FastScalar_Unsigned:
+		return true;
+	}
+	return false;
+}
+
 gb_internal String fast_backend_get_entity_name(Entity *e) {
 	GB_ASSERT(e != nullptr);
 	if (e->kind == Entity_Procedure && e->Procedure.link_name.len != 0) {
@@ -100,42 +197,6 @@ gb_internal String fast_backend_mangle_asm_name(String name) {
 	return concatenate_strings(permanent_allocator(), str_lit("_"), name);
 }
 
-gb_internal bool fast_backend_supported_calling_convention(ProcCallingConvention cc) {
-	switch (cc) {
-	case ProcCC_Odin:
-	case ProcCC_Contextless:
-	case ProcCC_CDecl:
-		return true;
-	}
-	return false;
-}
-
-gb_internal bool fast_backend_proc_body_is_trivial(Ast *body, Ast **unsupported_stmt) {
-	if (body == nullptr || body->kind != Ast_BlockStmt) {
-		*unsupported_stmt = body;
-		return false;
-	}
-
-	for (Ast *stmt : body->BlockStmt.stmts) {
-		if (stmt == nullptr) {
-			continue;
-		}
-		switch (stmt->kind) {
-		case Ast_EmptyStmt:
-			continue;
-		case Ast_ReturnStmt:
-			if (stmt->ReturnStmt.results.count == 0) {
-				continue;
-			}
-			break;
-		}
-		*unsupported_stmt = stmt;
-		return false;
-	}
-
-	return true;
-}
-
 gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 	u64 flags = e->flags.load(std::memory_order_relaxed);
 	if (flags & EntityFlag_CustomLinkage_Internal) {
@@ -153,7 +214,236 @@ gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 	return false;
 }
 
-gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Array<Entity *> *procedures) {
+gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
+	if (expr == nullptr) {
+		return 0;
+	}
+
+	switch (expr->kind) {
+	case Ast_ParenExpr:
+		return fast_backend_leaf_expr_spill_depth(expr->ParenExpr.expr);
+	case Ast_UnaryExpr:
+		return fast_backend_leaf_expr_spill_depth(expr->UnaryExpr.expr);
+	case Ast_BinaryExpr: {
+		i32 left_depth  = fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.left);
+		i32 right_depth = fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.right);
+		return gb_max(left_depth, 1 + right_depth);
+	}
+	}
+
+	return 0;
+}
+
+gb_internal bool fast_backend_leaf_expr_is_supported(Ast *expr, Type *expected_type) {
+	if (expr == nullptr) {
+		return false;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode == Addressing_Invalid) {
+		return false;
+	}
+	if (tv.mode == Addressing_Constant) {
+		FastScalarType type = {};
+		return fast_backend_classify_scalar_type(expected_type ? expected_type : tv.type, &type);
+	}
+
+	switch (expr->kind) {
+	case Ast_ParenExpr:
+		return fast_backend_leaf_expr_is_supported(expr->ParenExpr.expr, expected_type);
+
+	case Ast_Ident: {
+		Entity *e = expr->Ident.entity.load();
+		return e != nullptr && (e->flags.load(std::memory_order_relaxed) & EntityFlag_Param) != 0;
+	}
+
+	case Ast_UnaryExpr: {
+		Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->UnaryExpr.expr).type);
+		FastScalarType operand_scalar = {};
+		if (!fast_backend_classify_scalar_type(operand_type, &operand_scalar)) {
+			return false;
+		}
+		if (!fast_backend_leaf_expr_is_supported(expr->UnaryExpr.expr, operand_type)) {
+			return false;
+		}
+
+		switch (expr->UnaryExpr.op.kind) {
+		case Token_Add:
+			return true;
+		case Token_Sub:
+			return operand_scalar.kind == FastScalar_Signed || operand_scalar.kind == FastScalar_Unsigned;
+		case Token_Not:
+			return fast_backend_scalar_is_integer_like(operand_scalar) || operand_scalar.kind == FastScalar_Pointer;
+		case Token_Xor:
+			return fast_backend_scalar_is_integer_like(operand_scalar);
+		}
+		return false;
+	}
+
+	case Ast_BinaryExpr: {
+		Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.left).type);
+		FastScalarType operand_scalar = {};
+		if (!fast_backend_classify_scalar_type(operand_type, &operand_scalar)) {
+			return false;
+		}
+
+		if (!fast_backend_leaf_expr_is_supported(expr->BinaryExpr.left, operand_type) ||
+		    !fast_backend_leaf_expr_is_supported(expr->BinaryExpr.right, reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.right).type))) {
+			return false;
+		}
+
+		switch (expr->BinaryExpr.op.kind) {
+		case Token_Add:
+		case Token_Sub:
+		case Token_Mul:
+		case Token_Quo:
+		case Token_Mod:
+		case Token_And:
+		case Token_Or:
+		case Token_Xor:
+		case Token_AndNot:
+			return fast_backend_scalar_is_integer_like(operand_scalar);
+
+		case Token_Shl:
+		case Token_Shr:
+			return fast_backend_scalar_is_integer_like(operand_scalar);
+
+		case Token_CmpEq:
+		case Token_NotEq:
+			return fast_backend_scalar_is_integer_like(operand_scalar) || operand_scalar.kind == FastScalar_Pointer;
+
+		case Token_Lt:
+		case Token_LtEq:
+		case Token_Gt:
+		case Token_GtEq:
+			return fast_backend_scalar_supports_ordered_cmp(operand_scalar);
+		}
+		return false;
+	}
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_plan_leaf_proc(FastBackendGenerator *gen, Entity *e, FastLeafProcPlan *plan) {
+	DeclInfo *decl = e->decl_info;
+	if (decl == nullptr || decl->proc_lit == nullptr || decl->proc_lit->kind != Ast_ProcLit) {
+		error(e->token, "Fast backend expected a concrete procedure body");
+		return false;
+	}
+
+	Type *type = base_type(e->type);
+	if (type == nullptr || type->kind != Type_Proc) {
+		error(e->token, "Fast backend expected a procedure type");
+		return false;
+	}
+
+	TypeProc *pt = &type->Proc;
+	if (pt->variadic || pt->return_by_pointer || pt->diverging || pt->is_polymorphic || e->Procedure.generated_from_polymorphic) {
+		error(e->token, "Fast backend does not yet support this procedure kind");
+		return false;
+	}
+	if (!fast_backend_supported_calling_convention(pt->calling_convention)) {
+		error(e->token, "Fast backend does not yet support this calling convention");
+		return false;
+	}
+
+	plan->entity = e;
+	plan->type = pt;
+	plan->return_stmt = nullptr;
+	plan->return_expr = nullptr;
+	plan->has_result = false;
+	plan->return_type = {};
+	plan->spill_depth = 0;
+	plan->params = array_make<Entity *>(heap_allocator(), 0, pt->param_count);
+
+	if (pt->param_count != 0) {
+		GB_ASSERT(pt->params != nullptr && pt->params->kind == Type_Tuple);
+		for_array(i, pt->params->Tuple.variables) {
+			Entity *param = pt->params->Tuple.variables[i];
+			if (param == nullptr || param->kind != Entity_Variable) {
+				continue;
+			}
+			if (param->flags.load(std::memory_order_relaxed) & EntityFlag_CVarArg) {
+				error(param->token, "Fast backend does not yet support variadic procedures");
+				return false;
+			}
+
+			FastScalarType param_type = {};
+			if (!fast_backend_classify_scalar_type(param->type, &param_type)) {
+				error(param->token, "Fast backend currently only supports scalar parameter types");
+				return false;
+			}
+			array_add(&plan->params, param);
+		}
+	}
+
+	if (pt->result_count > 1) {
+		error(e->token, "Fast backend currently only supports procedures with at most one result");
+		return false;
+	}
+	if (pt->result_count == 1) {
+		GB_ASSERT(pt->results != nullptr && pt->results->kind == Type_Tuple);
+		Entity *result_entity = pt->results->Tuple.variables[0];
+		GB_ASSERT(result_entity != nullptr);
+		if (!fast_backend_classify_scalar_type(result_entity->type, &plan->return_type)) {
+			error(result_entity->token, "Fast backend currently only supports scalar result types");
+			return false;
+		}
+		plan->has_result = true;
+	}
+
+	ast_node(bs, BlockStmt, decl->proc_lit->ProcLit.body);
+	Ast *last_non_empty = nullptr;
+	for (Ast *stmt : bs->stmts) {
+		if (stmt == nullptr || stmt->kind == Ast_EmptyStmt) {
+			continue;
+		}
+		if (last_non_empty != nullptr) {
+			error(stmt, "Fast backend currently only supports leaf procedure bodies with a single return statement");
+			return false;
+		}
+		last_non_empty = stmt;
+	}
+
+	if (last_non_empty == nullptr) {
+		if (plan->has_result) {
+			error(decl->proc_lit, "Fast backend expected an explicit return value");
+			return false;
+		}
+		return true;
+	}
+
+	if (last_non_empty->kind != Ast_ReturnStmt) {
+		error(last_non_empty, "Fast backend currently only supports return statements in procedure bodies");
+		return false;
+	}
+
+	plan->return_stmt = last_non_empty;
+	if (!plan->has_result) {
+		if (last_non_empty->ReturnStmt.results.count != 0) {
+			error(last_non_empty, "Fast backend expected no return values");
+			return false;
+		}
+		return true;
+	}
+
+	if (last_non_empty->ReturnStmt.results.count != 1) {
+		error(last_non_empty, "Fast backend currently only supports a single return value");
+		return false;
+	}
+
+	plan->return_expr = last_non_empty->ReturnStmt.results[0];
+	if (!fast_backend_leaf_expr_is_supported(plan->return_expr, reduce_tuple_to_single_type(pt->results))) {
+		error(plan->return_expr, "Fast backend does not yet support this return expression");
+		return false;
+	}
+
+	plan->spill_depth = fast_backend_leaf_expr_spill_depth(plan->return_expr);
+	return true;
+}
+
+gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Array<FastLeafProcPlan> *procedures) {
 	for (Entity *e : gen->info->definitions) {
 		if (!fast_backend_is_local_entity(gen->info, e)) {
 			continue;
@@ -181,40 +471,11 @@ gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Arra
 				return false;
 			}
 
-			Type *type = base_type(e->type);
-			if (type == nullptr || type->kind != Type_Proc) {
-				error(e->token, "Fast backend expected a procedure type");
+			FastLeafProcPlan plan = {};
+			if (!fast_backend_plan_leaf_proc(gen, e, &plan)) {
 				return false;
 			}
-
-			TypeProc *pt = &type->Proc;
-			if (pt->param_count != 0 || pt->result_count != 0 || pt->variadic || pt->return_by_pointer || pt->diverging) {
-				error(e->token, "Fast backend currently only supports procedures with no parameters and no results");
-				return false;
-			}
-			if (!fast_backend_supported_calling_convention(pt->calling_convention)) {
-				error(e->token, "Fast backend does not yet support this calling convention");
-				return false;
-			}
-			if (e->Procedure.generated_from_polymorphic || pt->is_polymorphic) {
-				error(e->token, "Fast backend does not yet support polymorphic procedures");
-				return false;
-			}
-
-			DeclInfo *decl = e->decl_info;
-			if (decl == nullptr || decl->proc_lit == nullptr || decl->proc_lit->kind != Ast_ProcLit) {
-				error(e->token, "Fast backend expected a concrete procedure body");
-				return false;
-			}
-
-			Ast *unsupported_stmt = nullptr;
-			if (!fast_backend_proc_body_is_trivial(decl->proc_lit->ProcLit.body, &unsupported_stmt)) {
-				error(unsupported_stmt ? unsupported_stmt : decl->proc_lit,
-				      "Fast backend currently only supports empty procedure bodies and bare `return`");
-				return false;
-			}
-
-			array_add(procedures, e);
+			array_add(procedures, plan);
 			break;
 		}
 
@@ -241,7 +502,631 @@ gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Arra
 	return true;
 }
 
-gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, Array<Entity *> const &procedures, String asm_path) {
+struct FastX64RegNames {
+	char const *r64;
+	char const *r32;
+	char const *r16;
+	char const *r8;
+};
+
+gb_global FastX64RegNames fast_x64_reg_rax = {"rax", "eax", "ax", "al"};
+gb_global FastX64RegNames fast_x64_reg_rcx = {"rcx", "ecx", "cx", "cl"};
+gb_global FastX64RegNames fast_x64_reg_rdx = {"rdx", "edx", "dx", "dl"};
+gb_global FastX64RegNames fast_x64_reg_rdi = {"rdi", "edi", "di", "dil"};
+gb_global FastX64RegNames fast_x64_reg_rsi = {"rsi", "esi", "si", "sil"};
+gb_global FastX64RegNames fast_x64_reg_r8  = {"r8",  "r8d",  "r8w",  "r8b"};
+gb_global FastX64RegNames fast_x64_reg_r9  = {"r9",  "r9d",  "r9w",  "r9b"};
+gb_global FastX64RegNames fast_x64_reg_r10 = {"r10", "r10d", "r10w", "r10b"};
+gb_global FastX64RegNames fast_x64_reg_r11 = {"r11", "r11d", "r11w", "r11b"};
+
+gb_internal FastX64RegNames const *fast_backend_x64_return_reg(void) {
+	return &fast_x64_reg_rax;
+}
+
+gb_internal FastX64RegNames const *fast_backend_x64_work_reg(void) {
+	return &fast_x64_reg_r10;
+}
+
+gb_internal FastX64RegNames const *fast_backend_x64_tmp_reg(void) {
+	return &fast_x64_reg_r11;
+}
+
+gb_internal ProcCallingConvention fast_backend_effective_calling_convention(TypeProc *pt) {
+	ProcCallingConvention cc = pt->calling_convention;
+	if (cc == ProcCC_CDecl) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			if (build_context.metrics.os == TargetOs_windows || build_context.metrics.abi == TargetABI_Win64) {
+				return ProcCC_Win64;
+			}
+			return ProcCC_SysV;
+		}
+	}
+	return cc;
+}
+
+gb_internal FastX64RegNames const *fast_backend_x64_param_reg(TypeProc *pt, i32 index) {
+	static FastX64RegNames const *sysv[]  = {&fast_x64_reg_rdi, &fast_x64_reg_rsi, &fast_x64_reg_rdx, &fast_x64_reg_rcx, &fast_x64_reg_r8, &fast_x64_reg_r9};
+	static FastX64RegNames const *win64[] = {&fast_x64_reg_rcx, &fast_x64_reg_rdx, &fast_x64_reg_r8, &fast_x64_reg_r9};
+
+	ProcCallingConvention cc = fast_backend_effective_calling_convention(pt);
+	if (cc == ProcCC_Win64) {
+		return index < cast(i32)gb_count_of(win64) ? win64[index] : nullptr;
+	}
+	return index < cast(i32)gb_count_of(sysv) ? sysv[index] : nullptr;
+}
+
+gb_internal char const *fast_backend_arm64_return_reg(void) {
+	return "x0";
+}
+
+gb_internal char const *fast_backend_arm64_work_reg(void) {
+	return "x9";
+}
+
+gb_internal char const *fast_backend_arm64_tmp_reg(void) {
+	return "x10";
+}
+
+gb_internal char const *fast_backend_arm64_div_tmp_reg(void) {
+	return "x11";
+}
+
+gb_internal char const *fast_backend_arm64_param_reg(i32 index) {
+	static char const *regs[] = {"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+	return index < cast(i32)gb_count_of(regs) ? regs[index] : nullptr;
+}
+
+gb_internal i32 fast_backend_param_limit(FastLeafProcPlan *plan) {
+	if (build_context.metrics.arch == TargetArch_arm64) {
+		return 8;
+	}
+	ProcCallingConvention cc = fast_backend_effective_calling_convention(plan->type);
+	return cc == ProcCC_Win64 ? 4 : 6;
+}
+
+gb_internal bool fast_backend_find_param_index(FastLeafProcPlan *plan, Entity *entity, i32 *index_) {
+	for_array(i, plan->params) {
+		if (plan->params[i] == entity) {
+			*index_ = cast(i32)i;
+			return true;
+		}
+	}
+	return false;
+}
+
+gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out) {
+	switch (value.kind) {
+	case ExactValue_Bool:
+		*out = value.value_bool ? 1 : 0;
+		return true;
+	case ExactValue_Pointer:
+		*out = cast(u64)value.value_pointer;
+		return true;
+	case ExactValue_Integer:
+		if (fast_backend_scalar_is_unsigned(type)) {
+			*out = exact_value_to_u64(value);
+		} else {
+			*out = cast(u64)exact_value_to_i64(value);
+		}
+		return true;
+	}
+	return false;
+}
+
+gb_internal void fast_backend_emit_x64_load_imm(gbFile *file, FastX64RegNames const *dst, u64 value) {
+	gb_fprintf(file, "\tmov %s, 0x%llx\n", dst->r64, cast(unsigned long long)value);
+}
+
+gb_internal void fast_backend_emit_arm64_load_imm(gbFile *file, char const *dst, u64 value) {
+	if (value == 0) {
+		gb_fprintf(file, "\tmov %s, xzr\n", dst);
+		return;
+	}
+
+	u16 parts[4] = {};
+	for (i32 i = 0; i < 4; i++) {
+		parts[i] = cast(u16)((value >> (16*i)) & 0xffff);
+	}
+
+	bool emitted = false;
+	for (i32 i = 0; i < 4; i++) {
+		if (parts[i] == 0 && emitted) {
+			continue;
+		}
+		if (!emitted) {
+			gb_fprintf(file, "\tmovz %s, #%u, lsl #%d\n", dst, cast(unsigned)parts[i], 16*i);
+			emitted = true;
+		} else if (parts[i] != 0) {
+			gb_fprintf(file, "\tmovk %s, #%u, lsl #%d\n", dst, cast(unsigned)parts[i], 16*i);
+		}
+	}
+}
+
+gb_internal void fast_backend_emit_x64_canonicalize(gbFile *file, FastX64RegNames const *reg, FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+		gb_fprintf(file, "\tand %s, 1\n", reg->r64);
+		break;
+	case FastScalar_Signed:
+		switch (type.bit_size) {
+		case 8:  gb_fprintf(file, "\tmovsx %s, %s\n", reg->r64, reg->r8);  break;
+		case 16: gb_fprintf(file, "\tmovsx %s, %s\n", reg->r64, reg->r16); break;
+		case 32: gb_fprintf(file, "\tmovsxd %s, %s\n", reg->r64, reg->r32); break;
+		}
+		break;
+	case FastScalar_Unsigned:
+		switch (type.bit_size) {
+		case 8:  gb_fprintf(file, "\tmovzx %s, %s\n", reg->r64, reg->r8);  break;
+		case 16: gb_fprintf(file, "\tmovzx %s, %s\n", reg->r64, reg->r16); break;
+		case 32: gb_fprintf(file, "\tmov %s, %s\n", reg->r32, reg->r32); break;
+		}
+		break;
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_canonicalize(gbFile *file, char const *reg, FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+		gb_fprintf(file, "\tand %s, %s, #1\n", reg, reg);
+		break;
+	case FastScalar_Signed:
+		switch (type.bit_size) {
+		case 8:  gb_fprintf(file, "\tsxtb %s, w%s\n", reg, reg+1); break;
+		case 16: gb_fprintf(file, "\tsxth %s, w%s\n", reg, reg+1); break;
+		case 32: gb_fprintf(file, "\tsxtw %s, w%s\n", reg, reg+1); break;
+		}
+		break;
+	case FastScalar_Unsigned:
+		switch (type.bit_size) {
+		case 8:  gb_fprintf(file, "\tuxtb %s, w%s\n", reg, reg+1); break;
+		case 16: gb_fprintf(file, "\tuxth %s, w%s\n", reg, reg+1); break;
+		case 32: gb_fprintf(file, "\tuxtw %s, w%s\n", reg, reg+1); break;
+		}
+		break;
+	}
+}
+
+gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *expr);
+
+gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast *expr) {
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	Type *expr_type = reduce_tuple_to_single_type(tv.type);
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
+		return false;
+	}
+
+	if (tv.mode == Addressing_Constant) {
+		u64 value = 0;
+		if (!fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+			return false;
+		}
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), value);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), scalar_type);
+		} else {
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), value);
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), scalar_type);
+		}
+		return true;
+	}
+
+	if (expr->kind != Ast_Ident) {
+		return false;
+	}
+
+	Entity *entity = expr->Ident.entity.load();
+	i32 param_index = -1;
+	if (entity == nullptr || !fast_backend_find_param_index(emitter->plan, entity, &param_index)) {
+		return false;
+	}
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		auto *src = fast_backend_x64_param_reg(emitter->plan->type, param_index);
+		if (src == nullptr) {
+			return false;
+		}
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src->r64);
+		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), scalar_type);
+	} else {
+		char const *src = fast_backend_arm64_param_reg(param_index);
+		if (src == nullptr) {
+			return false;
+		}
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
+		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), scalar_type);
+	}
+
+	return true;
+}
+
+gb_internal void fast_backend_emit_push_work_reg(FastLeafProcEmitter *emitter) {
+	i32 offset = 8 * (emitter->current_spill_depth + 1);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tmov QWORD PTR [rbp-%d], %s\n", offset, fast_backend_x64_work_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\tstr %s, [x29, #-%d]\n", fast_backend_arm64_work_reg(), offset);
+	}
+	emitter->current_spill_depth += 1;
+}
+
+gb_internal void fast_backend_emit_pop_tmp_reg(FastLeafProcEmitter *emitter) {
+	GB_ASSERT(emitter->current_spill_depth > 0);
+	i32 offset = 8 * emitter->current_spill_depth;
+	emitter->current_spill_depth -= 1;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tmov %s, QWORD PTR [rbp-%d]\n", fast_backend_x64_tmp_reg()->r64, offset);
+	} else {
+		gb_fprintf(emitter->file, "\tldr %s, [x29, #-%d]\n", fast_backend_arm64_tmp_reg(), offset);
+	}
+}
+
+gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast *expr) {
+	Type *expr_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr).type);
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
+		return false;
+	}
+	if (!fast_backend_emit_leaf_expr(emitter, expr->UnaryExpr.expr)) {
+		return false;
+	}
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		auto *work = fast_backend_x64_work_reg();
+		switch (expr->UnaryExpr.op.kind) {
+		case Token_Add:
+			return true;
+		case Token_Sub:
+			gb_fprintf(emitter->file, "\tneg %s\n", work->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Not:
+			gb_fprintf(emitter->file, "\tcmp %s, 0\n", work->r64);
+			gb_fprintf(emitter->file, "\tsete %s\n", work->r8);
+			gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+			return true;
+		case Token_Xor:
+			gb_fprintf(emitter->file, "\tnot %s\n", work->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		}
+	} else {
+		char const *work = fast_backend_arm64_work_reg();
+		switch (expr->UnaryExpr.op.kind) {
+		case Token_Add:
+			return true;
+		case Token_Sub:
+			gb_fprintf(emitter->file, "\tneg %s, %s\n", work, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Not:
+			gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+			gb_fprintf(emitter->file, "\tcset w9, eq\n");
+			return true;
+		case Token_Xor:
+			gb_fprintf(emitter->file, "\tmvn %s, %s\n", work, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+gb_internal char const *fast_backend_x64_cmp_suffix(TokenKind op, FastScalarType type) {
+	bool uns = fast_backend_scalar_is_unsigned(type);
+	switch (op) {
+	case Token_CmpEq: return "e";
+	case Token_NotEq: return "ne";
+	case Token_Lt:    return uns ? "b"  : "l";
+	case Token_LtEq:  return uns ? "be" : "le";
+	case Token_Gt:    return uns ? "a"  : "g";
+	case Token_GtEq:  return uns ? "ae" : "ge";
+	}
+	return nullptr;
+}
+
+gb_internal char const *fast_backend_arm64_cmp_suffix(TokenKind op, FastScalarType type) {
+	bool uns = fast_backend_scalar_is_unsigned(type);
+	switch (op) {
+	case Token_CmpEq: return "eq";
+	case Token_NotEq: return "ne";
+	case Token_Lt:    return uns ? "lo" : "lt";
+	case Token_LtEq:  return uns ? "ls" : "le";
+	case Token_Gt:    return uns ? "hi" : "gt";
+	case Token_GtEq:  return uns ? "hs" : "ge";
+	}
+	return nullptr;
+}
+
+gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast *expr) {
+	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.left).type);
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(operand_type, &scalar_type)) {
+		return false;
+	}
+
+	TokenKind op = expr->BinaryExpr.op.kind;
+	if ((op == Token_Shl || op == Token_Shr) &&
+	    build_context.metrics.arch == TargetArch_amd64 &&
+	    type_and_value_of_expr(expr->BinaryExpr.right).mode != Addressing_Constant) {
+		return false;
+	}
+
+	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.left)) {
+		return false;
+	}
+
+	fast_backend_emit_push_work_reg(emitter);
+	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.right)) {
+		return false;
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		auto *work = fast_backend_x64_work_reg();
+		auto *tmp  = fast_backend_x64_tmp_reg();
+
+		switch (op) {
+		case Token_Add:
+			gb_fprintf(emitter->file, "\tadd %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Sub:
+			gb_fprintf(emitter->file, "\tsub %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Mul:
+			gb_fprintf(emitter->file, "\timul %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Quo:
+		case Token_Mod:
+			gb_fprintf(emitter->file, "\txchg %s, %s\n", work->r64, tmp->r64);
+			if (fast_backend_scalar_is_unsigned(scalar_type)) {
+				gb_fprintf(emitter->file, "\txor edx, edx\n");
+				gb_fprintf(emitter->file, "\tdiv %s\n", tmp->r64);
+			} else {
+				gb_fprintf(emitter->file, "\tcqo\n");
+				gb_fprintf(emitter->file, "\tidiv %s\n", tmp->r64);
+			}
+			if (op == Token_Mod) {
+				gb_fprintf(emitter->file, "\tmov %s, rdx\n", work->r64);
+			}
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_And:
+			gb_fprintf(emitter->file, "\tand %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Or:
+			gb_fprintf(emitter->file, "\tor %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Xor:
+			gb_fprintf(emitter->file, "\txor %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_AndNot:
+			gb_fprintf(emitter->file, "\tnot %s\n", work->r64);
+			gb_fprintf(emitter->file, "\tand %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Shl:
+		case Token_Shr: {
+			ExactValue shift_value = type_and_value_of_expr(expr->BinaryExpr.right).value;
+			u64 shift = exact_value_to_u64(shift_value);
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+			char const *inst = op == Token_Shl ? "shl" : (fast_backend_scalar_is_unsigned(scalar_type) ? "shr" : "sar");
+			gb_fprintf(emitter->file, "\t%s %s, %llu\n", inst, work->r64, cast(unsigned long long)shift);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		}
+		case Token_CmpEq:
+		case Token_NotEq:
+		case Token_Lt:
+		case Token_LtEq:
+		case Token_Gt:
+		case Token_GtEq: {
+			char const *suffix = fast_backend_x64_cmp_suffix(op, scalar_type);
+			if (suffix == nullptr) {
+				return false;
+			}
+			gb_fprintf(emitter->file, "\tcmp %s, %s\n", tmp->r64, work->r64);
+			gb_fprintf(emitter->file, "\tset%s %s\n", suffix, work->r8);
+			gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+			return true;
+		}
+		}
+	} else {
+		char const *work = fast_backend_arm64_work_reg();
+		char const *tmp  = fast_backend_arm64_tmp_reg();
+
+		switch (op) {
+		case Token_Add:
+			gb_fprintf(emitter->file, "\tadd %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Sub:
+			gb_fprintf(emitter->file, "\tsub %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Mul:
+			gb_fprintf(emitter->file, "\tmul %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Quo:
+			gb_fprintf(emitter->file, "\t%s %s, %s, %s\n", fast_backend_scalar_is_unsigned(scalar_type) ? "udiv" : "sdiv", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Mod:
+			gb_fprintf(emitter->file, "\t%s %s, %s, %s\n", fast_backend_scalar_is_unsigned(scalar_type) ? "udiv" : "sdiv", fast_backend_arm64_div_tmp_reg(), tmp, work);
+			gb_fprintf(emitter->file, "\tmsub %s, %s, %s, %s\n", work, fast_backend_arm64_div_tmp_reg(), work, tmp);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_And:
+			gb_fprintf(emitter->file, "\tand %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Or:
+			gb_fprintf(emitter->file, "\torr %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Xor:
+			gb_fprintf(emitter->file, "\teor %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_AndNot:
+			gb_fprintf(emitter->file, "\tbic %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Shl:
+			gb_fprintf(emitter->file, "\tlsl %s, %s, %s\n", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_Shr:
+			gb_fprintf(emitter->file, "\t%s %s, %s, %s\n", fast_backend_scalar_is_unsigned(scalar_type) ? "lsr" : "asr", work, tmp, work);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
+			return true;
+		case Token_CmpEq:
+		case Token_NotEq:
+		case Token_Lt:
+		case Token_LtEq:
+		case Token_Gt:
+		case Token_GtEq: {
+			char const *suffix = fast_backend_arm64_cmp_suffix(op, scalar_type);
+			if (suffix == nullptr) {
+				return false;
+			}
+			gb_fprintf(emitter->file, "\tcmp %s, %s\n", tmp, work);
+			gb_fprintf(emitter->file, "\tcset w9, %s\n", suffix);
+			return true;
+		}
+		}
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *expr) {
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode == Addressing_Constant || expr->kind == Ast_Ident) {
+		return fast_backend_emit_leaf_value(emitter, expr);
+	}
+
+	switch (expr->kind) {
+	case Ast_ParenExpr:
+		return fast_backend_emit_leaf_expr(emitter, expr->ParenExpr.expr);
+	case Ast_UnaryExpr:
+		return fast_backend_emit_leaf_unary(emitter, expr);
+	case Ast_BinaryExpr:
+		return fast_backend_emit_leaf_binary(emitter, expr);
+	}
+
+	return false;
+}
+
+gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
+	if (!emitter->use_frame) {
+		return;
+	}
+
+	i32 spill_bytes = 8 * emitter->plan->spill_depth;
+	i32 frame_size = align_formula(spill_bytes, 16);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tpush rbp\n");
+		gb_fprintf(emitter->file, "\tmov rbp, rsp\n");
+		if (frame_size > 0) {
+			gb_fprintf(emitter->file, "\tsub rsp, %d\n", frame_size);
+		}
+	} else {
+		gb_fprintf(emitter->file, "\tstp x29, x30, [sp, #-16]!\n");
+		gb_fprintf(emitter->file, "\tmov x29, sp\n");
+		if (frame_size > 0) {
+			gb_fprintf(emitter->file, "\tsub sp, sp, #%d\n", frame_size);
+		}
+	}
+}
+
+gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
+	if (!emitter->use_frame) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tret\n");
+		} else {
+			gb_fprintf(emitter->file, "\tret\n");
+		}
+		return;
+	}
+
+	i32 spill_bytes = 8 * emitter->plan->spill_depth;
+	i32 frame_size = align_formula(spill_bytes, 16);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		if (frame_size > 0) {
+			gb_fprintf(emitter->file, "\tadd rsp, %d\n", frame_size);
+		}
+		gb_fprintf(emitter->file, "\tpop rbp\n");
+		gb_fprintf(emitter->file, "\tret\n");
+	} else {
+		if (frame_size > 0) {
+			gb_fprintf(emitter->file, "\tadd sp, sp, #%d\n", frame_size);
+		}
+		gb_fprintf(emitter->file, "\tldp x29, x30, [sp], #16\n");
+		gb_fprintf(emitter->file, "\tret\n");
+	}
+}
+
+gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan *plan) {
+	String symbol = fast_backend_get_entity_name(plan->entity);
+	String asm_name = fast_backend_mangle_asm_name(symbol);
+
+	if (fast_backend_allow_external_symbol(plan->entity)) {
+		gb_fprintf(file, ".globl \"%.*s\"\n", LIT(asm_name));
+	}
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(file, ".p2align 4, 0x90\n");
+	} else {
+		gb_fprintf(file, ".p2align 2\n");
+	}
+
+	gb_fprintf(file, "\"%.*s\":\n", LIT(asm_name));
+
+	FastLeafProcEmitter emitter = {};
+	emitter.file = file;
+	emitter.plan = plan;
+	emitter.current_spill_depth = 0;
+	emitter.use_frame = plan->spill_depth > 0;
+
+	fast_backend_emit_leaf_prologue(&emitter);
+
+	if (plan->return_expr != nullptr) {
+		if (!fast_backend_emit_leaf_expr(&emitter, plan->return_expr)) {
+			error(plan->return_expr, "Fast backend failed to emit the return expression");
+			return false;
+		}
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(file, "\tmov %s, %s\n", fast_backend_x64_return_reg()->r64, fast_backend_x64_work_reg()->r64);
+		} else {
+			gb_fprintf(file, "\tmov %s, %s\n", fast_backend_arm64_return_reg(), fast_backend_arm64_work_reg());
+		}
+	}
+
+	fast_backend_emit_leaf_epilogue(&emitter);
+	gb_fprintf(file, "\n");
+	return true;
+}
+
+gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, Array<FastLeafProcPlan> const &procedures, String asm_path) {
+	gb_unused(gen);
+
 	gbFile file = {};
 	gbFileError err = gb_file_open_mode(&file, gbFileMode_Write, cast(char const *)asm_path.text);
 	if (err != gbFileError_None) {
@@ -250,25 +1135,20 @@ gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, A
 	}
 	defer (gb_file_close(&file));
 
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(&file, ".intel_syntax noprefix\n");
+	}
 	gb_fprintf(&file, ".text\n");
 
-	for (Entity *e : procedures) {
-		String symbol = fast_backend_get_entity_name(e);
-		String asm_name = fast_backend_mangle_asm_name(symbol);
-
-		if (fast_backend_allow_external_symbol(e)) {
-			gb_fprintf(&file, ".globl \"%.*s\"\n", LIT(asm_name));
+	for (auto const &plan : procedures) {
+		FastLeafProcPlan *proc_plan = const_cast<FastLeafProcPlan *>(&plan);
+		if (cast(i32)proc_plan->params.count > fast_backend_param_limit(proc_plan)) {
+			error(plan.entity->token, "Fast backend does not yet support this many parameters");
+			return false;
 		}
-
-		if (build_context.metrics.arch == TargetArch_amd64) {
-			gb_fprintf(&file, ".p2align 4, 0x90\n");
-		} else {
-			gb_fprintf(&file, ".p2align 2\n");
+		if (!fast_backend_emit_leaf_procedure(&file, proc_plan)) {
+			return false;
 		}
-
-		gb_fprintf(&file, "\"%.*s\":\n", LIT(asm_name));
-		gb_fprintf(&file, "\tret\n");
-		gb_fprintf(&file, "\n");
 	}
 
 	return true;
@@ -305,7 +1185,7 @@ gb_internal bool fast_generate_code(FastBackendGenerator *gen) {
 	GB_ASSERT(gen != nullptr);
 	GB_ASSERT(build_context.build_mode == BuildMode_Object);
 
-	auto procedures = array_make<Entity *>(heap_allocator(), 0, gen->info->definitions.count);
+	auto procedures = array_make<FastLeafProcPlan>(heap_allocator(), 0, gen->info->definitions.count);
 	if (!fast_backend_collect_procedures(gen, &procedures)) {
 		return false;
 	}
