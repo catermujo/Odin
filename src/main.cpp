@@ -78,6 +78,7 @@ gb_global Timings global_timings = {0};
 #include "bundle_command.cpp"
 
 #include "llvm_backend.cpp"
+#include "fast_backend.cpp"
 
 #include "bug_report.cpp"
 
@@ -339,6 +340,7 @@ enum BuildFlagKind {
 	BuildFlag_Collection,
 	BuildFlag_Define,
 	BuildFlag_BuildMode,
+	BuildFlag_Backend,
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
 	BuildFlag_Subtarget,
@@ -579,6 +581,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
+	add_flag(&build_flags, BuildFlag_Backend,                 str_lit("backend"),                   BuildFlagParam_String,  Command__does_build);
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
@@ -1264,6 +1267,28 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								gb_printf_err("\tasm, assembly, assembler\n");
 								gb_printf_err("\tllvm, llvm-ir\n");
 								gb_printf_err("\ttest\n");
+								bad_flags = true;
+								break;
+							}
+
+							break;
+						}
+						case BuildFlag_Backend: {
+							GB_ASSERT(value.kind == ExactValue_String);
+							String str = value.value_string;
+
+							if (str == "default") {
+								build_context.backend = BuildBackend_Default;
+							} else if (str == "llvm") {
+								build_context.backend = BuildBackend_LLVM;
+							} else if (str == "fast") {
+								build_context.backend = BuildBackend_Fast;
+							} else {
+								gb_printf_err("Unknown backend '%.*s'\n", LIT(str));
+								gb_printf_err("Valid backends:\n");
+								gb_printf_err("\tdefault\n");
+								gb_printf_err("\tllvm\n");
+								gb_printf_err("\tfast\n");
 								bad_flags = true;
 								break;
 							}
@@ -2545,7 +2570,7 @@ gb_internal void export_linked_libraries(LinkerData *gen) {
 	}
 }
 
-gb_internal void remove_temp_files(lbGenerator *gen) {
+gb_internal void remove_temp_files(LinkerData *gen) {
 	if (build_context.keep_temp_files) return;
 
 	switch (build_context.build_mode) {
@@ -2745,6 +2770,14 @@ gb_internal int print_show_help(String const arg0, String command, String option
 				print_usage_line(3, "-build-mode:asm         Builds as an assembly file.");
 				print_usage_line(3, "-build-mode:llvm-ir     Builds as an LLVM IR file.");
 				print_usage_line(3, "-build-mode:llvm        Builds as an LLVM IR file.");
+		}
+
+		if (print_flag("-backend:<string>")) {
+			print_usage_line(2, "Selects code generation backend.");
+			print_usage_line(2, "Choices:");
+			print_usage_line(3, "default    Uses compiler default selection (currently LLVM during rollout).");
+			print_usage_line(3, "llvm       Forces LLVM backend.");
+			print_usage_line(3, "fast       Requests fast x64/arm64 backend for -o:none and -o:minimal.");
 		}
 	}
 
@@ -4092,6 +4125,29 @@ int main(int arg_count, char const **arg_ptr) {
 		gb_printf_err("Warning: Thread-local storage is disabled on Windows i386.\n");
 	}
 
+	if (build_context.backend == BuildBackend_Fast &&
+	    fast_backend_build_mode_is_llvm_only(build_context.build_mode)) {
+		gb_printf_err("-backend:fast cannot be used with this build mode; use LLVM-backed output modes instead\n");
+		return 1;
+	}
+
+	{
+		BuildBackendKind requested_backend = build_context.backend;
+		BuildBackendKind actual_backend = requested_backend == BuildBackend_Default ? get_default_build_backend_kind() : requested_backend;
+
+		if (actual_backend == BuildBackend_Fast) {
+			String fast_backend_reason = {};
+			if (!fast_backend_is_supported(&fast_backend_reason)) {
+				if (requested_backend == BuildBackend_Fast) {
+					gb_printf_err("Note: -backend:fast falling back to LLVM: %.*s.\n", LIT(fast_backend_reason));
+				}
+				actual_backend = BuildBackend_LLVM;
+			}
+		}
+
+		build_context.backend = actual_backend;
+	}
+
 	// Check chosen microarchitecture. If not found or ?, print list.
 	bool print_microarch_list = true;
 	if (build_context.microarch.len == 0 || build_context.microarch == str_lit("native")) {
@@ -4359,17 +4415,44 @@ int main(int arg_count, char const **arg_ptr) {
 	}
 
 	{
-		lbGenerator *gen = permanent_alloc_item<lbGenerator>();
-		if (!lb_init_generator(gen, checker)) {
-			return 1;
+		LinkerData *gen = nullptr;
+		bool codegen_ok = false;
+
+		switch (build_context.backend) {
+		case BuildBackend_Fast: {
+			auto *fast_gen = permanent_alloc_item<FastBackendGenerator>();
+			if (!fast_init_generator(fast_gen, checker)) {
+				return 1;
+			}
+
+			gen = fast_gen;
+
+			gbString label_code_gen = gb_string_make(heap_allocator(), "Fast Backend Code Gen");
+			MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
+			codegen_ok = fast_generate_code(fast_gen);
+			break;
 		}
 
-		gbString label_code_gen = gb_string_make(heap_allocator(), "LLVM API Code Gen");
-		if (gen->modules.count > 1) {
-			label_code_gen = gb_string_append_fmt(label_code_gen, " ( %4td modules )", gen->modules.count);
+		case BuildBackend_Default:
+		case BuildBackend_LLVM: {
+			auto *llvm_gen = permanent_alloc_item<lbGenerator>();
+			if (!lb_init_generator(llvm_gen, checker)) {
+				return 1;
+			}
+
+			gen = llvm_gen;
+
+			gbString label_code_gen = gb_string_make(heap_allocator(), "LLVM API Code Gen");
+			if (llvm_gen->modules.count > 1) {
+				label_code_gen = gb_string_append_fmt(label_code_gen, " ( %4td modules )", llvm_gen->modules.count);
+			}
+			MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
+			codegen_ok = lb_generate_code(llvm_gen);
+			break;
 		}
-		MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
-		if (lb_generate_code(gen)) {
+		}
+
+		if (codegen_ok) {
 			switch (build_context.build_mode) {
 			case BuildMode_Executable:
 			case BuildMode_StaticLibrary:

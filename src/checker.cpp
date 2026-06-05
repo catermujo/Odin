@@ -1522,6 +1522,18 @@ gb_internal void init_universal(void) {
 	}
 
 	{
+		GlobalEnumValue values[BuildBackend_COUNT] = {
+			{"Default", BuildBackend_Default},
+			{"LLVM",    BuildBackend_LLVM},
+			{"Fast",    BuildBackend_Fast},
+		};
+
+		auto fields = add_global_enum_type(str_lit("Odin_Backend_Type"), values, gb_count_of(values));
+		add_global_enum_constant(fields, "ODIN_BACKEND", bc->backend);
+		add_global_string_constant("ODIN_BACKEND_STRING", build_backend_names[bc->backend]);
+	}
+
+	{
 		GlobalEnumValue values[TargetEndian_COUNT] = {
 			{"Little",  TargetEndian_Little},
 			{"Big",     TargetEndian_Big},

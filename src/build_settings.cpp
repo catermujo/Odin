@@ -211,6 +211,20 @@ enum BuildModeKind {
 	BuildMode_COUNT,
 };
 
+enum BuildBackendKind {
+	BuildBackend_Default,
+	BuildBackend_LLVM,
+	BuildBackend_Fast,
+
+	BuildBackend_COUNT,
+};
+
+gb_global String build_backend_names[BuildBackend_COUNT] = {
+	str_lit("default"),
+	str_lit("llvm"),
+	str_lit("fast"),
+};
+
 enum CommandKind : u64 {
 	Command_run             = 1<<0,
 	Command_build           = 1<<1,
@@ -518,6 +532,7 @@ struct BuildContext {
 	String extra_assembler_flags;
 	String microarch;
 	BuildModeKind build_mode;
+	BuildBackendKind backend;
 	bool   keep_executable;
 	bool   generate_docs;
 	bool   custom_optimization_level;
