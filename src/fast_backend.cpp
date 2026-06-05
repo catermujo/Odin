@@ -93,6 +93,7 @@ gb_internal bool fast_backend_serialize_constant_value(Type *type, Ast *expr, u8
 gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, Ast *expr, Type **type_);
 gb_internal bool fast_backend_emit_call_expr_to_address(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
+gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr);
 
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -192,6 +193,12 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 			}
 		}
 		return true;
+
+	case Type_Slice:
+		return fast_backend_type_is_supported_value(type->Slice.elem, nullptr, nullptr);
+
+	case Type_Basic:
+		return is_type_string(type) || is_type_string16(type);
 	}
 
 	return false;
@@ -455,7 +462,7 @@ gb_internal bool fast_backend_get_selector_info(Ast *expr, Type **value_type_, T
 	return true;
 }
 
-gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type_, i64 *elem_size_, bool *base_is_pointer_) {
+gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type_, i64 *elem_size_, bool *base_is_pointer_, bool *base_uses_data_pointer_) {
 	if (ie == nullptr) {
 		return false;
 	}
@@ -467,6 +474,7 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 
 	Type *value_type = nullptr;
 	bool base_is_pointer = false;
+	bool base_uses_data_pointer = false;
 	switch (indexed_type->kind) {
 	case Type_Array:
 		value_type = indexed_type->Array.elem;
@@ -482,6 +490,19 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 		base_is_pointer = true;
 		value_type = indexed_type->MultiPointer.elem;
 		break;
+	case Type_Slice:
+		base_uses_data_pointer = true;
+		value_type = indexed_type->Slice.elem;
+		break;
+	case Type_Basic:
+		if (indexed_type->Basic.kind == Basic_string || indexed_type->Basic.kind == Basic_UntypedString) {
+			base_uses_data_pointer = true;
+			value_type = t_u8;
+		} else if (indexed_type->Basic.kind == Basic_string16) {
+			base_uses_data_pointer = true;
+			value_type = t_u16;
+		}
+		break;
 	}
 
 	if (value_type == nullptr || type_size_of(value_type) <= 0) {
@@ -491,6 +512,7 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 	if (value_type_) *value_type_ = value_type;
 	if (elem_size_) *elem_size_ = type_size_of(value_type);
 	if (base_is_pointer_) *base_is_pointer_ = base_is_pointer;
+	if (base_uses_data_pointer_) *base_uses_data_pointer_ = base_uses_data_pointer;
 	return true;
 }
 
@@ -547,10 +569,12 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 	case Ast_IndexExpr: {
 		i64 elem_size = 0;
 		bool base_is_pointer = false;
-		if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer)) {
+		bool base_uses_data_pointer = false;
+		if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer, &base_uses_data_pointer)) {
 			return false;
 		}
 		gb_unused(elem_size);
+		gb_unused(base_uses_data_pointer);
 		if (base_is_pointer) {
 			if (!fast_backend_can_emit_leaf_expr(plan, expr->IndexExpr.expr, type_of_expr(expr->IndexExpr.expr))) {
 				return false;
@@ -863,6 +887,9 @@ gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, As
 	TypeAndValue tv = type_and_value_of_expr(expr);
 	if (tv.mode == Addressing_Invalid) {
 		return false;
+	}
+	if (fast_backend_expr_is_zero_aggregate_value(expected_type, expr)) {
+		return true;
 	}
 
 	expr = unparen_expr(expr);
@@ -1203,7 +1230,7 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 		}
 
 		if (!fast_backend_type_is_supported_value(entity->type, nullptr, nullptr)) {
-			error(name, "Fast backend currently only supports scalar, array, and struct local variable types");
+			error(name, "Fast backend currently only supports scalar, array, struct, slice, and string local variable types");
 			return false;
 		}
 		if (!fast_backend_add_slot(plan, entity, entity->type)) {
@@ -1566,7 +1593,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 			}
 
 			if (!fast_backend_type_is_supported_value(param->type, nullptr, nullptr)) {
-				error(param->token, "Fast backend currently only supports scalar, array, and struct parameter types");
+				error(param->token, "Fast backend currently only supports scalar, array, struct, slice, and string parameter types");
 				return false;
 			}
 			array_add(&plan->params, param);
@@ -1594,7 +1621,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 		GB_ASSERT(result_entity != nullptr);
 		if (!fast_backend_classify_scalar_type(result_entity->type, &plan->return_type)) {
 			if (!fast_backend_type_is_supported_aggregate(result_entity->type)) {
-				error(result_entity->token, "Fast backend currently only supports scalar, array, and struct result types");
+				error(result_entity->token, "Fast backend currently only supports scalar, array, struct, slice, and string result types");
 				return false;
 			}
 			if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
@@ -1624,7 +1651,7 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	}
 
 	if (!fast_backend_type_is_supported_value(e->type, nullptr, nullptr)) {
-		error(e->token, "Fast backend currently only supports scalar, array, and struct global variable types");
+		error(e->token, "Fast backend currently only supports scalar, array, struct, slice, and string global variable types");
 		return false;
 	}
 
@@ -1952,6 +1979,19 @@ gb_internal bool fast_backend_find_param_index(FastLeafProcPlan *plan, Entity *e
 	return false;
 }
 
+gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr) {
+	type = default_type(type);
+	if (type == nullptr || expr == nullptr || !fast_backend_type_is_supported_aggregate(type)) {
+		return false;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (is_type_untyped_nil(tv.type)) {
+		return true;
+	}
+	return false;
+}
+
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out) {
 	switch (value.kind) {
 	case ExactValue_Bool:
@@ -1984,6 +2024,10 @@ gb_internal bool fast_backend_serialize_constant_value(Type *type, Ast *expr, u8
 	TypeAndValue tv = type_and_value_of_expr(expr);
 	if (tv.mode == Addressing_Invalid) {
 		return false;
+	}
+	if (fast_backend_expr_is_zero_aggregate_value(type, expr)) {
+		gb_zero_size(dst, cast(isize)type_size_of(type));
+		return true;
 	}
 
 	FastScalarType scalar_type = {};
@@ -2759,7 +2803,8 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 	case Ast_IndexExpr: {
 		i64 elem_size = 0;
 		bool base_is_pointer = false;
-		if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer)) {
+		bool base_uses_data_pointer = false;
+		if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer, &base_uses_data_pointer)) {
 			return false;
 		}
 		if (base_is_pointer) {
@@ -2768,6 +2813,14 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			}
 		} else if (!fast_backend_emit_address_expr(emitter, expr->IndexExpr.expr, nullptr)) {
 			return false;
+		}
+		if (base_uses_data_pointer) {
+			FastScalarType data_pointer_type = fast_backend_context_scalar_type();
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), data_pointer_type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), data_pointer_type);
+			}
 		}
 		fast_backend_emit_push_work_reg(emitter);
 		if (!fast_backend_emit_leaf_expr(emitter, expr->IndexExpr.index)) {
@@ -3707,6 +3760,9 @@ gb_internal bool fast_backend_emit_store_value_to_entity(FastLeafProcEmitter *em
 	if (!fast_backend_type_is_supported_aggregate(type)) {
 		return false;
 	}
+	if (fast_backend_expr_is_zero_aggregate_value(type, expr)) {
+		return fast_backend_emit_zero_storage_entity(emitter, entity);
+	}
 
 	if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr, type)) {
 		return fast_backend_emit_store_scalar_compound_lit_to_entity(emitter, entity, type, &unparen_expr(expr)->CompoundLit);
@@ -3754,6 +3810,13 @@ gb_internal bool fast_backend_emit_store_value_to_lhs(FastLeafProcEmitter *emitt
 	type = default_type(type);
 	if (!fast_backend_type_is_supported_aggregate(type)) {
 		return false;
+	}
+	if (fast_backend_expr_is_zero_aggregate_value(type, rhs)) {
+		if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
+			return false;
+		}
+		fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(type));
+		return true;
 	}
 
 	if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, rhs, type)) {
@@ -3880,7 +3943,9 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		} else {
 			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
 		}
-		if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, result, emitter->plan->result_value_type)) {
+		if (fast_backend_expr_is_zero_aggregate_value(emitter->plan->result_value_type, result)) {
+			fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(emitter->plan->result_value_type));
+		} else if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, result, emitter->plan->result_value_type)) {
 			if (!fast_backend_emit_call_expr_to_address(emitter, &unparen_expr(result)->CallExpr)) {
 				return false;
 			}
