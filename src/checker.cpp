@@ -19,6 +19,298 @@ gb_internal void check_expr_or_type(CheckerContext *c, Operand *operand, Ast *ex
 gb_internal void add_comparison_procedures_for_fields(CheckerContext *c, Type *t);
 gb_internal Type *check_type(CheckerContext *ctx, Ast *e);
 
+enum CheckerGlobalEntityTimingKind {
+	CheckerGlobalEntityTiming_Invalid,
+	CheckerGlobalEntityTiming_Variable,
+	CheckerGlobalEntityTiming_Constant,
+	CheckerGlobalEntityTiming_TypeName,
+	CheckerGlobalEntityTiming_Procedure,
+	CheckerGlobalEntityTiming_ProcGroup,
+
+	CheckerGlobalEntityTiming_COUNT,
+};
+
+gb_global char const *checker_global_entity_timing_labels[CheckerGlobalEntityTiming_COUNT] = {
+	"invalid",
+	"variables",
+	"constants",
+	"type names",
+	"procedure declarations",
+	"procedure groups",
+};
+
+struct CheckerGlobalEntityTimingBucket {
+	u64   exclusive_ticks;
+	isize call_count;
+};
+
+struct CheckerGlobalEntityTimingStackEntry {
+	CheckerGlobalEntityTimingKind kind;
+	u64                           start;
+	u64                           child_ticks;
+};
+
+struct CheckerGlobalEntityTimingState {
+	bool                           enabled;
+	isize                          loop_entity_count;
+	isize                          lazy_skipped_count;
+	isize                          layout_entity_count;
+	isize                          soa_completion_count;
+	u64                            post_layout_ticks;
+	u64                            post_soa_ticks;
+	CheckerGlobalEntityTimingBucket buckets[CheckerGlobalEntityTiming_COUNT];
+	CheckerGlobalEntityTimingStackEntry stack[1024];
+	isize                          stack_count;
+};
+
+gb_global CheckerGlobalEntityTimingState checker_global_entity_timing_state = {};
+
+enum CheckerGlobalVariableTimingKind {
+	CheckerGlobalVariableTiming_Attributes,
+	CheckerGlobalVariableTiming_ExplicitType,
+	CheckerGlobalVariableTiming_ForeignAndLinks,
+	CheckerGlobalVariableTiming_InitExpr,
+	CheckerGlobalVariableTiming_InitVariable,
+	CheckerGlobalVariableTiming_RodataValidation,
+	CheckerGlobalVariableTiming_RttiDisallowed,
+
+	CheckerGlobalVariableTiming_COUNT,
+};
+
+gb_global char const *checker_global_variable_timing_labels[CheckerGlobalVariableTiming_COUNT] = {
+	"attributes",
+	"explicit type",
+	"foreign/link bookkeeping",
+	"init expr",
+	"init assignment",
+	"rodata validation",
+	"rtti disallowed",
+};
+
+struct CheckerGlobalVariableTimingState {
+	bool                           enabled;
+	isize                          variable_decl_count;
+	isize                          early_visited_count;
+	CheckerGlobalEntityTimingBucket buckets[CheckerGlobalVariableTiming_COUNT];
+	struct SlowInitExpr {
+		u64     ticks;
+		Entity *entity;
+		Ast    *expr;
+	};
+	SlowInitExpr                    slow_init_exprs[16];
+	isize                           slow_init_expr_count;
+};
+
+gb_global CheckerGlobalVariableTimingState checker_global_variable_timing_state = {};
+
+gb_internal CheckerGlobalEntityTimingKind checker_global_entity_timing_kind_from_entity_kind(EntityKind kind) {
+	switch (kind) {
+	case Entity_Variable:  return CheckerGlobalEntityTiming_Variable;
+	case Entity_Constant:  return CheckerGlobalEntityTiming_Constant;
+	case Entity_TypeName:  return CheckerGlobalEntityTiming_TypeName;
+	case Entity_Procedure: return CheckerGlobalEntityTiming_Procedure;
+	case Entity_ProcGroup: return CheckerGlobalEntityTiming_ProcGroup;
+	}
+	return CheckerGlobalEntityTiming_Invalid;
+}
+
+gb_internal void checker_global_entity_timing_reset(void) {
+	gb_zero_item(&checker_global_entity_timing_state);
+	gb_zero_item(&checker_global_variable_timing_state);
+}
+
+gb_internal void checker_global_entity_timing_begin(CheckerGlobalEntityTimingKind kind) {
+	auto *state = &checker_global_entity_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind > CheckerGlobalEntityTiming_Invalid && kind < CheckerGlobalEntityTiming_COUNT);
+	GB_ASSERT(state->stack_count < gb_count_of(state->stack));
+
+	auto *entry = &state->stack[state->stack_count++];
+	entry->kind = kind;
+	entry->start = time_stamp_time_now();
+	entry->child_ticks = 0;
+}
+
+gb_internal void checker_global_entity_timing_end(void) {
+	auto *state = &checker_global_entity_timing_state;
+	GB_ASSERT(state->stack_count > 0);
+
+	CheckerGlobalEntityTimingStackEntry entry = state->stack[--state->stack_count];
+	u64 total_ticks = time_stamp_time_now() - entry.start;
+	u64 exclusive_ticks = total_ticks - entry.child_ticks;
+
+	auto *bucket = &state->buckets[entry.kind];
+	bucket->exclusive_ticks += exclusive_ticks;
+	bucket->call_count += 1;
+
+	if (state->stack_count > 0) {
+		state->stack[state->stack_count-1].child_ticks += total_ticks;
+	}
+}
+
+gb_internal void checker_global_entity_timing_add_soa_ticks(u64 ticks, isize completion_count) {
+	auto *state = &checker_global_entity_timing_state;
+	state->post_soa_ticks += ticks;
+	state->soa_completion_count += completion_count;
+}
+
+gb_internal void checker_global_entity_timing_add_layout_ticks(u64 ticks) {
+	auto *state = &checker_global_entity_timing_state;
+	state->post_layout_ticks += ticks;
+	state->layout_entity_count += 1;
+}
+
+gb_internal void checker_global_variable_timing_add(CheckerGlobalVariableTimingKind kind, u64 ticks) {
+	auto *state = &checker_global_variable_timing_state;
+	state->buckets[kind].exclusive_ticks += ticks;
+	state->buckets[kind].call_count += 1;
+}
+
+gb_internal void checker_global_variable_timing_note_init_expr(Entity *entity, Ast *expr, u64 ticks) {
+	if (ticks == 0 || entity == nullptr || expr == nullptr) {
+		return;
+	}
+
+	auto *state = &checker_global_variable_timing_state;
+	isize count = state->slow_init_expr_count;
+	isize cap = gb_count_of(state->slow_init_exprs);
+	if (count == cap && ticks <= state->slow_init_exprs[count-1].ticks) {
+		return;
+	}
+
+	isize idx = count;
+	if (idx < cap) {
+		state->slow_init_expr_count += 1;
+	} else {
+		idx = cap-1;
+	}
+
+	while (idx > 0 && state->slow_init_exprs[idx-1].ticks < ticks) {
+		if (idx < cap) {
+			state->slow_init_exprs[idx] = state->slow_init_exprs[idx-1];
+		}
+		idx -= 1;
+	}
+
+	state->slow_init_exprs[idx].ticks = ticks;
+	state->slow_init_exprs[idx].entity = entity;
+	state->slow_init_exprs[idx].expr = expr;
+}
+
+gb_internal f64 checker_global_entity_ticks_as_ms(u64 ticks, u64 freq) {
+	return 1000.0*cast(f64)ticks/cast(f64)freq;
+}
+
+gb_internal void checker_global_entity_timing_print_line(char const *label, u64 ticks, isize count, f64 total_ms, u64 freq) {
+	if (ticks == 0 && count == 0) {
+		return;
+	}
+
+	f64 ms = checker_global_entity_ticks_as_ms(ticks, freq);
+	f64 pct = total_ms > 0 ? 100.0*ms/total_ms : 0.0;
+
+	gb_printf_err("%s - %.3f ms - %.2f%%", label, ms, pct);
+	if (count > 0) {
+		gb_printf_err(" - %td calls - %.3f us/call", count, 1000.0*ms/cast(f64)count);
+	}
+	gb_printf_err("\n");
+}
+
+gb_internal void show_checker_global_entity_timings(Timings *t) {
+	if (!build_context.show_more_timings) {
+		return;
+	}
+
+	auto *state = &checker_global_entity_timing_state;
+	if (state->loop_entity_count == 0) {
+		return;
+	}
+
+	TimeStamp phase = {};
+	for (TimeStamp const &section : t->sections) {
+		if (section.label == "check all global entities") {
+			phase = section;
+			break;
+		}
+	}
+	if (phase.label.len == 0) {
+		return;
+	}
+
+	u64 measured_ticks = state->post_layout_ticks + state->post_soa_ticks;
+	for (isize i = CheckerGlobalEntityTiming_Variable; i < CheckerGlobalEntityTiming_COUNT; i++) {
+		measured_ticks += state->buckets[i].exclusive_ticks;
+	}
+
+	u64 phase_ticks = phase.finish - phase.start;
+	u64 other_ticks = phase_ticks > measured_ticks ? phase_ticks - measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Global Entity Breakdown\n");
+	gb_printf_err("loop entities                - %td total, %td lazy skipped\n", state->loop_entity_count, state->lazy_skipped_count);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Variable],  state->buckets[CheckerGlobalEntityTiming_Variable].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_Variable].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Constant],  state->buckets[CheckerGlobalEntityTiming_Constant].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_Constant].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_TypeName],  state->buckets[CheckerGlobalEntityTiming_TypeName].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_TypeName].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Procedure], state->buckets[CheckerGlobalEntityTiming_Procedure].exclusive_ticks, state->buckets[CheckerGlobalEntityTiming_Procedure].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_ProcGroup], state->buckets[CheckerGlobalEntityTiming_ProcGroup].exclusive_ticks, state->buckets[CheckerGlobalEntityTiming_ProcGroup].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("complete_soa_type", state->post_soa_ticks, state->soa_completion_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("type_size/type_align", state->post_layout_ticks, state->layout_entity_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("other/setup", other_ticks, 0, phase_ms, t->freq);
+
+	auto *var_state = &checker_global_variable_timing_state;
+	u64 variable_total_ticks = state->buckets[CheckerGlobalEntityTiming_Variable].exclusive_ticks;
+	if (variable_total_ticks == 0 || var_state->variable_decl_count == 0) {
+		return;
+	}
+
+	u64 variable_measured_ticks = 0;
+	for (isize i = 0; i < CheckerGlobalVariableTiming_COUNT; i++) {
+		variable_measured_ticks += var_state->buckets[i].exclusive_ticks;
+	}
+	u64 variable_other_ticks = variable_total_ticks > variable_measured_ticks ? variable_total_ticks - variable_measured_ticks : 0;
+	f64 variable_ms = checker_global_entity_ticks_as_ms(variable_total_ticks, t->freq);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Global Variable Breakdown\n");
+	gb_printf_err("variable decls               - %td total, %td early visited\n", var_state->variable_decl_count, var_state->early_visited_count);
+	for (isize i = 0; i < CheckerGlobalVariableTiming_COUNT; i++) {
+		checker_global_entity_timing_print_line(checker_global_variable_timing_labels[i], var_state->buckets[i].exclusive_ticks, var_state->buckets[i].call_count, variable_ms, t->freq);
+	}
+	checker_global_entity_timing_print_line("other/setup", variable_other_ticks, 0, variable_ms, t->freq);
+
+	if (var_state->slow_init_expr_count <= 0) {
+		return;
+	}
+
+	gb_printf_err("\n");
+	gb_printf_err("Slowest Global Init Exprs\n");
+	for (isize i = 0; i < var_state->slow_init_expr_count; i++) {
+		auto *entry = &var_state->slow_init_exprs[i];
+		Ast *expr = unparen_expr(entry->expr);
+		f64 ms = checker_global_entity_ticks_as_ms(entry->ticks, t->freq);
+
+		gb_printf_err("%td. %.3f ms - %s - %.*s", i+1, ms, token_pos_to_string(entry->entity->token.pos), LIT(entry->entity->token.string));
+		if (expr != nullptr) {
+			gb_printf_err(" - %.*s", LIT(ast_strings[expr->kind]));
+			if (expr->kind == Ast_CompoundLit) {
+				ast_node(cl, CompoundLit, expr);
+				gb_printf_err(" (%td elems", cl->elems.count);
+				if (cl->tag && cl->tag->BasicDirective.name.string == "partial") {
+					gb_printf_err(", #partial");
+				}
+				gb_printf_err(")");
+			}
+		}
+
+		Entity *target = strip_entity_wrapping(entity_from_expr(expr));
+		if (target != nullptr && target != entry->entity) {
+			gb_printf_err(" -> %s - %.*s", token_pos_to_string(target->token.pos), LIT(target->token.string));
+		}
+		gb_printf_err("\n");
+	}
+}
+
 gb_internal bool is_operand_value(Operand o) {
 	switch (o.mode) {
 	case Addressing_Value:
@@ -5656,27 +5948,51 @@ gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) 
 
 gb_internal void check_all_global_entities(Checker *c) {
 	in_single_threaded_checker_stage.store(true, std::memory_order_relaxed);
+	checker_global_entity_timing_reset();
+	checker_global_entity_timing_state.enabled = build_context.show_more_timings;
+	checker_global_variable_timing_state.enabled = build_context.show_more_timings;
 
 	// NOTE(bill): This must be single threaded
 	// Don't bother trying
 	for_array(i, c->info.entities) {
 		Entity *e = c->info.entities[i];
 		GB_ASSERT(e != nullptr);
+		checker_global_entity_timing_state.loop_entity_count += 1;
 		if (e->flags & EntityFlag_Lazy) {
+			checker_global_entity_timing_state.lazy_skipped_count += 1;
 			continue;
 		}
 		DeclInfo *d = e->decl_info;
 		check_single_global_entity(c, e, d);
 		if (e->type != nullptr && is_type_typed(e->type)) {
+			u64 soa_start = 0;
+			isize soa_completion_count = 0;
+			if (checker_global_entity_timing_state.enabled) {
+				soa_start = time_stamp_time_now();
+			}
 			for (Type *t = nullptr; mpsc_dequeue(&c->soa_types_to_complete, &t); /**/) {
 				complete_soa_type(c, t, false);
+				soa_completion_count += 1;
+			}
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_soa_ticks(time_stamp_time_now() - soa_start, soa_completion_count);
 			}
 
+			u64 layout_start = 0;
+			if (checker_global_entity_timing_state.enabled) {
+				layout_start = time_stamp_time_now();
+			}
 			(void)type_size_of(e->type);
 			(void)type_align_of(e->type);
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_layout_ticks(time_stamp_time_now() - layout_start);
+			}
 		}
 	}
 
+	checker_global_entity_timing_state.enabled = false;
+	checker_global_variable_timing_state.enabled = false;
+	GB_ASSERT(checker_global_entity_timing_state.stack_count == 0);
 	in_single_threaded_checker_stage.store(false, std::memory_order_relaxed);
 }
 
