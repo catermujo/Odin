@@ -18,8 +18,13 @@ struct FastScalarType {
 
 struct FastLocalSlot {
 	Entity *entity;
+	Type *value_type;
 	FastScalarType type;
 	i32 index;
+	i32 offset;
+	i32 size;
+	i32 align;
+	bool is_scalar;
 };
 
 struct FastLeafProcPlan {
@@ -32,6 +37,7 @@ struct FastLeafProcPlan {
 	FastScalarType return_type;
 	FastLocalSlot context_slot;
 	i32 spill_depth;
+	i32 local_stack_size;
 	i32 proc_index;
 	bool has_context_slot;
 	bool has_result;
@@ -39,11 +45,11 @@ struct FastLeafProcPlan {
 
 struct FastGlobalVarPlan {
 	Entity *entity;
-	FastScalarType type;
-	u64 init_value;
+	Type *value_type;
+	u8 *init_data;
 	i32 size;
 	i32 align;
-	bool has_init_value;
+	bool has_init_data;
 };
 
 struct FastControlContext {
@@ -65,13 +71,19 @@ struct FastLeafProcEmitter {
 
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out);
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot);
-gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, FastScalarType type);
+gb_internal bool fast_backend_type_is_supported_aggregate(Type *type);
+gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType *scalar_type_, bool *is_scalar_);
+gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, Type *type);
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
 gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out);
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_find_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, Type **type_, bool *is_global_);
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
+gb_internal bool fast_backend_serialize_constant_value(Type *type, Ast *expr, u8 *dst);
 
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -142,6 +154,55 @@ gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *o
 	}
 
 	return false;
+}
+
+gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
+	type = base_type(type);
+	if (type == nullptr) {
+		return false;
+	}
+	if (type_size_of(type) <= 0 || type_align_of(type) <= 0) {
+		return false;
+	}
+
+	switch (type->kind) {
+	case Type_Array:
+		return fast_backend_type_is_supported_value(type->Array.elem, nullptr, nullptr);
+
+	case Type_Struct:
+		if (type->Struct.is_raw_union || type->Struct.soa_kind != StructSoa_None) {
+			return false;
+		}
+		type_set_offsets(type);
+		for (Entity *field : type->Struct.fields) {
+			if (field == nullptr || field->kind != Entity_Variable) {
+				return false;
+			}
+			if (!fast_backend_type_is_supported_value(field->type, nullptr, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType *scalar_type_, bool *is_scalar_) {
+	FastScalarType scalar_type = {};
+	if (fast_backend_classify_scalar_type(type, &scalar_type)) {
+		if (scalar_type_) *scalar_type_ = scalar_type;
+		if (is_scalar_) *is_scalar_ = true;
+		return true;
+	}
+
+	if (!fast_backend_type_is_supported_aggregate(type)) {
+		return false;
+	}
+
+	if (scalar_type_) *scalar_type_ = {};
+	if (is_scalar_) *is_scalar_ = false;
+	return true;
 }
 
 gb_internal bool fast_backend_scalar_is_unsigned(FastScalarType type) {
@@ -497,6 +558,51 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 	return true;
 }
 
+gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
+	if (expr == nullptr || expected_type == nullptr) {
+		return false;
+	}
+
+	expected_type = default_type(expected_type);
+	if (!fast_backend_type_is_supported_aggregate(expected_type)) {
+		return false;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	expr = unparen_expr(expr);
+	switch (expr->kind) {
+	case Ast_Ident: {
+		Entity *entity = expr->Ident.entity.load();
+		Type *storage_type = nullptr;
+		if (entity != nullptr && fast_backend_find_storage(plan, entity, nullptr, &storage_type, nullptr)) {
+			return storage_type != nullptr && are_types_identical(default_type(storage_type), expected_type);
+		}
+		return tv.mode == Addressing_Constant &&
+		       tv.value.kind == ExactValue_Compound &&
+		       are_types_identical(default_type(tv.type), expected_type);
+	}
+
+	case Ast_CompoundLit:
+		return tv.mode == Addressing_Constant &&
+		       tv.value.kind == ExactValue_Compound &&
+		       are_types_identical(default_type(tv.type), expected_type);
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
+	FastScalarType scalar_type = {};
+	if (fast_backend_expr_scalar_type(expr, expected_type, &scalar_type)) {
+		return fast_backend_can_emit_leaf_expr(plan, expr, expected_type);
+	}
+	return fast_backend_can_emit_aggregate_expr(plan, expr, expected_type);
+}
+
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
 	if (expr == nullptr) {
 		return false;
@@ -635,7 +741,7 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 		return false;
 	}
 	if (vd->values.count != 0 && vd->values.count != vd->names.count) {
-		error(vd->names[0], "Fast backend currently only supports one-to-one scalar value declarations");
+		error(vd->names[0], "Fast backend currently only supports one-to-one value declarations");
 		return false;
 	}
 
@@ -655,12 +761,11 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 			return false;
 		}
 
-		FastScalarType scalar_type = {};
-		if (!fast_backend_classify_scalar_type(entity->type, &scalar_type)) {
-			error(name, "Fast backend currently only supports scalar local variable types");
+		if (!fast_backend_type_is_supported_value(entity->type, nullptr, nullptr)) {
+			error(name, "Fast backend currently only supports scalar, array, and struct local variable types");
 			return false;
 		}
-		if (!fast_backend_add_slot(plan, entity, scalar_type)) {
+		if (!fast_backend_add_slot(plan, entity, entity->type)) {
 			return false;
 		}
 	}
@@ -674,11 +779,14 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 		Entity *entity = entity_of_node(name);
 		GB_ASSERT(entity != nullptr);
 
-		if (!fast_backend_can_emit_leaf_expr(plan, rhs, entity->type)) {
+		if (!fast_backend_can_emit_value_expr(plan, rhs, entity->type)) {
 			error(rhs, "Fast backend does not yet support this value declaration expression");
 			return false;
 		}
-		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+		FastScalarType scalar_type = {};
+		if (fast_backend_expr_scalar_type(rhs, entity->type, &scalar_type)) {
+			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+		}
 	}
 
 	return true;
@@ -692,7 +800,7 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 		return false;
 	}
 	if (as->lhs.count != as->rhs.count) {
-		error(as->op, "Fast backend currently only supports one-to-one scalar assignments");
+		error(as->op, "Fast backend currently only supports one-to-one assignments");
 		return false;
 	}
 
@@ -700,22 +808,24 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 		Ast *lhs = unparen_expr(as->lhs[i]);
 		Ast *rhs = as->rhs[i];
 		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
-			if (!fast_backend_can_emit_leaf_expr(plan, rhs, type_and_value_of_expr(rhs).type)) {
+			if (!fast_backend_can_emit_value_expr(plan, rhs, type_and_value_of_expr(rhs).type)) {
 				error(rhs, "Fast backend does not yet support this discard assignment expression");
 				return false;
 			}
-			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+			FastScalarType scalar_type = {};
+			if (fast_backend_expr_scalar_type(rhs, type_and_value_of_expr(rhs).type, &scalar_type)) {
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+			}
 			continue;
 		}
 
 		Type *target_type = nullptr;
 		if (lhs->kind == Ast_Ident) {
 			Entity *entity = entity_of_node(lhs);
-			if (entity == nullptr || !fast_backend_find_scalar_storage(plan, entity, nullptr, nullptr, nullptr)) {
-				error(lhs, "Fast backend expected a scalar local, parameter, global, or pointer-dereference assignment target");
+			if (entity == nullptr || !fast_backend_find_storage(plan, entity, nullptr, &target_type, nullptr)) {
+				error(lhs, "Fast backend expected a supported local, parameter, or global assignment target");
 				return false;
 			}
-			target_type = entity->type;
 		} else if (lhs->kind == Ast_DerefExpr) {
 			if (!fast_backend_can_emit_deref_expr(plan, lhs)) {
 				error(lhs, "Fast backend expected a scalar pointer-dereference assignment target");
@@ -728,11 +838,14 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 			return false;
 		}
 
-		if (!fast_backend_can_emit_leaf_expr(plan, rhs, target_type)) {
+		if (!fast_backend_can_emit_value_expr(plan, rhs, target_type)) {
 			error(rhs, "Fast backend does not yet support this assignment expression");
 			return false;
 		}
-		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+		FastScalarType scalar_type = {};
+		if (fast_backend_expr_scalar_type(rhs, target_type, &scalar_type)) {
+			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+		}
 	}
 
 	return true;
@@ -969,6 +1082,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	plan->return_type = {};
 	plan->context_slot = {};
 	plan->spill_depth = 0;
+	plan->local_stack_size = 0;
 	plan->proc_index = 0;
 	plan->has_context_slot = false;
 	plan->params = array_make<Entity *>(heap_allocator(), 0, pt->param_count);
@@ -992,16 +1106,18 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 				return false;
 			}
 			array_add(&plan->params, param);
-			fast_backend_add_slot(plan, param, param_type);
+			if (!fast_backend_add_slot(plan, param, param->type)) {
+				return false;
+			}
 		}
 	}
 
 	if (pt->calling_convention == ProcCC_Odin) {
 		plan->has_context_slot = true;
-		plan->context_slot.entity = nullptr;
-		plan->context_slot.type = fast_backend_context_scalar_type();
-		plan->context_slot.index = cast(i32)plan->slots.count;
-		array_add(&plan->slots, plan->context_slot);
+		if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
+			return false;
+		}
+		plan->context_slot = plan->slots[plan->slots.count-1];
 	}
 
 	if (pt->result_count > 1) {
@@ -1035,9 +1151,8 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 		return false;
 	}
 
-	FastScalarType scalar_type = {};
-	if (!fast_backend_classify_scalar_type(e->type, &scalar_type)) {
-		error(e->token, "Fast backend currently only supports scalar global variable types");
+	if (!fast_backend_type_is_supported_value(e->type, nullptr, nullptr)) {
+		error(e->token, "Fast backend currently only supports scalar, array, and struct global variable types");
 		return false;
 	}
 
@@ -1045,14 +1160,14 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	Ast *init_expr = decl != nullptr ? decl->init_expr : e->Variable.init_expr;
 
 	plan->entity = e;
-	plan->type = scalar_type;
-	plan->init_value = 0;
+	plan->value_type = e->type;
+	plan->init_data = nullptr;
 	plan->size = cast(i32)type_size_of(e->type);
 	plan->align = cast(i32)type_align_of(e->type);
-	plan->has_init_value = false;
+	plan->has_init_data = false;
 
 	if (plan->size <= 0 || plan->align <= 0) {
-		error(e->token, "Fast backend expected a sized scalar global variable");
+		error(e->token, "Fast backend expected a sized global variable");
 		return false;
 	}
 	if (init_expr == nullptr) {
@@ -1063,19 +1178,14 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	if (tv.mode == Addressing_Invalid) {
 		return false;
 	}
-	if (tv.mode == Addressing_Constant) {
-		if (!fast_backend_exact_value_as_u64(tv.value, scalar_type, &plan->init_value)) {
-			if (!(scalar_type.kind == FastScalar_Pointer && is_type_untyped_nil(tv.type))) {
-				error(init_expr, "Fast backend does not yet support this global constant initializer");
-				return false;
-			}
-			plan->init_value = 0;
+	if (tv.mode == Addressing_Constant || is_type_untyped_nil(tv.type)) {
+		plan->init_data = gb_alloc_array(heap_allocator(), u8, plan->size);
+		gb_zero_size(plan->init_data, plan->size);
+		if (!fast_backend_serialize_constant_value(e->type, init_expr, plan->init_data)) {
+			error(init_expr, "Fast backend does not yet support this global constant initializer");
+			return false;
 		}
-		plan->has_init_value = true;
-		return true;
-	}
-	if (scalar_type.kind == FastScalar_Pointer && is_type_untyped_nil(tv.type)) {
-		plan->has_init_value = true;
+		plan->has_init_data = true;
 		return true;
 	}
 
@@ -1183,6 +1293,10 @@ gb_internal FastX64RegNames const *fast_backend_x64_tmp_reg(void) {
 	return &fast_x64_reg_r11;
 }
 
+gb_internal FastX64RegNames const *fast_backend_x64_scratch_reg(void) {
+	return &fast_x64_reg_rax;
+}
+
 gb_internal ProcCallingConvention fast_backend_effective_calling_convention(TypeProc *pt) {
 	ProcCallingConvention cc = pt->calling_convention;
 	if (cc == ProcCC_CDecl) {
@@ -1223,6 +1337,10 @@ gb_internal char const *fast_backend_arm64_div_tmp_reg(void) {
 	return "x11";
 }
 
+gb_internal char const *fast_backend_arm64_addr_tmp_reg(void) {
+	return "x12";
+}
+
 gb_internal char const *fast_backend_arm64_param_reg(i32 index) {
 	static char const *regs[] = {"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"};
 	return index < cast(i32)gb_count_of(regs) ? regs[index] : nullptr;
@@ -1258,23 +1376,39 @@ gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, 
 }
 
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot) {
-	return 8 * (plan->spill_depth + slot.index + 1);
+	return 8 * plan->spill_depth + slot.offset;
 }
 
-gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, FastScalarType type) {
+gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, Type *type) {
 	if (fast_backend_find_slot(plan, entity, nullptr)) {
 		return true;
 	}
 
+	FastScalarType scalar_type = {};
+	bool is_scalar = false;
+	if (!fast_backend_type_is_supported_value(type, &scalar_type, &is_scalar)) {
+		return false;
+	}
+
 	FastLocalSlot slot = {};
 	slot.entity = entity;
-	slot.type = type;
+	slot.value_type = type;
+	slot.type = scalar_type;
 	slot.index = cast(i32)plan->slots.count;
+	slot.is_scalar = is_scalar;
+	slot.size = cast(i32)type_size_of(type);
+	slot.align = cast(i32)type_align_of(type);
+	if (slot.size <= 0 || slot.align <= 0) {
+		return false;
+	}
+	plan->local_stack_size = align_formula(plan->local_stack_size, slot.align);
+	slot.offset = plan->local_stack_size + slot.size;
+	plan->local_stack_size = slot.offset;
 	array_add(&plan->slots, slot);
 	return true;
 }
 
-gb_internal bool fast_backend_entity_is_scalar_global(FastLeafProcPlan *plan, Entity *entity, FastScalarType *type_) {
+gb_internal bool fast_backend_entity_is_supported_global(FastLeafProcPlan *plan, Entity *entity, Type **type_, FastScalarType *scalar_type_, bool *is_scalar_) {
 	if (entity == nullptr || entity->kind != Entity_Variable) {
 		return false;
 	}
@@ -1282,32 +1416,57 @@ gb_internal bool fast_backend_entity_is_scalar_global(FastLeafProcPlan *plan, En
 		return false;
 	}
 
-	FastScalarType type = {};
-	if (!fast_backend_classify_scalar_type(entity->type, &type)) {
+	FastScalarType scalar_type = {};
+	bool is_scalar = false;
+	if (!fast_backend_type_is_supported_value(entity->type, &scalar_type, &is_scalar)) {
 		return false;
 	}
 
-	if (type_) *type_ = type;
+	if (type_) *type_ = entity->type;
+	if (scalar_type_) *scalar_type_ = scalar_type;
+	if (is_scalar_) *is_scalar_ = is_scalar;
 	return entity->Variable.is_global || entity->Variable.is_foreign || fast_entity_is_local(plan->info, entity);
 }
 
-gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_) {
+gb_internal bool fast_backend_find_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, Type **type_, bool *is_global_) {
 	FastLocalSlot slot = {};
 	if (fast_backend_find_slot(plan, entity, &slot)) {
 		if (slot_) *slot_ = slot;
-		if (type_) *type_ = slot.type;
+		if (type_) *type_ = slot.value_type;
 		if (is_global_) *is_global_ = false;
 		return true;
 	}
 
-	FastScalarType type = {};
-	if (!fast_backend_entity_is_scalar_global(plan, entity, &type)) {
+	Type *type = nullptr;
+	if (!fast_backend_entity_is_supported_global(plan, entity, &type, nullptr, nullptr)) {
 		return false;
 	}
 
 	if (slot_) *slot_ = {};
 	if (type_) *type_ = type;
 	if (is_global_) *is_global_ = true;
+	return true;
+}
+
+gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_) {
+	FastLocalSlot slot = {};
+	Type *type = nullptr;
+	bool is_global = false;
+	if (!fast_backend_find_storage(plan, entity, &slot, &type, &is_global)) {
+		return false;
+	}
+	if (!is_global && !slot.is_scalar) {
+		return false;
+	}
+	FastScalarType scalar_type = {};
+	bool is_scalar = false;
+	if (!fast_backend_type_is_supported_value(type, &scalar_type, &is_scalar) || !is_scalar) {
+		return false;
+	}
+
+	if (slot_) *slot_ = slot;
+	if (type_) *type_ = scalar_type;
+	if (is_global_) *is_global_ = is_global;
 	return true;
 }
 
@@ -1337,6 +1496,181 @@ gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarTyp
 		}
 		return true;
 	}
+	return false;
+}
+
+gb_internal void fast_backend_store_scalar_bytes(u8 *dst, i32 size, u64 value) {
+	for (i32 i = 0; i < size; i++) {
+		dst[i] = cast(u8)((value >> (8*i)) & 0xff);
+	}
+}
+
+gb_internal bool fast_backend_serialize_constant_aggregate(Type *type, Ast *expr, u8 *dst);
+
+gb_internal bool fast_backend_serialize_constant_value(Type *type, Ast *expr, u8 *dst) {
+	type = default_type(type);
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode == Addressing_Invalid) {
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (fast_backend_classify_scalar_type(type, &scalar_type)) {
+		u64 value = 0;
+		if (is_type_untyped_nil(tv.type)) {
+			if (scalar_type.kind != FastScalar_Pointer) {
+				return false;
+			}
+		} else {
+			if (tv.mode != Addressing_Constant || !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+				return false;
+			}
+		}
+		fast_backend_store_scalar_bytes(dst, fast_backend_scalar_byte_size(scalar_type), value);
+		return true;
+	}
+
+	return fast_backend_serialize_constant_aggregate(type, expr, dst);
+}
+
+gb_internal bool fast_backend_serialize_constant_struct(Type *type, AstCompoundLit *cl, u8 *dst) {
+	type_set_offsets(type);
+	gb_zero_size(dst, cast(isize)type_size_of(type));
+	if (cl->elems.count == 0) {
+		return true;
+	}
+
+	if (cl->elems[0]->kind == Ast_FieldValue) {
+		for (Ast *elem : cl->elems) {
+			if (elem == nullptr || elem->kind != Ast_FieldValue) {
+				return false;
+			}
+			ast_node(fv, FieldValue, elem);
+			Entity *field = entity_of_node(fv->field);
+			if (field == nullptr || field->kind != Entity_Variable) {
+				return false;
+			}
+			i32 field_index = field->Variable.field_index;
+			Type *field_type = nullptr;
+			i64 offset = type_offset_of(type, field_index, &field_type);
+			if (offset < 0 || field_type == nullptr) {
+				return false;
+			}
+			if (!fast_backend_serialize_constant_value(field_type, fv->value, dst + offset)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	if (cl->elems.count > type->Struct.fields.count) {
+		return false;
+	}
+
+	for_array(i, cl->elems) {
+		Type *field_type = nullptr;
+		i64 offset = type_offset_of(type, i, &field_type);
+		if (offset < 0 || field_type == nullptr) {
+			return false;
+		}
+		if (!fast_backend_serialize_constant_value(field_type, cl->elems[i], dst + offset)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_serialize_constant_array(Type *type, AstCompoundLit *cl, u8 *dst) {
+	Type *elem_type = type->Array.elem;
+	i64 elem_size = type_size_of(elem_type);
+	if (elem_size < 0) {
+		return false;
+	}
+
+	gb_zero_size(dst, cast(isize)type_size_of(type));
+	if (cl->elems.count == 0) {
+		return true;
+	}
+
+	if (cl->elems[0]->kind == Ast_FieldValue) {
+		for (Ast *elem : cl->elems) {
+			if (elem == nullptr || elem->kind != Ast_FieldValue) {
+				return false;
+			}
+			ast_node(fv, FieldValue, elem);
+			if (is_ast_range(fv->field)) {
+				ast_node(range, BinaryExpr, fv->field);
+				TypeAndValue lo_tav = type_and_value_of_expr(range->left);
+				TypeAndValue hi_tav = type_and_value_of_expr(range->right);
+				if (lo_tav.mode != Addressing_Constant || hi_tav.mode != Addressing_Constant) {
+					return false;
+				}
+				i64 lo = exact_value_to_i64(lo_tav.value);
+				i64 hi = exact_value_to_i64(hi_tav.value);
+				if (range->op.kind != Token_RangeHalf) {
+					hi += 1;
+				}
+				if (lo < 0 || hi < lo || hi > type->Array.count) {
+					return false;
+				}
+				for (i64 index = lo; index < hi; index++) {
+					if (!fast_backend_serialize_constant_value(elem_type, fv->value, dst + index*elem_size)) {
+						return false;
+					}
+				}
+			} else {
+				TypeAndValue index_tav = type_and_value_of_expr(fv->field);
+				if (index_tav.mode != Addressing_Constant) {
+					return false;
+				}
+				i64 index = exact_value_to_i64(index_tav.value);
+				if (index < 0 || index >= type->Array.count) {
+					return false;
+				}
+				if (!fast_backend_serialize_constant_value(elem_type, fv->value, dst + index*elem_size)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	if (cl->elems.count > type->Array.count) {
+		return false;
+	}
+
+	for_array(i, cl->elems) {
+		if (!fast_backend_serialize_constant_value(elem_type, cl->elems[i], dst + i*elem_size)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_serialize_constant_aggregate(Type *type, Ast *expr, u8 *dst) {
+	type = default_type(type);
+	if (!fast_backend_type_is_supported_aggregate(type)) {
+		return false;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (tv.mode != Addressing_Constant || tv.value.kind != ExactValue_Compound) {
+		return false;
+	}
+
+	Ast *compound = tv.value.value_compound;
+	if (compound == nullptr || compound->kind != Ast_CompoundLit) {
+		return false;
+	}
+	ast_node(cl, CompoundLit, compound);
+
+	switch (base_type(type)->kind) {
+	case Type_Array:
+		return fast_backend_serialize_constant_array(type, cl, dst);
+	case Type_Struct:
+		return fast_backend_serialize_constant_struct(type, cl, dst);
+	}
+
 	return false;
 }
 
@@ -1500,6 +1834,167 @@ gb_internal void fast_backend_emit_arm64_store_to_address(gbFile *file, char con
 	}
 }
 
+gb_internal void fast_backend_emit_arm64_add_offset(gbFile *file, char const *dst, char const *base, i32 offset) {
+	if (offset == 0) {
+		if (dst != base) {
+			gb_fprintf(file, "\tmov %s, %s\n", dst, base);
+		}
+		return;
+	}
+	if (offset > 0 && offset <= 4095) {
+		gb_fprintf(file, "\tadd %s, %s, #%d\n", dst, base, offset);
+		return;
+	}
+	if (offset < 0 && -offset <= 4095) {
+		gb_fprintf(file, "\tsub %s, %s, #%d\n", dst, base, -offset);
+		return;
+	}
+
+	fast_backend_emit_arm64_load_imm(file, fast_backend_arm64_div_tmp_reg(), cast(u64)gb_abs(offset));
+	gb_fprintf(file, "\t%s %s, %s, %s\n", offset > 0 ? "add" : "sub", dst, base, fast_backend_arm64_div_tmp_reg());
+}
+
+gb_internal void fast_backend_emit_x64_store_immediate_bytes(gbFile *file, FastX64RegNames const *base, u8 const *bytes, i32 size) {
+	i32 offset = 0;
+	while (offset < size) {
+		i32 chunk = 1;
+		if (size-offset >= 8) {
+			chunk = 8;
+		} else if (size-offset >= 4) {
+			chunk = 4;
+		} else if (size-offset >= 2) {
+			chunk = 2;
+		}
+
+		u64 value = 0;
+		for (i32 i = 0; i < chunk; i++) {
+			value |= cast(u64)bytes[offset+i] << (8*i);
+		}
+
+		fast_backend_emit_x64_load_imm(file, fast_backend_x64_scratch_reg(), value);
+		switch (chunk) {
+		case 8: gb_fprintf(file, "\tmov QWORD PTR [%s + %d], %s\n", base->r64, offset, fast_backend_x64_scratch_reg()->r64); break;
+		case 4: gb_fprintf(file, "\tmov DWORD PTR [%s + %d], %s\n", base->r64, offset, fast_backend_x64_scratch_reg()->r32); break;
+		case 2: gb_fprintf(file, "\tmov WORD PTR [%s + %d], %s\n",  base->r64, offset, fast_backend_x64_scratch_reg()->r16); break;
+		case 1: gb_fprintf(file, "\tmov BYTE PTR [%s + %d], %s\n",  base->r64, offset, fast_backend_x64_scratch_reg()->r8); break;
+		}
+		offset += chunk;
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_store_immediate_bytes(gbFile *file, char const *base, u8 const *bytes, i32 size) {
+	i32 offset = 0;
+	while (offset < size) {
+		i32 chunk = 1;
+		if (size-offset >= 8) {
+			chunk = 8;
+		} else if (size-offset >= 4) {
+			chunk = 4;
+		} else if (size-offset >= 2) {
+			chunk = 2;
+		}
+
+		u64 value = 0;
+		for (i32 i = 0; i < chunk; i++) {
+			value |= cast(u64)bytes[offset+i] << (8*i);
+		}
+
+		fast_backend_emit_arm64_load_imm(file, fast_backend_arm64_div_tmp_reg(), value);
+		fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), base, offset);
+		switch (chunk) {
+		case 8: gb_fprintf(file, "\tstr %s, [%s]\n",  fast_backend_arm64_div_tmp_reg(), fast_backend_arm64_addr_tmp_reg()); break;
+		case 4: gb_fprintf(file, "\tstr w%s, [%s]\n", fast_backend_arm64_div_tmp_reg()+1, fast_backend_arm64_addr_tmp_reg()); break;
+		case 2: gb_fprintf(file, "\tstrh w%s, [%s]\n", fast_backend_arm64_div_tmp_reg()+1, fast_backend_arm64_addr_tmp_reg()); break;
+		case 1: gb_fprintf(file, "\tstrb w%s, [%s]\n", fast_backend_arm64_div_tmp_reg()+1, fast_backend_arm64_addr_tmp_reg()); break;
+		}
+		offset += chunk;
+	}
+}
+
+gb_internal void fast_backend_emit_store_immediate_bytes(FastLeafProcEmitter *emitter, u8 const *bytes, i32 size) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_store_immediate_bytes(emitter->file, fast_backend_x64_work_reg(), bytes, size);
+	} else {
+		fast_backend_emit_arm64_store_immediate_bytes(emitter->file, fast_backend_arm64_work_reg(), bytes, size);
+	}
+}
+
+gb_internal void fast_backend_emit_copy_bytes_between_addresses(FastLeafProcEmitter *emitter, i32 size) {
+	i32 offset = 0;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		auto *dst = fast_backend_x64_work_reg();
+		auto *src = fast_backend_x64_tmp_reg();
+		auto *scratch = fast_backend_x64_scratch_reg();
+		while (offset < size) {
+			i32 chunk = 1;
+			if (size-offset >= 8) {
+				chunk = 8;
+			} else if (size-offset >= 4) {
+				chunk = 4;
+			} else if (size-offset >= 2) {
+				chunk = 2;
+			}
+
+			switch (chunk) {
+			case 8:
+				gb_fprintf(emitter->file, "\tmov %s, QWORD PTR [%s + %d]\n", scratch->r64, src->r64, offset);
+				gb_fprintf(emitter->file, "\tmov QWORD PTR [%s + %d], %s\n", dst->r64, offset, scratch->r64);
+				break;
+			case 4:
+				gb_fprintf(emitter->file, "\tmov %s, DWORD PTR [%s + %d]\n", scratch->r32, src->r64, offset);
+				gb_fprintf(emitter->file, "\tmov DWORD PTR [%s + %d], %s\n", dst->r64, offset, scratch->r32);
+				break;
+			case 2:
+				gb_fprintf(emitter->file, "\tmovzx %s, WORD PTR [%s + %d]\n", scratch->r64, src->r64, offset);
+				gb_fprintf(emitter->file, "\tmov WORD PTR [%s + %d], %s\n", dst->r64, offset, scratch->r16);
+				break;
+			case 1:
+				gb_fprintf(emitter->file, "\tmovzx %s, BYTE PTR [%s + %d]\n", scratch->r64, src->r64, offset);
+				gb_fprintf(emitter->file, "\tmov BYTE PTR [%s + %d], %s\n", dst->r64, offset, scratch->r8);
+				break;
+			}
+			offset += chunk;
+		}
+	} else {
+		char const *dst = fast_backend_arm64_work_reg();
+		char const *src = fast_backend_arm64_tmp_reg();
+		char const *value = fast_backend_arm64_div_tmp_reg();
+		char const *addr  = fast_backend_arm64_addr_tmp_reg();
+		while (offset < size) {
+			i32 chunk = 1;
+			if (size-offset >= 8) {
+				chunk = 8;
+			} else if (size-offset >= 4) {
+				chunk = 4;
+			} else if (size-offset >= 2) {
+				chunk = 2;
+			}
+
+			fast_backend_emit_arm64_add_offset(emitter->file, addr, src, offset);
+			switch (chunk) {
+			case 8: gb_fprintf(emitter->file, "\tldr %s, [%s]\n",  value, addr); break;
+			case 4: gb_fprintf(emitter->file, "\tldr w%s, [%s]\n", value+1, addr); break;
+			case 2: gb_fprintf(emitter->file, "\tldrh w%s, [%s]\n", value+1, addr); break;
+			case 1: gb_fprintf(emitter->file, "\tldrb w%s, [%s]\n", value+1, addr); break;
+			}
+			fast_backend_emit_arm64_add_offset(emitter->file, addr, dst, offset);
+			switch (chunk) {
+			case 8: gb_fprintf(emitter->file, "\tstr %s, [%s]\n",  value, addr); break;
+			case 4: gb_fprintf(emitter->file, "\tstr w%s, [%s]\n", value+1, addr); break;
+			case 2: gb_fprintf(emitter->file, "\tstrh w%s, [%s]\n", value+1, addr); break;
+			case 1: gb_fprintf(emitter->file, "\tstrb w%s, [%s]\n", value+1, addr); break;
+			}
+			offset += chunk;
+		}
+	}
+}
+
+gb_internal void fast_backend_emit_zero_bytes_at_work_address(FastLeafProcEmitter *emitter, i32 size) {
+	auto *zero_bytes = gb_alloc_array(temporary_allocator(), u8, size);
+	gb_zero_size(zero_bytes, size);
+	fast_backend_emit_store_immediate_bytes(emitter, zero_bytes, size);
+}
+
 gb_internal void fast_backend_emit_x64_canonicalize(gbFile *file, FastX64RegNames const *reg, FastScalarType type) {
 	switch (type.kind) {
 	case FastScalar_Bool:
@@ -1579,14 +2074,14 @@ gb_internal bool fast_backend_emit_leaf_cast(FastLeafProcEmitter *emitter, Ast *
 	return true;
 }
 
-gb_internal bool fast_backend_emit_address_of_scalar_entity(FastLeafProcEmitter *emitter, Entity *entity) {
+gb_internal bool fast_backend_emit_address_of_storage_entity(FastLeafProcEmitter *emitter, Entity *entity) {
 	FastLocalSlot slot = {};
-	FastScalarType scalar_type = {};
+	Type *type = nullptr;
 	bool is_global = false;
-	if (!fast_backend_find_scalar_storage(emitter->plan, entity, &slot, &scalar_type, &is_global)) {
+	if (!fast_backend_find_storage(emitter->plan, entity, &slot, &type, &is_global)) {
 		return false;
 	}
-	gb_unused(scalar_type);
+	gb_unused(type);
 
 	if (is_global) {
 		if (build_context.metrics.arch == TargetArch_amd64) {
@@ -1601,7 +2096,7 @@ gb_internal bool fast_backend_emit_address_of_scalar_entity(FastLeafProcEmitter 
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\tlea %s, [rbp-%d]\n", fast_backend_x64_work_reg()->r64, offset);
 	} else {
-		gb_fprintf(emitter->file, "\tsub %s, x29, #%d\n", fast_backend_arm64_work_reg(), offset);
+		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_work_reg(), "x29", -offset);
 	}
 	return true;
 }
@@ -1681,7 +2176,7 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 		return true;
 	}
 
-	if (!fast_backend_entity_is_scalar_global(emitter->plan, entity, &scalar_type)) {
+	if (!fast_backend_entity_is_supported_global(emitter->plan, entity, nullptr, &scalar_type, nullptr)) {
 		return false;
 	}
 	if (build_context.metrics.arch == TargetArch_amd64) {
@@ -1791,7 +2286,7 @@ gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast 
 		if (!fast_backend_find_addressable_scalar_entity(emitter->plan, expr->UnaryExpr.expr, &entity, nullptr)) {
 			return false;
 		}
-		return fast_backend_emit_address_of_scalar_entity(emitter, entity);
+		return fast_backend_emit_address_of_storage_entity(emitter, entity);
 	}
 
 	Type *expr_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr).type);
@@ -2225,6 +2720,99 @@ gb_internal void fast_backend_emit_zero_slot(FastLeafProcEmitter *emitter, FastL
 	}
 }
 
+gb_internal bool fast_backend_emit_zero_storage_entity(FastLeafProcEmitter *emitter, Entity *entity) {
+	FastLocalSlot slot = {};
+	Type *type = nullptr;
+	bool is_global = false;
+	if (!fast_backend_find_storage(emitter->plan, entity, &slot, &type, &is_global) || type == nullptr) {
+		return false;
+	}
+
+	if (!slot.is_scalar || is_global) {
+		if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+			return false;
+		}
+		fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(type));
+		return true;
+	}
+
+	fast_backend_emit_zero_slot(emitter, slot);
+	return true;
+}
+
+gb_internal bool fast_backend_emit_store_constant_aggregate_to_entity(FastLeafProcEmitter *emitter, Entity *entity, Type *type, Ast *expr) {
+	i32 size = cast(i32)type_size_of(type);
+	if (size <= 0) {
+		return false;
+	}
+
+	auto bytes = gb_alloc_array(temporary_allocator(), u8, size);
+	gb_zero_size(bytes, size);
+	if (!fast_backend_serialize_constant_value(type, expr, bytes)) {
+		return false;
+	}
+	if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+		return false;
+	}
+	fast_backend_emit_store_immediate_bytes(emitter, bytes, size);
+	return true;
+}
+
+gb_internal bool fast_backend_emit_copy_aggregate_entity_to_entity(FastLeafProcEmitter *emitter, Entity *dst_entity, Entity *src_entity, Type *type) {
+	i32 size = cast(i32)type_size_of(type);
+	Type *src_type = nullptr;
+	if (!fast_backend_find_storage(emitter->plan, src_entity, nullptr, &src_type, nullptr)) {
+		return false;
+	}
+	if (src_type == nullptr || !are_types_identical(default_type(src_type), default_type(type))) {
+		return false;
+	}
+	if (size <= 0) {
+		return false;
+	}
+
+	if (!fast_backend_emit_address_of_storage_entity(emitter, src_entity)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	if (!fast_backend_emit_address_of_storage_entity(emitter, dst_entity)) {
+		return false;
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_copy_bytes_between_addresses(emitter, size);
+	return true;
+}
+
+gb_internal bool fast_backend_emit_store_value_to_entity(FastLeafProcEmitter *emitter, Entity *entity, Ast *expr) {
+	Type *type = entity != nullptr ? entity->type : nullptr;
+	if (type == nullptr) {
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (fast_backend_expr_scalar_type(expr, type, &scalar_type)) {
+		if (!fast_backend_emit_leaf_expr(emitter, expr)) {
+			return false;
+		}
+		return fast_backend_emit_store_to_scalar_storage(emitter, entity);
+	}
+
+	type = default_type(type);
+	if (!fast_backend_type_is_supported_aggregate(type)) {
+		return false;
+	}
+
+	expr = unparen_expr(expr);
+	if (expr->kind == Ast_Ident) {
+		Entity *src_entity = expr->Ident.entity.load();
+		if (src_entity != nullptr && fast_backend_find_storage(emitter->plan, src_entity, nullptr, nullptr, nullptr)) {
+			return fast_backend_emit_copy_aggregate_entity_to_entity(emitter, entity, src_entity, type);
+		}
+	}
+
+	return fast_backend_emit_store_constant_aggregate_to_entity(emitter, entity, type, expr);
+}
+
 gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt);
 
 gb_internal bool fast_backend_emit_stmt_list(FastLeafProcEmitter *emitter, Slice<Ast *> const &stmts) {
@@ -2254,14 +2842,13 @@ gb_internal bool fast_backend_emit_value_decl(FastLeafProcEmitter *emitter, AstV
 		}
 
 		if (vd->values.count == 0) {
-			fast_backend_emit_zero_slot(emitter, slot);
+			if (!fast_backend_emit_zero_storage_entity(emitter, entity)) {
+				return false;
+			}
 			continue;
 		}
 
-		if (!fast_backend_emit_leaf_expr(emitter, vd->values[i])) {
-			return false;
-		}
-		if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+		if (!fast_backend_emit_store_value_to_entity(emitter, entity, vd->values[i])) {
 			return false;
 		}
 	}
@@ -2273,22 +2860,24 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
 		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
-			if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
+			Type *rhs_type = reduce_tuple_to_single_type(type_and_value_of_expr(as->rhs[i]).type);
+			FastScalarType scalar_type = {};
+			if (rhs_type != nullptr && fast_backend_expr_scalar_type(as->rhs[i], rhs_type, &scalar_type)) {
+				if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
+					return false;
+				}
+			} else if (!fast_backend_can_emit_aggregate_expr(emitter->plan, as->rhs[i], rhs_type)) {
 				return false;
 			}
 			continue;
 		}
 
-		if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
-			return false;
-		}
-
 		if (lhs->kind == Ast_Ident) {
 			Entity *entity = entity_of_node(lhs);
-			if (entity == nullptr || !fast_backend_find_scalar_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
+			if (entity == nullptr || !fast_backend_find_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
 				return false;
 			}
-			if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+			if (!fast_backend_emit_store_value_to_entity(emitter, entity, as->rhs[i])) {
 				return false;
 			}
 			continue;
@@ -2581,7 +3170,7 @@ gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
 	}
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
-	i32 slot_bytes = 8 * cast(i32)emitter->plan->slots.count;
+	i32 slot_bytes = emitter->plan->local_stack_size;
 	i32 frame_size = align_formula(spill_bytes + slot_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\tpush rbp\n");
@@ -2657,7 +3246,7 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 	}
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
-	i32 slot_bytes = 8 * cast(i32)emitter->plan->slots.count;
+	i32 slot_bytes = emitter->plan->local_stack_size;
 	i32 frame_size = align_formula(spill_bytes + slot_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		if (frame_size > 0) {
@@ -2697,7 +3286,7 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.current_spill_depth = 0;
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
-	emitter.use_frame = plan->spill_depth > 0 || plan->slots.count > 0;
+	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;
 
 	fast_backend_emit_leaf_prologue(&emitter);
 	if (!fast_backend_emit_param_spills(&emitter)) {
@@ -2741,22 +3330,19 @@ gb_internal void fast_backend_emit_global_section(gbFile *file, Entity *entity) 
 }
 
 gb_internal void fast_backend_emit_global_init_value(gbFile *file, FastGlobalVarPlan const &plan) {
-	switch (plan.size) {
-	case 1:
-		gb_fprintf(file, "\t.byte %llu\n", cast(unsigned long long)(plan.init_value & 0xff));
-		return;
-	case 2:
-		gb_fprintf(file, "\t.short %llu\n", cast(unsigned long long)(plan.init_value & 0xffff));
-		return;
-	case 4:
-		gb_fprintf(file, "\t.long %llu\n", cast(unsigned long long)(plan.init_value & 0xffffffffull));
-		return;
-	case 8:
-		gb_fprintf(file, "\t.quad %llu\n", cast(unsigned long long)plan.init_value);
-		return;
+	GB_ASSERT(plan.init_data != nullptr);
+	for (i32 offset = 0; offset < plan.size; ) {
+		i32 count = gb_min(16, plan.size-offset);
+		gb_fprintf(file, "\t.byte ");
+		for (i32 i = 0; i < count; i++) {
+			if (i != 0) {
+				gb_fprintf(file, ", ");
+			}
+			gb_fprintf(file, "%u", cast(unsigned)plan.init_data[offset+i]);
+		}
+		gb_fprintf(file, "\n");
+		offset += count;
 	}
-
-	gb_fprintf(file, "\t.zero %d\n", plan.size);
 }
 
 gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan const &plan) {
@@ -2774,7 +3360,7 @@ gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan co
 		gb_fprintf(file, ".p2align %u, 0x0\n", cast(unsigned)floor_log2(cast(u64)plan.align));
 	}
 	gb_fprintf(file, "\"%.*s\":\n", LIT(asm_name));
-	if (plan.has_init_value) {
+	if (plan.has_init_data) {
 		fast_backend_emit_global_init_value(file, plan);
 	} else {
 		gb_fprintf(file, "\t.zero %d\n", plan.size);
