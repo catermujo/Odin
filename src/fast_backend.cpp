@@ -357,6 +357,40 @@ gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, F
 	return fast_backend_classify_scalar_type(type, out);
 }
 
+gb_internal bool fast_backend_find_addressable_scalar_entity(FastLeafProcPlan *plan, Ast *expr, Entity **entity_, FastScalarType *type_) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr || expr->kind != Ast_Ident) {
+		return false;
+	}
+
+	Entity *entity = expr->Ident.entity.load();
+	FastScalarType scalar_type = {};
+	if (entity == nullptr || !fast_backend_find_scalar_storage(plan, entity, nullptr, &scalar_type, nullptr)) {
+		return false;
+	}
+
+	if (entity_) *entity_ = entity;
+	if (type_) *type_ = scalar_type;
+	return true;
+}
+
+gb_internal bool fast_backend_deref_expr_is_supported(FastLeafProcPlan *plan, Ast *expr) {
+	if (expr == nullptr || expr->kind != Ast_DerefExpr) {
+		return false;
+	}
+
+	Type *pointer_type = base_type(type_of_expr(expr->DerefExpr.expr));
+	if (pointer_type == nullptr || pointer_type->kind != Type_Pointer) {
+		return false;
+	}
+
+	FastScalarType result_type = {};
+	if (!fast_backend_expr_scalar_type(nullptr, type_of_expr(expr), &result_type)) {
+		return false;
+	}
+	return fast_backend_leaf_expr_is_supported(plan, expr->DerefExpr.expr, type_of_expr(expr->DerefExpr.expr));
+}
+
 gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast *operand, Type *target_type, TokenKind cast_kind) {
 	FastScalarType source_type = {};
 	FastScalarType result_type = {};
@@ -535,6 +569,9 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 		return e != nullptr && fast_backend_find_scalar_storage(plan, e, nullptr, nullptr, nullptr);
 	}
 
+	case Ast_DerefExpr:
+		return fast_backend_deref_expr_is_supported(plan, expr);
+
 	case Ast_CallExpr:
 		return fast_backend_call_expr_is_supported(plan, &expr->CallExpr, false);
 
@@ -559,6 +596,8 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 		}
 
 		switch (expr->UnaryExpr.op.kind) {
+		case Token_And:
+			return fast_backend_find_addressable_scalar_entity(plan, expr->UnaryExpr.expr, nullptr, nullptr);
 		case Token_Add:
 			return true;
 		case Token_Sub:
@@ -701,13 +740,8 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
-		if (lhs->kind != Ast_Ident) {
-			error(lhs, "Fast backend currently only supports identifier assignment targets");
-			return false;
-		}
-
 		Ast *rhs = as->rhs[i];
-		if (is_blank_ident(lhs)) {
+		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
 			if (!fast_backend_leaf_expr_is_supported(plan, rhs, type_and_value_of_expr(rhs).type)) {
 				error(rhs, "Fast backend does not yet support this discard assignment expression");
 				return false;
@@ -716,13 +750,27 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 			continue;
 		}
 
-		Entity *entity = entity_of_node(lhs);
-		if (entity == nullptr || !fast_backend_find_scalar_storage(plan, entity, nullptr, nullptr, nullptr)) {
-			error(lhs, "Fast backend expected a scalar local, parameter, or global assignment target");
+		Type *target_type = nullptr;
+		if (lhs->kind == Ast_Ident) {
+			Entity *entity = entity_of_node(lhs);
+			if (entity == nullptr || !fast_backend_find_scalar_storage(plan, entity, nullptr, nullptr, nullptr)) {
+				error(lhs, "Fast backend expected a scalar local, parameter, global, or pointer-dereference assignment target");
+				return false;
+			}
+			target_type = entity->type;
+		} else if (lhs->kind == Ast_DerefExpr) {
+			if (!fast_backend_deref_expr_is_supported(plan, lhs)) {
+				error(lhs, "Fast backend expected a scalar pointer-dereference assignment target");
+				return false;
+			}
+			target_type = type_of_expr(lhs);
+			plan->spill_depth = gb_max(plan->spill_depth, 1 + fast_backend_leaf_expr_spill_depth(lhs->DerefExpr.expr));
+		} else {
+			error(lhs, "Fast backend currently only supports identifier and scalar pointer-dereference assignment targets");
 			return false;
 		}
 
-		if (!fast_backend_leaf_expr_is_supported(plan, rhs, entity->type)) {
+		if (!fast_backend_leaf_expr_is_supported(plan, rhs, target_type)) {
 			error(rhs, "Fast backend does not yet support this assignment expression");
 			return false;
 		}
@@ -1573,6 +1621,50 @@ gb_internal bool fast_backend_emit_leaf_cast(FastLeafProcEmitter *emitter, Ast *
 	return true;
 }
 
+gb_internal bool fast_backend_emit_address_of_scalar_entity(FastLeafProcEmitter *emitter, Entity *entity) {
+	FastLocalSlot slot = {};
+	FastScalarType scalar_type = {};
+	bool is_global = false;
+	if (!fast_backend_find_scalar_storage(emitter->plan, entity, &slot, &scalar_type, &is_global)) {
+		return false;
+	}
+	gb_unused(scalar_type);
+
+	if (is_global) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_x64_work_reg());
+		} else {
+			fast_backend_emit_arm64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_arm64_work_reg());
+		}
+		return true;
+	}
+
+	i32 offset = fast_backend_slot_offset(emitter->plan, slot);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tlea %s, [rbp-%d]\n", fast_backend_x64_work_reg()->r64, offset);
+	} else {
+		gb_fprintf(emitter->file, "\tsub %s, x29, #%d\n", fast_backend_arm64_work_reg(), offset);
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_emit_leaf_deref(FastLeafProcEmitter *emitter, Ast *expr) {
+	FastScalarType result_type = {};
+	if (!fast_backend_expr_scalar_type(nullptr, type_of_expr(expr), &result_type)) {
+		return false;
+	}
+	if (!fast_backend_emit_leaf_expr(emitter, expr->DerefExpr.expr)) {
+		return false;
+	}
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), result_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), result_type);
+	}
+	return true;
+}
+
 gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast *expr) {
 	TypeAndValue tv = type_and_value_of_expr(expr);
 	Type *expr_type = reduce_tuple_to_single_type(tv.type);
@@ -1736,6 +1828,14 @@ gb_internal bool fast_backend_emit_call_expr(FastLeafProcEmitter *emitter, AstCa
 }
 
 gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast *expr) {
+	if (expr->UnaryExpr.op.kind == Token_And) {
+		Entity *entity = nullptr;
+		if (!fast_backend_find_addressable_scalar_entity(emitter->plan, expr->UnaryExpr.expr, &entity, nullptr)) {
+			return false;
+		}
+		return fast_backend_emit_address_of_scalar_entity(emitter, entity);
+	}
+
 	Type *expr_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr).type);
 	FastScalarType scalar_type = {};
 	if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
@@ -1998,6 +2098,8 @@ gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *
 	switch (expr->kind) {
 	case Ast_ParenExpr:
 		return fast_backend_emit_leaf_expr(emitter, expr->ParenExpr.expr);
+	case Ast_DerefExpr:
+		return fast_backend_emit_leaf_deref(emitter, expr);
 	case Ast_TypeCast:
 		return fast_backend_emit_leaf_cast(emitter, expr->TypeCast.expr, reduce_tuple_to_single_type(tv.type));
 	case Ast_AutoCast:
@@ -2219,15 +2321,38 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 			continue;
 		}
 
-		Entity *entity = entity_of_node(lhs);
-		if (entity == nullptr || !fast_backend_find_scalar_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
-			return false;
-		}
 		if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
 			return false;
 		}
-		if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+
+		if (lhs->kind == Ast_Ident) {
+			Entity *entity = entity_of_node(lhs);
+			if (entity == nullptr || !fast_backend_find_scalar_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
+				return false;
+			}
+			if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+				return false;
+			}
+			continue;
+		}
+
+		if (lhs->kind != Ast_DerefExpr) {
 			return false;
+		}
+
+		FastScalarType result_type = {};
+		if (!fast_backend_expr_scalar_type(nullptr, type_of_expr(lhs), &result_type)) {
+			return false;
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (!fast_backend_emit_leaf_expr(emitter, lhs->DerefExpr.expr)) {
+			return false;
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_store_to_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_tmp_reg(), result_type);
+		} else {
+			fast_backend_emit_arm64_store_to_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_tmp_reg(), result_type);
 		}
 	}
 
