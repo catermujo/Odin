@@ -39,6 +39,7 @@ struct FastLeafProcEmitter {
 	FastLeafProcPlan *plan;
 	i32 current_spill_depth;
 	i32 epilogue_label_index;
+	i32 next_label_index;
 	bool use_frame;
 };
 
@@ -469,6 +470,24 @@ gb_internal bool fast_backend_plan_return_stmt(FastBackendGenerator *gen, FastLe
 	return true;
 }
 
+gb_internal bool fast_backend_plan_if_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstIfStmt *is) {
+	if (is->init != nullptr && !fast_backend_plan_stmt(gen, plan, is->init)) {
+		return false;
+	}
+	if (!fast_backend_leaf_expr_is_supported(plan, is->cond, type_and_value_of_expr(is->cond).type)) {
+		error(is->cond, "Fast backend does not yet support this if condition");
+		return false;
+	}
+	plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(is->cond));
+	if (!fast_backend_plan_stmt(gen, plan, is->body)) {
+		return false;
+	}
+	if (is->else_stmt != nullptr && !fast_backend_plan_stmt(gen, plan, is->else_stmt)) {
+		return false;
+	}
+	return true;
+}
+
 gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, Ast *stmt) {
 	if (stmt == nullptr) {
 		return true;
@@ -483,11 +502,13 @@ gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcP
 		return fast_backend_plan_value_decl(gen, plan, &stmt->ValueDecl);
 	case Ast_AssignStmt:
 		return fast_backend_plan_assign_stmt(gen, plan, &stmt->AssignStmt);
+	case Ast_IfStmt:
+		return fast_backend_plan_if_stmt(gen, plan, &stmt->IfStmt);
 	case Ast_ReturnStmt:
 		return fast_backend_plan_return_stmt(gen, plan, &stmt->ReturnStmt);
 	}
 
-	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, and returns");
+	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, if statements, and returns");
 	return false;
 }
 
@@ -1215,6 +1236,24 @@ gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan 
 	}
 }
 
+gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter) {
+	i32 label = emitter->next_label_index;
+	emitter->next_label_index += 1;
+	return label;
+}
+
+gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i32 label_index) {
+	char label[64] = {};
+	fast_backend_make_label_name(label, gb_size_of(label), emitter->plan, label_index);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tcmp %s, 0\n", fast_backend_x64_work_reg()->r64);
+		gb_fprintf(emitter->file, "\tje %s\n", label);
+	} else {
+		gb_fprintf(emitter->file, "\tcmp %s, #0\n", fast_backend_arm64_work_reg());
+		gb_fprintf(emitter->file, "\tb.eq %s\n", label);
+	}
+}
+
 gb_internal void fast_backend_emit_store_work_to_slot(FastLeafProcEmitter *emitter, FastLocalSlot const &slot) {
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_x64_work_reg());
@@ -1309,6 +1348,36 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 	return true;
 }
 
+gb_internal bool fast_backend_emit_if_stmt(FastLeafProcEmitter *emitter, AstIfStmt *is) {
+	if (is->init != nullptr && !fast_backend_emit_stmt(emitter, is->init)) {
+		return false;
+	}
+	if (!fast_backend_emit_leaf_expr(emitter, is->cond)) {
+		return false;
+	}
+
+	i32 false_label = fast_backend_alloc_label(emitter);
+	i32 done_label = is->else_stmt != nullptr ? fast_backend_alloc_label(emitter) : false_label;
+	fast_backend_emit_jump_if_zero(emitter, false_label);
+
+	if (!fast_backend_emit_stmt(emitter, is->body)) {
+		return false;
+	}
+
+	if (is->else_stmt != nullptr) {
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+		fast_backend_emit_label(emitter->file, emitter->plan, false_label);
+		if (!fast_backend_emit_stmt(emitter, is->else_stmt)) {
+			return false;
+		}
+		fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+	} else {
+		fast_backend_emit_label(emitter->file, emitter->plan, false_label);
+	}
+
+	return true;
+}
+
 gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt) {
 	if (stmt == nullptr) {
 		return true;
@@ -1323,6 +1392,8 @@ gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt)
 		return fast_backend_emit_value_decl(emitter, &stmt->ValueDecl);
 	case Ast_AssignStmt:
 		return fast_backend_emit_assign_stmt(emitter, &stmt->AssignStmt);
+	case Ast_IfStmt:
+		return fast_backend_emit_if_stmt(emitter, &stmt->IfStmt);
 	case Ast_ReturnStmt:
 		return fast_backend_emit_return_stmt(emitter, &stmt->ReturnStmt);
 	}
@@ -1431,6 +1502,7 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.plan = plan;
 	emitter.current_spill_depth = 0;
 	emitter.epilogue_label_index = 0;
+	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->slots.count > 0;
 
 	fast_backend_emit_leaf_prologue(&emitter);
