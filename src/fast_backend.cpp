@@ -24,6 +24,7 @@ struct FastLocalSlot {
 
 struct FastLeafProcPlan {
 	Entity *entity;
+	CheckerInfo *info;
 	TypeProc *type;
 	Array<Entity *> params;
 	Array<FastLocalSlot> slots;
@@ -34,6 +35,15 @@ struct FastLeafProcPlan {
 	i32 proc_index;
 	bool has_context_slot;
 	bool has_result;
+};
+
+struct FastGlobalVarPlan {
+	Entity *entity;
+	FastScalarType type;
+	u64 init_value;
+	i32 size;
+	i32 align;
+	bool has_init_value;
 };
 
 struct FastLeafProcEmitter {
@@ -51,6 +61,8 @@ gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, F
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
 gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
+gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
 
 gb_internal bool fast_backend_is_local_entity(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -188,10 +200,25 @@ gb_internal bool fast_backend_scalar_supports_ordered_cmp(FastScalarType type) {
 	return false;
 }
 
+gb_internal i32 fast_backend_scalar_byte_size(FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+		return 1;
+	case FastScalar_Signed:
+	case FastScalar_Unsigned:
+		return cast(i32)gb_max(type.bit_size/8, cast(i64)1);
+	case FastScalar_Pointer:
+		return build_context.metrics.ptr_size;
+	}
+	return 0;
+}
+
 gb_internal String fast_backend_get_entity_name(Entity *e) {
 	GB_ASSERT(e != nullptr);
 	if (e->kind == Entity_Procedure && e->Procedure.link_name.len != 0) {
 		return e->Procedure.link_name;
+	} else if (e->kind == Entity_Variable && e->Variable.link_name.len != 0) {
+		return e->Variable.link_name;
 	}
 
 	if (e->pkg == nullptr) {
@@ -204,6 +231,8 @@ gb_internal String fast_backend_get_entity_name(Entity *e) {
 	String name = copy_string(permanent_allocator(), make_string(cast(u8 const *)w, gb_string_length(w)));
 	if (e->kind == Entity_Procedure) {
 		e->Procedure.link_name = name;
+	} else if (e->kind == Entity_Variable) {
+		e->Variable.link_name = name;
 	}
 	return name;
 }
@@ -223,7 +252,10 @@ gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 	if (flags & EntityFlag_CustomLinkage_Strong) {
 		return true;
 	}
-	if (e->Procedure.is_export) {
+	if (e->kind == Entity_Procedure && e->Procedure.is_export) {
+		return true;
+	}
+	if (e->kind == Entity_Variable && e->Variable.is_export) {
 		return true;
 	}
 	if (build_context.use_separate_modules) {
@@ -372,6 +404,10 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 	if (tv.mode == Addressing_Invalid) {
 		return false;
 	}
+	if (is_type_untyped_nil(tv.type)) {
+		FastScalarType type = {};
+		return fast_backend_classify_scalar_type(expected_type ? expected_type : tv.type, &type);
+	}
 	if (tv.mode == Addressing_Constant) {
 		FastScalarType type = {};
 		return fast_backend_classify_scalar_type(expected_type ? expected_type : tv.type, &type);
@@ -386,7 +422,7 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 
 	case Ast_Ident: {
 		Entity *e = expr->Ident.entity.load();
-		return e != nullptr && fast_backend_find_slot(plan, e, nullptr);
+		return e != nullptr && fast_backend_find_scalar_storage(plan, e, nullptr, nullptr, nullptr);
 	}
 
 	case Ast_CallExpr:
@@ -423,7 +459,7 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 		}
 
 		if (!fast_backend_leaf_expr_is_supported(plan, expr->BinaryExpr.left, operand_type) ||
-		    !fast_backend_leaf_expr_is_supported(plan, expr->BinaryExpr.right, reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.right).type))) {
+		    !fast_backend_leaf_expr_is_supported(plan, expr->BinaryExpr.right, operand_type)) {
 			return false;
 		}
 
@@ -551,8 +587,8 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 		}
 
 		Entity *entity = entity_of_node(lhs);
-		if (entity == nullptr || !fast_backend_find_slot(plan, entity, nullptr)) {
-			error(lhs, "Fast backend expected a local or parameter assignment target");
+		if (entity == nullptr || !fast_backend_find_scalar_storage(plan, entity, nullptr, nullptr, nullptr)) {
+			error(lhs, "Fast backend expected a scalar local, parameter, or global assignment target");
 			return false;
 		}
 
@@ -675,6 +711,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastBackendGenerator *gen, Entity *
 	}
 
 	plan->entity = e;
+	plan->info = gen->info;
 	plan->type = pt;
 	plan->body = decl->proc_lit->ProcLit.body;
 	plan->has_result = false;
@@ -735,7 +772,67 @@ gb_internal bool fast_backend_plan_leaf_proc(FastBackendGenerator *gen, Entity *
 	return fast_backend_plan_stmt_list(gen, plan, bs->stmts);
 }
 
-gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Array<FastLeafProcPlan> *procedures) {
+gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan) {
+	GB_ASSERT(e != nullptr);
+	GB_ASSERT(e->kind == Entity_Variable);
+
+	if (e->Variable.is_foreign) {
+		return false;
+	}
+	if (e->Variable.thread_local_model.len != 0) {
+		error(e->token, "Fast backend does not yet support thread local global variables");
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(e->type, &scalar_type)) {
+		error(e->token, "Fast backend currently only supports scalar global variable types");
+		return false;
+	}
+
+	DeclInfo *decl = decl_info_of_entity(e);
+	Ast *init_expr = decl != nullptr ? decl->init_expr : e->Variable.init_expr;
+
+	plan->entity = e;
+	plan->type = scalar_type;
+	plan->init_value = 0;
+	plan->size = cast(i32)type_size_of(e->type);
+	plan->align = cast(i32)type_align_of(e->type);
+	plan->has_init_value = false;
+
+	if (plan->size <= 0 || plan->align <= 0) {
+		error(e->token, "Fast backend expected a sized scalar global variable");
+		return false;
+	}
+	if (init_expr == nullptr) {
+		return true;
+	}
+
+	TypeAndValue tv = type_and_value_of_expr(init_expr);
+	if (tv.mode == Addressing_Invalid) {
+		return false;
+	}
+	if (tv.mode == Addressing_Constant) {
+		if (!fast_backend_exact_value_as_u64(tv.value, scalar_type, &plan->init_value)) {
+			if (!(scalar_type.kind == FastScalar_Pointer && is_type_untyped_nil(tv.type))) {
+				error(init_expr, "Fast backend does not yet support this global constant initializer");
+				return false;
+			}
+			plan->init_value = 0;
+		}
+		plan->has_init_value = true;
+		return true;
+	}
+	if (scalar_type.kind == FastScalar_Pointer && is_type_untyped_nil(tv.type)) {
+		plan->has_init_value = true;
+		return true;
+	}
+
+	error(init_expr, "Fast backend does not yet support dynamic global initialization");
+	return false;
+}
+
+gb_internal bool fast_backend_collect_program(FastBackendGenerator *gen, Array<FastGlobalVarPlan> *globals, Array<FastLeafProcPlan> *procedures) {
 	for (Entity *e : gen->info->definitions) {
 		if (!fast_backend_is_local_entity(gen->info, e)) {
 			continue;
@@ -772,12 +869,23 @@ gb_internal bool fast_backend_collect_procedures(FastBackendGenerator *gen, Arra
 			break;
 		}
 
-		case Entity_Variable:
-			if (!e->Variable.is_foreign) {
-				error(e->token, "Fast backend does not yet support global variables");
+		case Entity_Variable: {
+			if (e->Variable.is_foreign) {
+				break;
+			}
+			if (flags & (EntityFlag_Overridden|
+			             EntityFlag_CustomLinkage_Weak|
+			             EntityFlag_CustomLinkage_LinkOnce)) {
+				error(e->token, "Fast backend does not yet support this global variable linkage");
 				return false;
 			}
+			FastGlobalVarPlan plan = {};
+			if (!fast_backend_plan_global_var(e, &plan)) {
+				return false;
+			}
+			array_add(globals, plan);
 			break;
+		}
 
 		case Entity_Constant:
 		case Entity_TypeName:
@@ -915,6 +1023,43 @@ gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, F
 	return true;
 }
 
+gb_internal bool fast_backend_entity_is_scalar_global(FastLeafProcPlan *plan, Entity *entity, FastScalarType *type_) {
+	if (entity == nullptr || entity->kind != Entity_Variable) {
+		return false;
+	}
+	if (entity->parent_proc_decl.load(std::memory_order_relaxed) != nullptr) {
+		return false;
+	}
+
+	FastScalarType type = {};
+	if (!fast_backend_classify_scalar_type(entity->type, &type)) {
+		return false;
+	}
+
+	if (type_) *type_ = type;
+	return entity->Variable.is_global || entity->Variable.is_foreign || fast_backend_is_local_entity(plan->info, entity);
+}
+
+gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_) {
+	FastLocalSlot slot = {};
+	if (fast_backend_find_slot(plan, entity, &slot)) {
+		if (slot_) *slot_ = slot;
+		if (type_) *type_ = slot.type;
+		if (is_global_) *is_global_ = false;
+		return true;
+	}
+
+	FastScalarType type = {};
+	if (!fast_backend_entity_is_scalar_global(plan, entity, &type)) {
+		return false;
+	}
+
+	if (slot_) *slot_ = {};
+	if (type_) *type_ = type;
+	if (is_global_) *is_global_ = true;
+	return true;
+}
+
 gb_internal bool fast_backend_find_param_index(FastLeafProcPlan *plan, Entity *entity, i32 *index_) {
 	for_array(i, plan->params) {
 		if (plan->params[i] == entity) {
@@ -942,6 +1087,16 @@ gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarTyp
 		return true;
 	}
 	return false;
+}
+
+gb_internal bool fast_backend_entity_uses_external_symbol(FastLeafProcPlan *plan, Entity *entity) {
+	if (entity == nullptr || entity->kind != Entity_Variable) {
+		return true;
+	}
+	if (entity->Variable.is_foreign) {
+		return true;
+	}
+	return !fast_backend_is_local_entity(plan->info, entity);
 }
 
 gb_internal void fast_backend_emit_x64_canonicalize(gbFile *file, FastX64RegNames const *reg, FastScalarType type);
@@ -991,6 +1146,106 @@ gb_internal void fast_backend_emit_arm64_load_imm(gbFile *file, char const *dst,
 		} else if (parts[i] != 0) {
 			gb_fprintf(file, "\tmovk %s, #%u, lsl #%d\n", dst, cast(unsigned)parts[i], 16*i);
 		}
+	}
+}
+
+gb_internal void fast_backend_emit_x64_load_address_of_entity(gbFile *file, FastLeafProcPlan *plan, Entity *entity, FastX64RegNames const *dst) {
+	String symbol = fast_backend_mangle_asm_name(fast_backend_get_entity_name(entity));
+	if (fast_backend_entity_uses_external_symbol(plan, entity)) {
+		gb_fprintf(file, "\tmov %s, QWORD PTR [rip + \"%.*s\"@GOTPCREL]\n", dst->r64, LIT(symbol));
+	} else {
+		gb_fprintf(file, "\tlea %s, [rip + \"%.*s\"]\n", dst->r64, LIT(symbol));
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_load_address_of_entity(gbFile *file, FastLeafProcPlan *plan, Entity *entity, char const *dst) {
+	String symbol = fast_backend_mangle_asm_name(fast_backend_get_entity_name(entity));
+	if (fast_backend_entity_uses_external_symbol(plan, entity)) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, "\tadrp %s, \"%.*s\"@GOTPAGE\n", dst, LIT(symbol));
+			gb_fprintf(file, "\tldr %s, [%s, \"%.*s\"@GOTPAGEOFF]\n", dst, dst, LIT(symbol));
+		} else {
+			gb_fprintf(file, "\tadrp %s, :got:\"%.*s\"\n", dst, LIT(symbol));
+			gb_fprintf(file, "\tldr %s, [%s, :got_lo12:\"%.*s\"]\n", dst, dst, LIT(symbol));
+		}
+	} else {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, "\tadrp %s, \"%.*s\"@PAGE\n", dst, LIT(symbol));
+			gb_fprintf(file, "\tadd %s, %s, \"%.*s\"@PAGEOFF\n", dst, dst, LIT(symbol));
+		} else {
+			gb_fprintf(file, "\tadrp %s, \"%.*s\"\n", dst, LIT(symbol));
+			gb_fprintf(file, "\tadd %s, %s, :lo12:\"%.*s\"\n", dst, dst, LIT(symbol));
+		}
+	}
+}
+
+gb_internal void fast_backend_emit_x64_load_from_address(gbFile *file, FastX64RegNames const *addr, FastX64RegNames const *dst, FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+		gb_fprintf(file, "\tmovzx %s, BYTE PTR [%s]\n", dst->r64, addr->r64);
+		return;
+	case FastScalar_Signed:
+		switch (fast_backend_scalar_byte_size(type)) {
+		case 1: gb_fprintf(file, "\tmovsx %s, BYTE PTR [%s]\n", dst->r64, addr->r64); return;
+		case 2: gb_fprintf(file, "\tmovsx %s, WORD PTR [%s]\n", dst->r64, addr->r64); return;
+		case 4: gb_fprintf(file, "\tmovsxd %s, DWORD PTR [%s]\n", dst->r64, addr->r64); return;
+		case 8: gb_fprintf(file, "\tmov %s, QWORD PTR [%s]\n", dst->r64, addr->r64); return;
+		}
+		break;
+	case FastScalar_Unsigned:
+	case FastScalar_Pointer:
+		switch (fast_backend_scalar_byte_size(type)) {
+		case 1: gb_fprintf(file, "\tmovzx %s, BYTE PTR [%s]\n", dst->r64, addr->r64); return;
+		case 2: gb_fprintf(file, "\tmovzx %s, WORD PTR [%s]\n", dst->r64, addr->r64); return;
+		case 4: gb_fprintf(file, "\tmov %s, DWORD PTR [%s]\n", dst->r32, addr->r64); return;
+		case 8: gb_fprintf(file, "\tmov %s, QWORD PTR [%s]\n", dst->r64, addr->r64); return;
+		}
+		break;
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_load_from_address(gbFile *file, char const *addr, char const *dst, FastScalarType type) {
+	switch (type.kind) {
+	case FastScalar_Bool:
+		gb_fprintf(file, "\tldrb w%s, [%s]\n", dst+1, addr);
+		return;
+	case FastScalar_Signed:
+		switch (fast_backend_scalar_byte_size(type)) {
+		case 1: gb_fprintf(file, "\tldrsb %s, [%s]\n", dst, addr); return;
+		case 2: gb_fprintf(file, "\tldrsh %s, [%s]\n", dst, addr); return;
+		case 4: gb_fprintf(file, "\tldrsw %s, [%s]\n", dst, addr); return;
+		case 8: gb_fprintf(file, "\tldr %s, [%s]\n", dst, addr); return;
+		}
+		break;
+	case FastScalar_Unsigned:
+		switch (fast_backend_scalar_byte_size(type)) {
+		case 1: gb_fprintf(file, "\tldrb w%s, [%s]\n", dst+1, addr); return;
+		case 2: gb_fprintf(file, "\tldrh w%s, [%s]\n", dst+1, addr); return;
+		case 4: gb_fprintf(file, "\tldr w%s, [%s]\n", dst+1, addr); return;
+		case 8: gb_fprintf(file, "\tldr %s, [%s]\n", dst, addr); return;
+		}
+		break;
+	case FastScalar_Pointer:
+		gb_fprintf(file, "\tldr %s, [%s]\n", dst, addr);
+		return;
+	}
+}
+
+gb_internal void fast_backend_emit_x64_store_to_address(gbFile *file, FastX64RegNames const *addr, FastX64RegNames const *src, FastScalarType type) {
+	switch (fast_backend_scalar_byte_size(type)) {
+	case 1: gb_fprintf(file, "\tmov BYTE PTR [%s], %s\n", addr->r64, src->r8); return;
+	case 2: gb_fprintf(file, "\tmov WORD PTR [%s], %s\n", addr->r64, src->r16); return;
+	case 4: gb_fprintf(file, "\tmov DWORD PTR [%s], %s\n", addr->r64, src->r32); return;
+	case 8: gb_fprintf(file, "\tmov QWORD PTR [%s], %s\n", addr->r64, src->r64); return;
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_store_to_address(gbFile *file, char const *addr, char const *src, FastScalarType type) {
+	switch (fast_backend_scalar_byte_size(type)) {
+	case 1: gb_fprintf(file, "\tstrb w%s, [%s]\n", src+1, addr); return;
+	case 2: gb_fprintf(file, "\tstrh w%s, [%s]\n", src+1, addr); return;
+	case 4: gb_fprintf(file, "\tstr w%s, [%s]\n", src+1, addr); return;
+	case 8: gb_fprintf(file, "\tstr %s, [%s]\n", src, addr); return;
 	}
 }
 
@@ -1049,13 +1304,15 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 			return false;
 		}
 		scalar_type = emitter->plan->context_slot.type;
+	} else if (is_type_untyped_nil(expr_type)) {
+		scalar_type = fast_backend_context_scalar_type();
 	} else if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
 		return false;
 	}
 
-	if (tv.mode == Addressing_Constant) {
+	if (tv.mode == Addressing_Constant || is_type_untyped_nil(expr_type)) {
 		u64 value = 0;
-		if (!fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+		if (!is_type_untyped_nil(expr_type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
 			return false;
 		}
 
@@ -1083,16 +1340,29 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 
 	Entity *entity = expr->Ident.entity.load();
 	FastLocalSlot slot = {};
-	if (entity == nullptr || !fast_backend_find_slot(emitter->plan, entity, &slot)) {
+	if (entity == nullptr) {
 		return false;
 	}
 
-	if (build_context.metrics.arch == TargetArch_amd64) {
-		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, slot, fast_backend_x64_work_reg());
-	} else {
-		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
+	if (fast_backend_find_slot(emitter->plan, entity, &slot)) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, slot, fast_backend_x64_work_reg());
+		} else {
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
+		}
+		return true;
 	}
 
+	if (!fast_backend_entity_is_scalar_global(emitter->plan, entity, &scalar_type)) {
+		return false;
+	}
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_x64_tmp_reg());
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), scalar_type);
+	} else {
+		fast_backend_emit_arm64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_arm64_tmp_reg());
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), scalar_type);
+	}
 	return true;
 }
 
@@ -1507,6 +1777,32 @@ gb_internal void fast_backend_emit_store_work_to_slot(FastLeafProcEmitter *emitt
 	}
 }
 
+gb_internal void fast_backend_emit_store_work_to_global(FastLeafProcEmitter *emitter, Entity *entity, FastScalarType type) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_x64_tmp_reg());
+		fast_backend_emit_x64_store_to_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), type);
+	} else {
+		fast_backend_emit_arm64_load_address_of_entity(emitter->file, emitter->plan, entity, fast_backend_arm64_tmp_reg());
+		fast_backend_emit_arm64_store_to_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), type);
+	}
+}
+
+gb_internal bool fast_backend_emit_store_to_scalar_storage(FastLeafProcEmitter *emitter, Entity *entity) {
+	FastLocalSlot slot = {};
+	FastScalarType scalar_type = {};
+	bool is_global = false;
+	if (!fast_backend_find_scalar_storage(emitter->plan, entity, &slot, &scalar_type, &is_global)) {
+		return false;
+	}
+
+	if (is_global) {
+		fast_backend_emit_store_work_to_global(emitter, entity, scalar_type);
+	} else {
+		fast_backend_emit_store_work_to_slot(emitter, slot);
+	}
+	return true;
+}
+
 gb_internal void fast_backend_emit_zero_slot(FastLeafProcEmitter *emitter, FastLocalSlot const &slot) {
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\txor %s, %s\n", fast_backend_x64_work_reg()->r32, fast_backend_x64_work_reg()->r32);
@@ -1555,7 +1851,9 @@ gb_internal bool fast_backend_emit_value_decl(FastLeafProcEmitter *emitter, AstV
 		if (!fast_backend_emit_leaf_expr(emitter, vd->values[i])) {
 			return false;
 		}
-		fast_backend_emit_store_work_to_slot(emitter, slot);
+		if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+			return false;
+		}
 	}
 
 	return true;
@@ -1565,14 +1863,15 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
 		Entity *entity = entity_of_node(lhs);
-		FastLocalSlot slot = {};
-		if (entity == nullptr || !fast_backend_find_slot(emitter->plan, entity, &slot)) {
+		if (entity == nullptr || !fast_backend_find_scalar_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
 			return false;
 		}
 		if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
 			return false;
 		}
-		fast_backend_emit_store_work_to_slot(emitter, slot);
+		if (!fast_backend_emit_store_to_scalar_storage(emitter, entity)) {
+			return false;
+		}
 	}
 
 	return true;
@@ -1795,7 +2094,77 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	return true;
 }
 
-gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, Array<FastLeafProcPlan> const &procedures, String asm_path) {
+gb_internal void fast_backend_emit_global_section(gbFile *file, Entity *entity) {
+	if (entity->Variable.link_section.len > 0) {
+		gb_fprintf(file, ".section %.*s\n", LIT(entity->Variable.link_section));
+		return;
+	}
+
+	if (entity->Variable.is_rodata) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, ".section __TEXT,__const\n");
+		} else if (build_context.metrics.os == TargetOs_windows) {
+			gb_fprintf(file, ".section .rdata,\"dr\"\n");
+		} else {
+			gb_fprintf(file, ".section .rodata,\"a\",@progbits\n");
+		}
+		return;
+	}
+
+	if (build_context.metrics.os == TargetOs_darwin) {
+		gb_fprintf(file, ".section __DATA,__data\n");
+	} else {
+		gb_fprintf(file, ".data\n");
+	}
+}
+
+gb_internal void fast_backend_emit_global_init_value(gbFile *file, FastGlobalVarPlan const &plan) {
+	switch (plan.size) {
+	case 1:
+		gb_fprintf(file, "\t.byte %llu\n", cast(unsigned long long)(plan.init_value & 0xff));
+		return;
+	case 2:
+		gb_fprintf(file, "\t.short %llu\n", cast(unsigned long long)(plan.init_value & 0xffff));
+		return;
+	case 4:
+		gb_fprintf(file, "\t.long %llu\n", cast(unsigned long long)(plan.init_value & 0xffffffffull));
+		return;
+	case 8:
+		gb_fprintf(file, "\t.quad %llu\n", cast(unsigned long long)plan.init_value);
+		return;
+	}
+
+	gb_fprintf(file, "\t.zero %d\n", plan.size);
+}
+
+gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan const &plan) {
+	Entity *entity = plan.entity;
+	String asm_name = fast_backend_mangle_asm_name(fast_backend_get_entity_name(entity));
+
+	fast_backend_emit_global_section(file, entity);
+	if (fast_backend_allow_external_symbol(entity)) {
+		gb_fprintf(file, ".globl \"%.*s\"\n", LIT(asm_name));
+	}
+	if (build_context.metrics.os != TargetOs_darwin && build_context.metrics.os != TargetOs_windows) {
+		gb_fprintf(file, ".type \"%.*s\",@object\n", LIT(asm_name));
+	}
+	if (plan.align > 0 && is_power_of_two(plan.align)) {
+		gb_fprintf(file, ".p2align %u, 0x0\n", cast(unsigned)floor_log2(cast(u64)plan.align));
+	}
+	gb_fprintf(file, "\"%.*s\":\n", LIT(asm_name));
+	if (plan.has_init_value) {
+		fast_backend_emit_global_init_value(file, plan);
+	} else {
+		gb_fprintf(file, "\t.zero %d\n", plan.size);
+	}
+	if (build_context.metrics.os != TargetOs_darwin && build_context.metrics.os != TargetOs_windows) {
+		gb_fprintf(file, ".size \"%.*s\", %d\n", LIT(asm_name), plan.size);
+	}
+	gb_fprintf(file, "\n");
+	return true;
+}
+
+gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, Array<FastGlobalVarPlan> const &globals, Array<FastLeafProcPlan> const &procedures, String asm_path) {
 	gb_unused(gen);
 
 	gbFile file = {};
@@ -1809,6 +2178,13 @@ gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, A
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(&file, ".intel_syntax noprefix\n");
 	}
+
+	for (auto const &plan : globals) {
+		if (!fast_backend_emit_global_var(&file, plan)) {
+			return false;
+		}
+	}
+
 	gb_fprintf(&file, ".text\n");
 
 	for (auto const &plan : procedures) {
@@ -1857,15 +2233,16 @@ gb_internal bool fast_generate_code(FastBackendGenerator *gen) {
 	GB_ASSERT(gen != nullptr);
 	GB_ASSERT(build_context.build_mode == BuildMode_Object);
 
+	auto globals = array_make<FastGlobalVarPlan>(heap_allocator(), 0, gen->info->definitions.count);
 	auto procedures = array_make<FastLeafProcPlan>(heap_allocator(), 0, gen->info->definitions.count);
-	if (!fast_backend_collect_procedures(gen, &procedures)) {
+	if (!fast_backend_collect_program(gen, &globals, &procedures)) {
 		return false;
 	}
 
 	String obj_path = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
 	String asm_path = concatenate_strings(permanent_allocator(), gen->output_base, str_lit(".fast.S"));
 
-	if (!fast_backend_write_object_assembly(gen, procedures, asm_path)) {
+	if (!fast_backend_write_object_assembly(gen, globals, procedures, asm_path)) {
 		return false;
 	}
 	if (!fast_backend_assemble_object(asm_path, obj_path)) {
