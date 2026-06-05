@@ -46,16 +46,17 @@ struct FastGlobalVarPlan {
 	bool has_init_value;
 };
 
-struct FastLoopContext {
+struct FastControlContext {
 	Ast *label;
 	i32 break_label;
 	i32 continue_label;
+	i32 fallthrough_label;
 };
 
 struct FastLeafProcEmitter {
 	gbFile *file;
 	FastLeafProcPlan *plan;
-	Array<FastLoopContext> loop_stack;
+	Array<FastControlContext> control_stack;
 	i32 current_spill_depth;
 	i32 epilogue_label_index;
 	i32 next_label_index;
@@ -272,6 +273,19 @@ gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 	return false;
 }
 
+gb_internal String fast_backend_label_name(Ast *label) {
+	if (label == nullptr) {
+		return {};
+	}
+	if (label->kind == Ast_Ident) {
+		return label->Ident.token.string;
+	}
+	if (label->kind == Ast_Label) {
+		return fast_backend_label_name(label->Label.name);
+	}
+	return {};
+}
+
 gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
 	if (expr == nullptr) {
 		return 0;
@@ -308,6 +322,30 @@ gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
 	return 0;
 }
 
+gb_internal bool fast_backend_leaf_expr_has_call(Ast *expr) {
+	if (expr == nullptr) {
+		return false;
+	}
+
+	switch (expr->kind) {
+	case Ast_ParenExpr:
+		return fast_backend_leaf_expr_has_call(expr->ParenExpr.expr);
+	case Ast_TypeCast:
+		return fast_backend_leaf_expr_has_call(expr->TypeCast.expr);
+	case Ast_AutoCast:
+		return fast_backend_leaf_expr_has_call(expr->AutoCast.expr);
+	case Ast_UnaryExpr:
+		return fast_backend_leaf_expr_has_call(expr->UnaryExpr.expr);
+	case Ast_BinaryExpr:
+		return fast_backend_leaf_expr_has_call(expr->BinaryExpr.left) ||
+		       fast_backend_leaf_expr_has_call(expr->BinaryExpr.right);
+	case Ast_CallExpr:
+		return true;
+	}
+
+	return false;
+}
+
 gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out) {
 	Type *type = reduce_tuple_to_single_type(expected_type);
 	if (type == nullptr && expr != nullptr) {
@@ -342,6 +380,30 @@ gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast
 		}
 	}
 	return true;
+}
+
+gb_internal bool fast_backend_switch_case_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *tag_type) {
+	expr = unparen_expr(expr);
+	if (is_ast_range(expr)) {
+		FastScalarType scalar_type = {};
+		if (!fast_backend_classify_scalar_type(tag_type, &scalar_type) ||
+		    !fast_backend_scalar_supports_ordered_cmp(scalar_type)) {
+			return false;
+		}
+
+		Ast *lhs = expr->BinaryExpr.left;
+		Ast *rhs = expr->BinaryExpr.right;
+		if (fast_backend_leaf_expr_has_call(lhs) || fast_backend_leaf_expr_has_call(rhs)) {
+			return false;
+		}
+		return fast_backend_leaf_expr_is_supported(plan, lhs, tag_type) &&
+		       fast_backend_leaf_expr_is_supported(plan, rhs, tag_type);
+	}
+
+	if (fast_backend_leaf_expr_has_call(expr)) {
+		return false;
+	}
+	return fast_backend_leaf_expr_is_supported(plan, expr, tag_type);
 }
 
 gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_type_, Entity **proc_entity_, FastScalarType *result_type_, bool *has_result_) {
@@ -733,6 +795,72 @@ gb_internal bool fast_backend_plan_for_stmt(FastBackendGenerator *gen, FastLeafP
 	return true;
 }
 
+gb_internal bool fast_backend_plan_switch_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstSwitchStmt *ss) {
+	if (ss->partial) {
+		error(ss->token, "Fast backend does not yet support #partial switch statements");
+		return false;
+	}
+	if (ss->label != nullptr && fast_backend_label_name(ss->label).len == 0) {
+		error(ss->label, "Fast backend expected an identifier switch label");
+		return false;
+	}
+	if (ss->init != nullptr && !fast_backend_plan_stmt(gen, plan, ss->init)) {
+		return false;
+	}
+	if (ss->body == nullptr || ss->body->kind != Ast_BlockStmt) {
+		error(ss->token, "Fast backend expected a switch body block");
+		return false;
+	}
+
+	Type *tag_type = t_bool;
+	if (ss->tag != nullptr) {
+		tag_type = reduce_tuple_to_single_type(type_and_value_of_expr(ss->tag).type);
+		FastScalarType scalar_type = {};
+		if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
+			error(ss->tag, "Fast backend currently only supports scalar switch tags");
+			return false;
+		}
+		if (fast_backend_leaf_expr_has_call(ss->tag)) {
+			error(ss->tag, "Fast backend switch tags cannot contain calls yet");
+			return false;
+		}
+		if (!fast_backend_leaf_expr_is_supported(plan, ss->tag, tag_type)) {
+			error(ss->tag, "Fast backend does not yet support this switch tag expression");
+			return false;
+		}
+		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(ss->tag));
+	}
+
+	for (Ast *stmt : ss->body->BlockStmt.stmts) {
+		if (stmt == nullptr || stmt->kind != Ast_CaseClause) {
+			error(stmt ? stmt : cast(Ast *)ss, "Fast backend expected switch case clauses");
+			return false;
+		}
+
+		AstCaseClause *cc = &stmt->CaseClause;
+		for (Ast *expr : cc->list) {
+			if (!fast_backend_switch_case_expr_is_supported(plan, expr, tag_type)) {
+				error(expr, "Fast backend does not yet support this switch case expression");
+				return false;
+			}
+
+			expr = unparen_expr(expr);
+			if (is_ast_range(expr)) {
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.left));
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.right));
+			} else {
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr));
+			}
+		}
+
+		if (!fast_backend_plan_stmt_list(gen, plan, cc->stmts)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 gb_internal bool fast_backend_plan_branch_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstBranchStmt *bs) {
 	gb_unused(gen);
 	gb_unused(plan);
@@ -740,14 +868,20 @@ gb_internal bool fast_backend_plan_branch_stmt(FastBackendGenerator *gen, FastLe
 	switch (bs->token.kind) {
 	case Token_break:
 	case Token_continue:
-		if (bs->label != nullptr && bs->label->kind != Ast_Ident) {
+		if (bs->label != nullptr && fast_backend_label_name(bs->label).len == 0) {
 			error(bs->label, "Fast backend expected an identifier label");
+			return false;
+		}
+		return true;
+	case Token_fallthrough:
+		if (bs->label != nullptr) {
+			error(bs->label, "Fast backend does not support labeled fallthrough statements");
 			return false;
 		}
 		return true;
 	}
 
-	error(bs->token, "Fast backend currently only supports 'break' and 'continue' branch statements");
+	error(bs->token, "Fast backend currently only supports 'break', 'continue', and 'fallthrough' branch statements");
 	return false;
 }
 
@@ -786,13 +920,15 @@ gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcP
 		return fast_backend_plan_if_stmt(gen, plan, &stmt->IfStmt);
 	case Ast_ForStmt:
 		return fast_backend_plan_for_stmt(gen, plan, &stmt->ForStmt);
+	case Ast_SwitchStmt:
+		return fast_backend_plan_switch_stmt(gen, plan, &stmt->SwitchStmt);
 	case Ast_BranchStmt:
 		return fast_backend_plan_branch_stmt(gen, plan, &stmt->BranchStmt);
 	case Ast_ReturnStmt:
 		return fast_backend_plan_return_stmt(gen, plan, &stmt->ReturnStmt);
 	}
 
-	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, call statements, if statements, for statements, break/continue, and returns");
+	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, call statements, if statements, for statements, switch statements, break/continue, and returns");
 	return false;
 }
 
@@ -1903,17 +2039,35 @@ gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter) {
 	return label;
 }
 
-gb_internal FastLoopContext *fast_backend_find_loop_context(FastLeafProcEmitter *emitter, Ast *label) {
-	for (isize i = emitter->loop_stack.count; i-- > 0;) {
-		FastLoopContext *ctx = &emitter->loop_stack[i];
-		if (label == nullptr) {
+gb_internal FastControlContext *fast_backend_find_control_context(FastLeafProcEmitter *emitter, Ast *label, TokenKind token_kind) {
+	for (isize i = emitter->control_stack.count; i-- > 0;) {
+		FastControlContext *ctx = &emitter->control_stack[i];
+		if (label != nullptr) {
+			String ctx_label = fast_backend_label_name(ctx->label);
+			String want_label = fast_backend_label_name(label);
+			if (ctx_label.len == 0 || want_label.len == 0 || ctx_label != want_label) {
+				continue;
+			}
+		}
+
+		i32 target_label = -1;
+		switch (token_kind) {
+		case Token_break:
+			target_label = ctx->break_label;
+			break;
+		case Token_continue:
+			target_label = ctx->continue_label;
+			break;
+		case Token_fallthrough:
+			target_label = ctx->fallthrough_label;
+			break;
+		}
+
+		if (target_label >= 0) {
 			return ctx;
 		}
-		if (ctx->label != nullptr &&
-		    ctx->label->kind == Ast_Ident &&
-		    label->kind == Ast_Ident &&
-		    ctx->label->Ident.token.string == label->Ident.token.string) {
-			return ctx;
+		if (label != nullptr) {
+			return nullptr;
 		}
 	}
 	return nullptr;
@@ -1929,6 +2083,40 @@ gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i3
 		gb_fprintf(emitter->file, "\tcmp %s, #0\n", fast_backend_arm64_work_reg());
 		gb_fprintf(emitter->file, "\tb.eq %s\n", label);
 	}
+}
+
+gb_internal void fast_backend_emit_jump_if_compare(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType type, i32 true_label, i32 false_label) {
+	char true_name[64] = {};
+	char false_name[64] = {};
+	fast_backend_make_label_name(true_name, gb_size_of(true_name), emitter->plan, true_label);
+	fast_backend_make_label_name(false_name, gb_size_of(false_name), emitter->plan, false_label);
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		char const *suffix = fast_backend_x64_cmp_suffix(op, type);
+		GB_ASSERT(suffix != nullptr);
+		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_work_reg()->r64);
+		gb_fprintf(emitter->file, "\tj%s %s\n", suffix, true_name);
+		gb_fprintf(emitter->file, "\tjmp %s\n", false_name);
+	} else {
+		char const *suffix = fast_backend_arm64_cmp_suffix(op, type);
+		GB_ASSERT(suffix != nullptr);
+		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg());
+		gb_fprintf(emitter->file, "\tb.%s %s\n", suffix, true_name);
+		gb_fprintf(emitter->file, "\tb %s\n", false_name);
+	}
+}
+
+gb_internal bool fast_backend_emit_compare_exprs_branch(FastLeafProcEmitter *emitter, Ast *left, Ast *right, FastScalarType type, TokenKind op, i32 true_label, i32 false_label) {
+	if (!fast_backend_emit_leaf_expr(emitter, left)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	if (!fast_backend_emit_leaf_expr(emitter, right)) {
+		return false;
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, op, type, true_label, false_label);
+	return true;
 }
 
 gb_internal void fast_backend_emit_store_work_to_slot(FastLeafProcEmitter *emitter, FastLocalSlot const &slot) {
@@ -2100,12 +2288,13 @@ gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstFor
 	i32 post_label = fs->post != nullptr ? fast_backend_alloc_label(emitter) : loop_label;
 	i32 done_label = fast_backend_alloc_label(emitter);
 
-	FastLoopContext ctx = {};
+	FastControlContext ctx = {};
 	ctx.label = fs->label;
 	ctx.break_label = done_label;
 	ctx.continue_label = post_label;
-	array_add(&emitter->loop_stack, ctx);
-	defer (emitter->loop_stack.count -= 1);
+	ctx.fallthrough_label = -1;
+	array_add(&emitter->control_stack, ctx);
+	defer (emitter->control_stack.count -= 1);
 
 	fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
 	if (fs->cond != nullptr) {
@@ -2131,8 +2320,122 @@ gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstFor
 	return true;
 }
 
+gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, AstSwitchStmt *ss) {
+	if (ss->init != nullptr && !fast_backend_emit_stmt(emitter, ss->init)) {
+		return false;
+	}
+	if (ss->body == nullptr || ss->body->kind != Ast_BlockStmt) {
+		return false;
+	}
+
+	Type *tag_type = t_bool;
+	FastScalarType scalar_type = {};
+	if (ss->tag != nullptr) {
+		tag_type = reduce_tuple_to_single_type(type_and_value_of_expr(ss->tag).type);
+	}
+	if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
+		return false;
+	}
+
+	auto body_labels = array_make<i32>(temporary_allocator(), 0, ss->body->BlockStmt.stmts.count);
+	i32 default_label = -1;
+	i32 done_label = fast_backend_alloc_label(emitter);
+
+	for (Ast *stmt : ss->body->BlockStmt.stmts) {
+		if (stmt == nullptr || stmt->kind != Ast_CaseClause) {
+			return false;
+		}
+		i32 body_label = fast_backend_alloc_label(emitter);
+		array_add(&body_labels, body_label);
+		if (stmt->CaseClause.list.count == 0) {
+			default_label = body_label;
+		}
+	}
+
+	for_array(i, ss->body->BlockStmt.stmts) {
+		Ast *stmt = ss->body->BlockStmt.stmts[i];
+		AstCaseClause *cc = &stmt->CaseClause;
+		if (cc->list.count == 0) {
+			continue;
+		}
+
+		i32 body_label = body_labels[i];
+		for_array(j, cc->list) {
+			Ast *expr = unparen_expr(cc->list[j]);
+			i32 next_label = fast_backend_alloc_label(emitter);
+
+			if (ss->tag == nullptr) {
+				if (!fast_backend_emit_leaf_expr(emitter, expr)) {
+					return false;
+				}
+				fast_backend_emit_jump_if_zero(emitter, next_label);
+				fast_backend_emit_jump_to_label(emitter->file, emitter->plan, body_label);
+				fast_backend_emit_label(emitter->file, emitter->plan, next_label);
+				continue;
+			}
+
+			if (is_ast_range(expr)) {
+				Ast *lhs = expr->BinaryExpr.left;
+				Ast *rhs = expr->BinaryExpr.right;
+				i32 upper_check_label = fast_backend_alloc_label(emitter);
+				TokenKind upper_op = Token_Invalid;
+				switch (expr->BinaryExpr.op.kind) {
+				case Token_Ellipsis:
+				case Token_RangeFull:
+					upper_op = Token_LtEq;
+					break;
+				case Token_RangeHalf:
+					upper_op = Token_Lt;
+					break;
+				default:
+					return false;
+				}
+				if (!fast_backend_emit_compare_exprs_branch(emitter, lhs, ss->tag, scalar_type, Token_LtEq, upper_check_label, next_label)) {
+					return false;
+				}
+				fast_backend_emit_label(emitter->file, emitter->plan, upper_check_label);
+				if (!fast_backend_emit_compare_exprs_branch(emitter, ss->tag, rhs, scalar_type, upper_op, body_label, next_label)) {
+					return false;
+				}
+			} else {
+				if (!fast_backend_emit_compare_exprs_branch(emitter, ss->tag, expr, scalar_type, Token_CmpEq, body_label, next_label)) {
+					return false;
+				}
+			}
+
+			fast_backend_emit_label(emitter->file, emitter->plan, next_label);
+		}
+	}
+
+	if (default_label >= 0) {
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, default_label);
+	} else {
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+	}
+
+	for_array(i, ss->body->BlockStmt.stmts) {
+		Ast *stmt = ss->body->BlockStmt.stmts[i];
+		AstCaseClause *cc = &stmt->CaseClause;
+		fast_backend_emit_label(emitter->file, emitter->plan, body_labels[i]);
+		FastControlContext ctx = {};
+		ctx.label = ss->label;
+		ctx.break_label = done_label;
+		ctx.continue_label = -1;
+		ctx.fallthrough_label = i+1 < body_labels.count ? body_labels[i+1] : done_label;
+		array_add(&emitter->control_stack, ctx);
+		defer (emitter->control_stack.count -= 1);
+		if (!fast_backend_emit_stmt_list(emitter, cc->stmts)) {
+			return false;
+		}
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+	}
+
+	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_branch_stmt(FastLeafProcEmitter *emitter, AstBranchStmt *bs) {
-	FastLoopContext *ctx = fast_backend_find_loop_context(emitter, bs->label);
+	FastControlContext *ctx = fast_backend_find_control_context(emitter, bs->label, bs->token.kind);
 	if (ctx == nullptr) {
 		return false;
 	}
@@ -2143,6 +2446,9 @@ gb_internal bool fast_backend_emit_branch_stmt(FastLeafProcEmitter *emitter, Ast
 		return true;
 	case Token_continue:
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, ctx->continue_label);
+		return true;
+	case Token_fallthrough:
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, ctx->fallthrough_label);
 		return true;
 	}
 	return false;
@@ -2175,6 +2481,8 @@ gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt)
 		return fast_backend_emit_if_stmt(emitter, &stmt->IfStmt);
 	case Ast_ForStmt:
 		return fast_backend_emit_for_stmt(emitter, &stmt->ForStmt);
+	case Ast_SwitchStmt:
+		return fast_backend_emit_switch_stmt(emitter, &stmt->SwitchStmt);
 	case Ast_BranchStmt:
 		return fast_backend_emit_branch_stmt(emitter, &stmt->BranchStmt);
 	case Ast_ReturnStmt:
@@ -2302,7 +2610,7 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	FastLeafProcEmitter emitter = {};
 	emitter.file = file;
 	emitter.plan = plan;
-	emitter.loop_stack = array_make<FastLoopContext>(heap_allocator(), 0, 4);
+	emitter.control_stack = array_make<FastControlContext>(heap_allocator(), 0, 4);
 	emitter.current_spill_depth = 0;
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
