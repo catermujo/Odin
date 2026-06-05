@@ -2575,6 +2575,7 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 	}
 
 	timings_print_all(t);
+	show_checker_global_entity_timings(t);
 
 	PRINT_PEAK_USAGE();
 

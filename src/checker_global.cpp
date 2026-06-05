@@ -1554,6 +1554,7 @@ gb_internal void check_global_group(Checker *c, GlobalGroupGraph *g, i32 gi) {
 	global_group_current = gi;
 	for (i32 k = 0; k < group->count; k++) {
 		Entity *e = g->nodes[members[k]];
+		checker_global_entity_timing_note_entity((e->flags & EntityFlag_Lazy) != 0);
 		if (e->flags & EntityFlag_Lazy) {
 			// NOTE: only checked when something uses it; the group orders it after what it names
 			continue;
@@ -1562,13 +1563,23 @@ gb_internal void check_global_group(Checker *c, GlobalGroupGraph *g, i32 gi) {
 		GlobalEntityTimingFrame timing_frame = global_entity_timing_begin(e);
 		check_single_global_entity(c, e, e->decl_info, &untyped);
 		if (e->type != nullptr && is_type_typed(e->type)) {
+			u64 soa_start = checker_global_entity_timing_state.enabled ? time_stamp_time_now() : 0;
+			isize soa_completion_count = 0;
 			for (Type *t : soa_types) {
 				complete_soa_type(c, t, false);
+				soa_completion_count += 1;
 			}
 			array_clear(&soa_types);
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_soa_ticks(time_stamp_time_now() - soa_start, soa_completion_count);
+			}
 
+			u64 layout_start = checker_global_entity_timing_state.enabled ? time_stamp_time_now() : 0;
 			(void)type_size_of(e->type);
 			(void)type_align_of(e->type);
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_layout_ticks(time_stamp_time_now() - layout_start);
+			}
 		}
 		global_entity_timing_end(timing_frame, e);
 	}
@@ -1700,6 +1711,9 @@ gb_internal void destroy_global_groups(GlobalGroupGraph *g) {
 
 gb_internal void check_all_global_entities(Checker *c) {
 	in_global_entity_stage.store(true, std::memory_order_relaxed);
+	checker_global_entity_timing_reset();
+	checker_global_entity_timing_state.enabled = build_context.show_more_timings;
+	checker_global_variable_timing_state.enabled = build_context.show_more_timings;
 
 	// NOTE(bill): the runtime types the checker looks up by name rather than through a declaration
 	init_preload(c);
@@ -1730,6 +1744,8 @@ gb_internal void check_all_global_entities(Checker *c) {
 	}
 
 	in_global_entity_stage.store(false, std::memory_order_relaxed);
+	checker_global_entity_timing_state.enabled = false;
+	checker_global_variable_timing_state.enabled = false;
 }
 
 
