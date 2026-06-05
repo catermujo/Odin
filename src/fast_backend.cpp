@@ -67,6 +67,7 @@ gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot c
 gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, FastScalarType type);
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
+gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out);
 gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
@@ -279,6 +280,10 @@ gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
 	switch (expr->kind) {
 	case Ast_ParenExpr:
 		return fast_backend_leaf_expr_spill_depth(expr->ParenExpr.expr);
+	case Ast_TypeCast:
+		return fast_backend_leaf_expr_spill_depth(expr->TypeCast.expr);
+	case Ast_AutoCast:
+		return fast_backend_leaf_expr_spill_depth(expr->AutoCast.expr);
 	case Ast_UnaryExpr:
 		return fast_backend_leaf_expr_spill_depth(expr->UnaryExpr.expr);
 	case Ast_BinaryExpr: {
@@ -301,6 +306,42 @@ gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
 	}
 
 	return 0;
+}
+
+gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out) {
+	Type *type = reduce_tuple_to_single_type(expected_type);
+	if (type == nullptr && expr != nullptr) {
+		type = reduce_tuple_to_single_type(type_and_value_of_expr(expr).type);
+	}
+	if (type == nullptr || is_type_untyped_nil(type)) {
+		return false;
+	}
+	return fast_backend_classify_scalar_type(type, out);
+}
+
+gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast *operand, Type *target_type, TokenKind cast_kind) {
+	FastScalarType source_type = {};
+	FastScalarType result_type = {};
+	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(operand).type);
+	if (!fast_backend_expr_scalar_type(operand, operand_type, &source_type)) {
+		return false;
+	}
+	if (!fast_backend_expr_scalar_type(nullptr, target_type, &result_type)) {
+		return false;
+	}
+	if (!fast_backend_leaf_expr_is_supported(plan, operand, operand_type)) {
+		return false;
+	}
+	if (cast_kind == Token_transmute) {
+		if (fast_backend_scalar_byte_size(source_type) != fast_backend_scalar_byte_size(result_type)) {
+			return false;
+		}
+		if ((source_type.kind == FastScalar_Bool || result_type.kind == FastScalar_Bool) &&
+		    source_type.kind != result_type.kind) {
+			return false;
+		}
+	}
+	return true;
 }
 
 gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_type_, Entity **proc_entity_, FastScalarType *result_type_, bool *has_result_) {
@@ -434,6 +475,16 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 
 	case Ast_CallExpr:
 		return fast_backend_call_expr_is_supported(plan, &expr->CallExpr, false);
+
+	case Ast_TypeCast: {
+		Type *result_type = reduce_tuple_to_single_type(tv.type);
+		return fast_backend_cast_expr_is_supported(plan, expr->TypeCast.expr, result_type, expr->TypeCast.token.kind);
+	}
+
+	case Ast_AutoCast: {
+		Type *result_type = reduce_tuple_to_single_type(tv.type);
+		return fast_backend_cast_expr_is_supported(plan, expr->AutoCast.expr, result_type, Token_cast);
+	}
 
 	case Ast_UnaryExpr: {
 		Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->UnaryExpr.expr).type);
@@ -1351,7 +1402,40 @@ gb_internal void fast_backend_emit_arm64_canonicalize(gbFile *file, char const *
 	}
 }
 
+gb_internal void fast_backend_emit_convert_work_reg(FastLeafProcEmitter *emitter, FastScalarType target_type) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		auto *work = fast_backend_x64_work_reg();
+		if (target_type.kind == FastScalar_Bool) {
+			gb_fprintf(emitter->file, "\tcmp %s, 0\n", work->r64);
+			gb_fprintf(emitter->file, "\tsetne %s\n", work->r8);
+			gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+		} else {
+			fast_backend_emit_x64_canonicalize(emitter->file, work, target_type);
+		}
+	} else {
+		char const *work = fast_backend_arm64_work_reg();
+		if (target_type.kind == FastScalar_Bool) {
+			gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+			gb_fprintf(emitter->file, "\tcset w%s, ne\n", work+1);
+		} else {
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, target_type);
+		}
+	}
+}
+
 gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *expr);
+
+gb_internal bool fast_backend_emit_leaf_cast(FastLeafProcEmitter *emitter, Ast *operand, Type *target_type) {
+	FastScalarType result_type = {};
+	if (!fast_backend_expr_scalar_type(nullptr, target_type, &result_type)) {
+		return false;
+	}
+	if (!fast_backend_emit_leaf_expr(emitter, operand)) {
+		return false;
+	}
+	fast_backend_emit_convert_work_reg(emitter, result_type);
+	return true;
+}
 
 gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast *expr) {
 	TypeAndValue tv = type_and_value_of_expr(expr);
@@ -1778,6 +1862,10 @@ gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *
 	switch (expr->kind) {
 	case Ast_ParenExpr:
 		return fast_backend_emit_leaf_expr(emitter, expr->ParenExpr.expr);
+	case Ast_TypeCast:
+		return fast_backend_emit_leaf_cast(emitter, expr->TypeCast.expr, reduce_tuple_to_single_type(tv.type));
+	case Ast_AutoCast:
+		return fast_backend_emit_leaf_cast(emitter, expr->AutoCast.expr, reduce_tuple_to_single_type(tv.type));
 	case Ast_UnaryExpr:
 		return fast_backend_emit_leaf_unary(emitter, expr);
 	case Ast_BinaryExpr:
