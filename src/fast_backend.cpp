@@ -588,9 +588,19 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
-		if (lhs->kind != Ast_Ident || is_blank_ident(lhs)) {
+		if (lhs->kind != Ast_Ident) {
 			error(lhs, "Fast backend currently only supports identifier assignment targets");
 			return false;
+		}
+
+		Ast *rhs = as->rhs[i];
+		if (is_blank_ident(lhs)) {
+			if (!fast_backend_leaf_expr_is_supported(plan, rhs, type_and_value_of_expr(rhs).type)) {
+				error(rhs, "Fast backend does not yet support this discard assignment expression");
+				return false;
+			}
+			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
+			continue;
 		}
 
 		Entity *entity = entity_of_node(lhs);
@@ -599,7 +609,6 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 			return false;
 		}
 
-		Ast *rhs = as->rhs[i];
 		if (!fast_backend_leaf_expr_is_supported(plan, rhs, entity->type)) {
 			error(rhs, "Fast backend does not yet support this assignment expression");
 			return false;
@@ -1927,6 +1936,13 @@ gb_internal bool fast_backend_emit_value_decl(FastLeafProcEmitter *emitter, AstV
 gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, AstAssignStmt *as) {
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
+		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
+			if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
+				return false;
+			}
+			continue;
+		}
+
 		Entity *entity = entity_of_node(lhs);
 		if (entity == nullptr || !fast_backend_find_scalar_storage(emitter->plan, entity, nullptr, nullptr, nullptr)) {
 			return false;
