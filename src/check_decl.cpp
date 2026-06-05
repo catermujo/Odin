@@ -1849,8 +1849,10 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, Ast *init_expr) {
 	GB_ASSERT(e->type == nullptr);
 	GB_ASSERT(e->kind == Entity_Variable);
+	checker_global_variable_timing_state.variable_decl_count += 1;
 
 	if (e->flags & EntityFlag_Visited) {
+		checker_global_variable_timing_state.early_visited_count += 1;
 		e->type = t_invalid;
 		return;
 	}
@@ -1862,8 +1864,17 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	DeclInfo *decl = decl_info_of_entity(e);
 	GB_ASSERT(decl == ctx->decl);
 	if (decl != nullptr) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		check_decl_attributes(ctx, decl->attributes, var_decl_attribute, &ac);
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_Attributes, time_stamp_time_now() - start);
+		}
 	}
+
+	u64 foreign_and_links_ticks = 0;
 
 	if (ac.require_declaration) {
 		e->flags |= EntityFlag_Require;
@@ -1894,7 +1905,14 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	String context_name = str_lit("variable declaration");
 
 	if (type_expr != nullptr) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		e->type = check_type(ctx, type_expr);
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_ExplicitType, time_stamp_time_now() - start);
+		}
 	}
 	if (e->type != nullptr) {
 		if (is_type_polymorphic(base_type(e->type))) {
@@ -1912,12 +1930,19 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 
 
 	if (e->Variable.is_foreign) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		if (init_expr != nullptr) {
 			error(e->token, "A foreign variable declaration cannot have a default value");
 		}
 		init_entity_foreign_library(ctx, e);
 		if (is_arch_wasm() && e->Variable.foreign_library != nullptr) {
 			error(e->token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block");
+		}
+		if (checker_global_variable_timing_state.enabled) {
+			foreign_and_links_ticks += time_stamp_time_now() - start;
 		}
 	}
 	if (ac.link_name.len > 0) {
@@ -1928,6 +1953,10 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	}
 
 	if (e->Variable.is_foreign || e->Variable.is_export) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		String name = e->token.string;
 		if (e->Variable.link_name.len > 0) {
 			name = e->Variable.link_name;
@@ -1950,10 +1979,16 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 		} else {
 			string_map_set(fp, key, e);
 		}
+		if (checker_global_variable_timing_state.enabled) {
+			foreign_and_links_ticks += time_stamp_time_now() - start;
+		}
 	}
 	
 	if (e->Variable.link_name.len > 0) {
 		e->flags |= EntityFlag_CustomLinkName;
+	}
+	if (checker_global_variable_timing_state.enabled && foreign_and_links_ticks > 0) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_ForeignAndLinks, foreign_and_links_ticks);
 	}
 
 	if (init_expr == nullptr) {
@@ -1964,6 +1999,10 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	}
 
 	Operand o = {};
+	u64 init_expr_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		init_expr_start = time_stamp_time_now();
+	}
 	check_expr_with_type_hint(ctx, &o, init_expr, e->type);
 	if (check_vet_shadowing_assignment(ctx->checker, e, init_expr)) {
 		error(e->token, "Illegal declaration cycle of `%.*s`", LIT(e->token.string));
@@ -1971,8 +2010,25 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 		o.type = t_invalid;
 		e->type = t_invalid;
 	}
+	if (checker_global_variable_timing_state.enabled) {
+		u64 init_expr_ticks = time_stamp_time_now() - init_expr_start;
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_InitExpr, init_expr_ticks);
+		checker_global_variable_timing_note_init_expr(e, init_expr, init_expr_ticks);
+	}
+
+	u64 init_variable_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		init_variable_start = time_stamp_time_now();
+	}
 	check_init_variable(ctx, e, &o, str_lit("variable declaration"));
+	if (checker_global_variable_timing_state.enabled) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_InitVariable, time_stamp_time_now() - init_variable_start);
+	}
 	if (e->Variable.is_rodata && o.mode != Addressing_Constant) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		ERROR_BLOCK();
 		error(o.expr, "Variables declared with @(rodata) must have constant initialization");
 		Ast *expr = unparen_expr(o.expr);
@@ -1995,9 +2051,19 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 				}
 			}
 		}
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_RodataValidation, time_stamp_time_now() - start);
+		}
 	}
 
+	u64 rtti_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		rtti_start = time_stamp_time_now();
+	}
 	check_rtti_type_disallowed(e->token, e->type, "A variable declaration is using a type, %s, which has been disallowed");
+	if (checker_global_variable_timing_state.enabled) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_RttiDisallowed, time_stamp_time_now() - rtti_start);
+	}
 }
 
 gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, DeclInfo *d) {
@@ -2161,6 +2227,18 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 	if (e->flags & EntityFlag_Lazy) {
 		mutex_lock(&ctx->info->lazy_mutex);
 	}
+
+	bool entity_timing_started = false;
+	if (checker_global_entity_timing_state.enabled) {
+		CheckerGlobalEntityTimingKind kind = checker_global_entity_timing_kind_from_entity_kind(e->kind);
+		if (kind != CheckerGlobalEntityTiming_Invalid) {
+			checker_global_entity_timing_begin(kind);
+			entity_timing_started = true;
+		}
+	}
+	defer (if (entity_timing_started) {
+		checker_global_entity_timing_end();
+	});
 
 	String name = e->token.string;
 
