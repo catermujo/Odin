@@ -1522,10 +1522,11 @@ gb_internal void init_universal(void) {
 	}
 
 	{
-		GlobalEnumValue values[BuildBackend_COUNT] = {
-			{"Default", BuildBackend_Default},
-			{"LLVM",    BuildBackend_LLVM},
-			{"Fast",    BuildBackend_Fast},
+		GB_ASSERT(bc->backend != BuildBackend_Default);
+
+		GlobalEnumValue values[] = {
+			{"LLVM", BuildBackend_LLVM},
+			{"Fast", BuildBackend_Fast},
 		};
 
 		auto fields = add_global_enum_type(str_lit("Odin_Backend_Type"), values, gb_count_of(values));

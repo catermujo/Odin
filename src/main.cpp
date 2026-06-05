@@ -4125,19 +4125,38 @@ int main(int arg_count, char const **arg_ptr) {
 		gb_printf_err("Warning: Thread-local storage is disabled on Windows i386.\n");
 	}
 
-	if (build_context.backend == BuildBackend_Fast &&
-	    fast_backend_build_mode_is_llvm_only(build_context.build_mode)) {
-		gb_printf_err("-backend:fast cannot be used with this build mode; use LLVM-backed output modes instead\n");
-		return 1;
-	}
-
 	{
 		BuildBackendKind requested_backend = build_context.backend;
-		BuildBackendKind actual_backend = requested_backend == BuildBackend_Default ? get_default_build_backend_kind() : requested_backend;
+		BuildBackendKind actual_backend = requested_backend == BuildBackend_Default ? BuildBackend_LLVM : requested_backend;
 
 		if (actual_backend == BuildBackend_Fast) {
 			String fast_backend_reason = {};
-			if (!fast_backend_is_supported(&fast_backend_reason)) {
+			if (build_context.build_mode == BuildMode_Assembly || build_context.build_mode == BuildMode_LLVM_IR) {
+				gb_printf_err("-backend:fast cannot be used with this build mode; use LLVM-backed output modes instead\n");
+				return 1;
+			}
+
+			if (build_context.metrics.arch != TargetArch_amd64 &&
+			    build_context.metrics.arch != TargetArch_arm64) {
+				fast_backend_reason = str_lit("fast backend currently supports only amd64 and arm64");
+			} else if (build_context.optimization_level > 0) {
+				fast_backend_reason = str_lit("fast backend rollout is currently limited to -o:none and -o:minimal");
+			} else {
+				switch (build_context.build_mode) {
+				case BuildMode_Object:
+					break;
+				case BuildMode_Executable:
+				case BuildMode_DynamicLibrary:
+				case BuildMode_StaticLibrary:
+					fast_backend_reason = str_lit("fast backend currently emits only object files");
+					break;
+				case BuildMode_Assembly:
+				case BuildMode_LLVM_IR:
+					GB_PANIC("unexpected LLVM-only build mode");
+				}
+			}
+
+			if (fast_backend_reason.len != 0) {
 				if (requested_backend == BuildBackend_Fast) {
 					gb_printf_err("Note: -backend:fast falling back to LLVM: %.*s.\n", LIT(fast_backend_reason));
 				}
@@ -4420,7 +4439,7 @@ int main(int arg_count, char const **arg_ptr) {
 
 		switch (build_context.backend) {
 		case BuildBackend_Fast: {
-			auto *fast_gen = permanent_alloc_item<FastBackendGenerator>();
+			auto *fast_gen = permanent_alloc_item<FastGenerator>();
 			if (!fast_init_generator(fast_gen, checker)) {
 				return 1;
 			}

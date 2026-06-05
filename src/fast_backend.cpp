@@ -1,4 +1,4 @@
-struct FastBackendGenerator : LinkerData {
+struct FastGenerator : LinkerData {
 	CheckerInfo *info;
 	Checker *checker;
 };
@@ -69,11 +69,11 @@ gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, F
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
 gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out);
-gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
 
-gb_internal bool fast_backend_is_local_entity(CheckerInfo *info, Entity *e) {
+gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
 		return false;
 	}
@@ -86,49 +86,7 @@ gb_internal bool fast_backend_is_local_entity(CheckerInfo *info, Entity *e) {
 	return true;
 }
 
-gb_internal BuildBackendKind get_default_build_backend_kind(void) {
-	return BuildBackend_LLVM;
-}
-
-gb_internal bool fast_backend_build_mode_is_llvm_only(BuildModeKind build_mode) {
-	switch (build_mode) {
-	case BuildMode_Assembly:
-	case BuildMode_LLVM_IR:
-		return true;
-	}
-	return false;
-}
-
-gb_internal bool fast_backend_is_supported(String *reason) {
-	if (build_context.metrics.arch != TargetArch_amd64 &&
-	    build_context.metrics.arch != TargetArch_arm64) {
-		if (reason) *reason = str_lit("fast backend currently supports only amd64 and arm64");
-		return false;
-	}
-
-	if (build_context.optimization_level > 0) {
-		if (reason) *reason = str_lit("fast backend rollout is currently limited to -o:none and -o:minimal");
-		return false;
-	}
-
-	switch (build_context.build_mode) {
-	case BuildMode_Object:
-		break;
-	case BuildMode_Executable:
-	case BuildMode_DynamicLibrary:
-	case BuildMode_StaticLibrary:
-		if (reason) *reason = str_lit("fast backend currently emits only object files");
-		return false;
-	case BuildMode_Assembly:
-	case BuildMode_LLVM_IR:
-		if (reason) *reason = str_lit("fast backend does not own assembly or LLVM IR output");
-		return false;
-	}
-
-	return true;
-}
-
-gb_internal bool fast_init_generator(FastBackendGenerator *gen, Checker *c) {
+gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	if (global_error_collector.count != 0) {
 		return false;
 	}
@@ -374,7 +332,7 @@ gb_internal bool fast_backend_find_addressable_scalar_entity(FastLeafProcPlan *p
 	return true;
 }
 
-gb_internal bool fast_backend_deref_expr_is_supported(FastLeafProcPlan *plan, Ast *expr) {
+gb_internal bool fast_backend_can_emit_deref_expr(FastLeafProcPlan *plan, Ast *expr) {
 	if (expr == nullptr || expr->kind != Ast_DerefExpr) {
 		return false;
 	}
@@ -388,10 +346,10 @@ gb_internal bool fast_backend_deref_expr_is_supported(FastLeafProcPlan *plan, As
 	if (!fast_backend_expr_scalar_type(nullptr, type_of_expr(expr), &result_type)) {
 		return false;
 	}
-	return fast_backend_leaf_expr_is_supported(plan, expr->DerefExpr.expr, type_of_expr(expr->DerefExpr.expr));
+	return fast_backend_can_emit_leaf_expr(plan, expr->DerefExpr.expr, type_of_expr(expr->DerefExpr.expr));
 }
 
-gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast *operand, Type *target_type, TokenKind cast_kind) {
+gb_internal bool fast_backend_can_emit_cast_expr(FastLeafProcPlan *plan, Ast *operand, Type *target_type, TokenKind cast_kind) {
 	FastScalarType source_type = {};
 	FastScalarType result_type = {};
 	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(operand).type);
@@ -401,7 +359,7 @@ gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast
 	if (!fast_backend_expr_scalar_type(nullptr, target_type, &result_type)) {
 		return false;
 	}
-	if (!fast_backend_leaf_expr_is_supported(plan, operand, operand_type)) {
+	if (!fast_backend_can_emit_leaf_expr(plan, operand, operand_type)) {
 		return false;
 	}
 	if (cast_kind == Token_transmute) {
@@ -416,7 +374,7 @@ gb_internal bool fast_backend_cast_expr_is_supported(FastLeafProcPlan *plan, Ast
 	return true;
 }
 
-gb_internal bool fast_backend_switch_case_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *tag_type) {
+gb_internal bool fast_backend_can_emit_switch_case_expr(FastLeafProcPlan *plan, Ast *expr, Type *tag_type) {
 	expr = unparen_expr(expr);
 	if (is_ast_range(expr)) {
 		FastScalarType scalar_type = {};
@@ -430,14 +388,14 @@ gb_internal bool fast_backend_switch_case_expr_is_supported(FastLeafProcPlan *pl
 		if (fast_backend_leaf_expr_has_call(lhs) || fast_backend_leaf_expr_has_call(rhs)) {
 			return false;
 		}
-		return fast_backend_leaf_expr_is_supported(plan, lhs, tag_type) &&
-		       fast_backend_leaf_expr_is_supported(plan, rhs, tag_type);
+		return fast_backend_can_emit_leaf_expr(plan, lhs, tag_type) &&
+		       fast_backend_can_emit_leaf_expr(plan, rhs, tag_type);
 	}
 
 	if (fast_backend_leaf_expr_has_call(expr)) {
 		return false;
 	}
-	return fast_backend_leaf_expr_is_supported(plan, expr, tag_type);
+	return fast_backend_can_emit_leaf_expr(plan, expr, tag_type);
 }
 
 gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_type_, Entity **proc_entity_, FastScalarType *result_type_, bool *has_result_) {
@@ -497,7 +455,7 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 	return true;
 }
 
-gb_internal bool fast_backend_call_expr_is_supported(FastLeafProcPlan *plan, AstCallExpr *ce, bool allow_void_result) {
+gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCallExpr *ce, bool allow_void_result) {
 	TypeProc *pt = nullptr;
 	Entity *proc_entity = nullptr;
 	FastScalarType result_type = {};
@@ -531,7 +489,7 @@ gb_internal bool fast_backend_call_expr_is_supported(FastLeafProcPlan *plan, Ast
 		if (!fast_backend_classify_scalar_type(param->type, &arg_type)) {
 			return false;
 		}
-		if (!fast_backend_leaf_expr_is_supported(plan, ce->args[i], param->type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, ce->args[i], param->type)) {
 			return false;
 		}
 	}
@@ -539,7 +497,7 @@ gb_internal bool fast_backend_call_expr_is_supported(FastLeafProcPlan *plan, Ast
 	return true;
 }
 
-gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
+gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
 	if (expr == nullptr) {
 		return false;
 	}
@@ -559,7 +517,7 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 
 	switch (expr->kind) {
 	case Ast_ParenExpr:
-		return fast_backend_leaf_expr_is_supported(plan, expr->ParenExpr.expr, expected_type);
+		return fast_backend_can_emit_leaf_expr(plan, expr->ParenExpr.expr, expected_type);
 
 	case Ast_Implicit:
 		return plan->has_context_slot && expr->Implicit.kind == Token_context;
@@ -570,19 +528,19 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 	}
 
 	case Ast_DerefExpr:
-		return fast_backend_deref_expr_is_supported(plan, expr);
+		return fast_backend_can_emit_deref_expr(plan, expr);
 
 	case Ast_CallExpr:
-		return fast_backend_call_expr_is_supported(plan, &expr->CallExpr, false);
+		return fast_backend_can_emit_call_expr(plan, &expr->CallExpr, false);
 
 	case Ast_TypeCast: {
 		Type *result_type = reduce_tuple_to_single_type(tv.type);
-		return fast_backend_cast_expr_is_supported(plan, expr->TypeCast.expr, result_type, expr->TypeCast.token.kind);
+		return fast_backend_can_emit_cast_expr(plan, expr->TypeCast.expr, result_type, expr->TypeCast.token.kind);
 	}
 
 	case Ast_AutoCast: {
 		Type *result_type = reduce_tuple_to_single_type(tv.type);
-		return fast_backend_cast_expr_is_supported(plan, expr->AutoCast.expr, result_type, Token_cast);
+		return fast_backend_can_emit_cast_expr(plan, expr->AutoCast.expr, result_type, Token_cast);
 	}
 
 	case Ast_UnaryExpr: {
@@ -591,7 +549,7 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 		if (!fast_backend_classify_scalar_type(operand_type, &operand_scalar)) {
 			return false;
 		}
-		if (!fast_backend_leaf_expr_is_supported(plan, expr->UnaryExpr.expr, operand_type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, expr->UnaryExpr.expr, operand_type)) {
 			return false;
 		}
 
@@ -617,8 +575,8 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 			return false;
 		}
 
-		if (!fast_backend_leaf_expr_is_supported(plan, expr->BinaryExpr.left, operand_type) ||
-		    !fast_backend_leaf_expr_is_supported(plan, expr->BinaryExpr.right, operand_type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, expr->BinaryExpr.left, operand_type) ||
+		    !fast_backend_can_emit_leaf_expr(plan, expr->BinaryExpr.right, operand_type)) {
 			return false;
 		}
 
@@ -655,9 +613,9 @@ gb_internal bool fast_backend_leaf_expr_is_supported(FastLeafProcPlan *plan, Ast
 	return false;
 }
 
-gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, Ast *stmt);
+gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *plan, Ast *stmt);
 
-gb_internal bool fast_backend_plan_stmt_list(FastBackendGenerator *gen, FastLeafProcPlan *plan, Slice<Ast *> const &stmts) {
+gb_internal bool fast_backend_plan_stmt_list(FastGenerator *gen, FastLeafProcPlan *plan, Slice<Ast *> const &stmts) {
 	for (Ast *stmt : stmts) {
 		if (!fast_backend_plan_stmt(gen, plan, stmt)) {
 			return false;
@@ -666,7 +624,7 @@ gb_internal bool fast_backend_plan_stmt_list(FastBackendGenerator *gen, FastLeaf
 	return true;
 }
 
-gb_internal bool fast_backend_plan_value_decl(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstValueDecl *vd) {
+gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPlan *plan, AstValueDecl *vd) {
 	gb_unused(gen);
 
 	if (!vd->is_mutable) {
@@ -716,7 +674,7 @@ gb_internal bool fast_backend_plan_value_decl(FastBackendGenerator *gen, FastLea
 		Entity *entity = entity_of_node(name);
 		GB_ASSERT(entity != nullptr);
 
-		if (!fast_backend_leaf_expr_is_supported(plan, rhs, entity->type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, rhs, entity->type)) {
 			error(rhs, "Fast backend does not yet support this value declaration expression");
 			return false;
 		}
@@ -726,7 +684,7 @@ gb_internal bool fast_backend_plan_value_decl(FastBackendGenerator *gen, FastLea
 	return true;
 }
 
-gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstAssignStmt *as) {
+gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstAssignStmt *as) {
 	gb_unused(gen);
 
 	if (as->op.kind != Token_Eq) {
@@ -742,7 +700,7 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 		Ast *lhs = unparen_expr(as->lhs[i]);
 		Ast *rhs = as->rhs[i];
 		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
-			if (!fast_backend_leaf_expr_is_supported(plan, rhs, type_and_value_of_expr(rhs).type)) {
+			if (!fast_backend_can_emit_leaf_expr(plan, rhs, type_and_value_of_expr(rhs).type)) {
 				error(rhs, "Fast backend does not yet support this discard assignment expression");
 				return false;
 			}
@@ -759,7 +717,7 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 			}
 			target_type = entity->type;
 		} else if (lhs->kind == Ast_DerefExpr) {
-			if (!fast_backend_deref_expr_is_supported(plan, lhs)) {
+			if (!fast_backend_can_emit_deref_expr(plan, lhs)) {
 				error(lhs, "Fast backend expected a scalar pointer-dereference assignment target");
 				return false;
 			}
@@ -770,7 +728,7 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 			return false;
 		}
 
-		if (!fast_backend_leaf_expr_is_supported(plan, rhs, target_type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, rhs, target_type)) {
 			error(rhs, "Fast backend does not yet support this assignment expression");
 			return false;
 		}
@@ -780,7 +738,7 @@ gb_internal bool fast_backend_plan_assign_stmt(FastBackendGenerator *gen, FastLe
 	return true;
 }
 
-gb_internal bool fast_backend_plan_return_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstReturnStmt *rs) {
+gb_internal bool fast_backend_plan_return_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstReturnStmt *rs) {
 	gb_unused(gen);
 
 	if (!plan->has_result) {
@@ -797,7 +755,7 @@ gb_internal bool fast_backend_plan_return_stmt(FastBackendGenerator *gen, FastLe
 	}
 
 	Ast *result = rs->results[0];
-	if (!fast_backend_leaf_expr_is_supported(plan, result, reduce_tuple_to_single_type(plan->type->results))) {
+	if (!fast_backend_can_emit_leaf_expr(plan, result, reduce_tuple_to_single_type(plan->type->results))) {
 		error(result, "Fast backend does not yet support this return expression");
 		return false;
 	}
@@ -805,11 +763,11 @@ gb_internal bool fast_backend_plan_return_stmt(FastBackendGenerator *gen, FastLe
 	return true;
 }
 
-gb_internal bool fast_backend_plan_if_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstIfStmt *is) {
+gb_internal bool fast_backend_plan_if_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstIfStmt *is) {
 	if (is->init != nullptr && !fast_backend_plan_stmt(gen, plan, is->init)) {
 		return false;
 	}
-	if (!fast_backend_leaf_expr_is_supported(plan, is->cond, type_and_value_of_expr(is->cond).type)) {
+	if (!fast_backend_can_emit_leaf_expr(plan, is->cond, type_and_value_of_expr(is->cond).type)) {
 		error(is->cond, "Fast backend does not yet support this if condition");
 		return false;
 	}
@@ -823,12 +781,12 @@ gb_internal bool fast_backend_plan_if_stmt(FastBackendGenerator *gen, FastLeafPr
 	return true;
 }
 
-gb_internal bool fast_backend_plan_for_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstForStmt *fs) {
+gb_internal bool fast_backend_plan_for_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstForStmt *fs) {
 	if (fs->init != nullptr && !fast_backend_plan_stmt(gen, plan, fs->init)) {
 		return false;
 	}
 	if (fs->cond != nullptr) {
-		if (!fast_backend_leaf_expr_is_supported(plan, fs->cond, type_and_value_of_expr(fs->cond).type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, fs->cond, type_and_value_of_expr(fs->cond).type)) {
 			error(fs->cond, "Fast backend does not yet support this for-loop condition");
 			return false;
 		}
@@ -843,7 +801,7 @@ gb_internal bool fast_backend_plan_for_stmt(FastBackendGenerator *gen, FastLeafP
 	return true;
 }
 
-gb_internal bool fast_backend_plan_switch_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstSwitchStmt *ss) {
+gb_internal bool fast_backend_plan_switch_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstSwitchStmt *ss) {
 	if (ss->partial) {
 		error(ss->token, "Fast backend does not yet support #partial switch statements");
 		return false;
@@ -872,7 +830,7 @@ gb_internal bool fast_backend_plan_switch_stmt(FastBackendGenerator *gen, FastLe
 			error(ss->tag, "Fast backend switch tags cannot contain calls yet");
 			return false;
 		}
-		if (!fast_backend_leaf_expr_is_supported(plan, ss->tag, tag_type)) {
+		if (!fast_backend_can_emit_leaf_expr(plan, ss->tag, tag_type)) {
 			error(ss->tag, "Fast backend does not yet support this switch tag expression");
 			return false;
 		}
@@ -887,7 +845,7 @@ gb_internal bool fast_backend_plan_switch_stmt(FastBackendGenerator *gen, FastLe
 
 		AstCaseClause *cc = &stmt->CaseClause;
 		for (Ast *expr : cc->list) {
-			if (!fast_backend_switch_case_expr_is_supported(plan, expr, tag_type)) {
+			if (!fast_backend_can_emit_switch_case_expr(plan, expr, tag_type)) {
 				error(expr, "Fast backend does not yet support this switch case expression");
 				return false;
 			}
@@ -909,7 +867,7 @@ gb_internal bool fast_backend_plan_switch_stmt(FastBackendGenerator *gen, FastLe
 	return true;
 }
 
-gb_internal bool fast_backend_plan_branch_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstBranchStmt *bs) {
+gb_internal bool fast_backend_plan_branch_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstBranchStmt *bs) {
 	gb_unused(gen);
 	gb_unused(plan);
 
@@ -933,14 +891,14 @@ gb_internal bool fast_backend_plan_branch_stmt(FastBackendGenerator *gen, FastLe
 	return false;
 }
 
-gb_internal bool fast_backend_plan_expr_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, AstExprStmt *es) {
+gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstExprStmt *es) {
 	gb_unused(gen);
 
 	if (es->expr == nullptr || es->expr->kind != Ast_CallExpr) {
 		error(es->expr ? es->expr : cast(Ast *)es, "Fast backend currently only supports call expression statements");
 		return false;
 	}
-	if (!fast_backend_call_expr_is_supported(plan, &es->expr->CallExpr, true)) {
+	if (!fast_backend_can_emit_call_expr(plan, &es->expr->CallExpr, true)) {
 		error(es->expr, "Fast backend does not yet support this call expression");
 		return false;
 	}
@@ -948,7 +906,7 @@ gb_internal bool fast_backend_plan_expr_stmt(FastBackendGenerator *gen, FastLeaf
 	return true;
 }
 
-gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcPlan *plan, Ast *stmt) {
+gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *plan, Ast *stmt) {
 	if (stmt == nullptr) {
 		return true;
 	}
@@ -980,7 +938,7 @@ gb_internal bool fast_backend_plan_stmt(FastBackendGenerator *gen, FastLeafProcP
 	return false;
 }
 
-gb_internal bool fast_backend_plan_leaf_proc(FastBackendGenerator *gen, Entity *e, FastLeafProcPlan *plan) {
+gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, FastLeafProcPlan *plan) {
 	DeclInfo *decl = e->decl_info;
 	if (decl == nullptr || decl->proc_lit == nullptr || decl->proc_lit->kind != Ast_ProcLit) {
 		error(e->token, "Fast backend expected a concrete procedure body");
@@ -1125,9 +1083,9 @@ gb_internal bool fast_backend_plan_global_var(Entity *e, FastGlobalVarPlan *plan
 	return false;
 }
 
-gb_internal bool fast_backend_collect_program(FastBackendGenerator *gen, Array<FastGlobalVarPlan> *globals, Array<FastLeafProcPlan> *procedures) {
+gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlobalVarPlan> *globals, Array<FastLeafProcPlan> *procedures) {
 	for (Entity *e : gen->info->definitions) {
-		if (!fast_backend_is_local_entity(gen->info, e)) {
+		if (!fast_entity_is_local(gen->info, e)) {
 			continue;
 		}
 
@@ -1330,7 +1288,7 @@ gb_internal bool fast_backend_entity_is_scalar_global(FastLeafProcPlan *plan, En
 	}
 
 	if (type_) *type_ = type;
-	return entity->Variable.is_global || entity->Variable.is_foreign || fast_backend_is_local_entity(plan->info, entity);
+	return entity->Variable.is_global || entity->Variable.is_foreign || fast_entity_is_local(plan->info, entity);
 }
 
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_) {
@@ -1389,7 +1347,7 @@ gb_internal bool fast_backend_entity_uses_external_symbol(FastLeafProcPlan *plan
 	if (entity->Variable.is_foreign) {
 		return true;
 	}
-	return !fast_backend_is_local_entity(plan->info, entity);
+	return !fast_entity_is_local(plan->info, entity);
 }
 
 gb_internal void fast_backend_emit_x64_canonicalize(gbFile *file, FastX64RegNames const *reg, FastScalarType type);
@@ -2828,7 +2786,7 @@ gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan co
 	return true;
 }
 
-gb_internal bool fast_backend_write_object_assembly(FastBackendGenerator *gen, Array<FastGlobalVarPlan> const &globals, Array<FastLeafProcPlan> const &procedures, String asm_path) {
+gb_internal bool fast_backend_write_object_assembly(FastGenerator *gen, Array<FastGlobalVarPlan> const &globals, Array<FastLeafProcPlan> const &procedures, String asm_path) {
 	gb_unused(gen);
 
 	gbFile file = {};
@@ -2893,7 +2851,7 @@ gb_internal bool fast_backend_assemble_object(String asm_path, String obj_path) 
 	return true;
 }
 
-gb_internal bool fast_generate_code(FastBackendGenerator *gen) {
+gb_internal bool fast_generate_code(FastGenerator *gen) {
 	GB_ASSERT(gen != nullptr);
 	GB_ASSERT(build_context.build_mode == BuildMode_Object);
 
