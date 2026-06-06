@@ -328,6 +328,27 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	return false;
 }
 
+gb_internal bool fast_backend_assign_op_to_binary(TokenKind assign_op, TokenKind *binary_op_) {
+	TokenKind binary_op = Token_Invalid;
+	switch (assign_op) {
+	case Token_AddEq:    binary_op = Token_Add;    break;
+	case Token_SubEq:    binary_op = Token_Sub;    break;
+	case Token_MulEq:    binary_op = Token_Mul;    break;
+	case Token_QuoEq:    binary_op = Token_Quo;    break;
+	case Token_ModEq:    binary_op = Token_Mod;    break;
+	case Token_AndEq:    binary_op = Token_And;    break;
+	case Token_OrEq:     binary_op = Token_Or;     break;
+	case Token_XorEq:    binary_op = Token_Xor;    break;
+	case Token_AndNotEq: binary_op = Token_AndNot; break;
+	case Token_ShlEq:    binary_op = Token_Shl;    break;
+	case Token_ShrEq:    binary_op = Token_Shr;    break;
+	default:
+		return false;
+	}
+	if (binary_op_) *binary_op_ = binary_op;
+	return true;
+}
+
 gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType *scalar_type_, bool *is_scalar_) {
 	FastScalarType scalar_type = {};
 	if (fast_backend_classify_scalar_type(type, &scalar_type)) {
@@ -364,6 +385,32 @@ gb_internal bool fast_backend_scalar_supports_ordered_cmp(FastScalarType type) {
 	case FastScalar_Signed:
 	case FastScalar_Unsigned:
 		return true;
+	}
+	return false;
+}
+
+gb_internal bool fast_backend_scalar_binary_op_supported(TokenKind op, FastScalarType scalar_type) {
+	switch (op) {
+	case Token_Add:
+	case Token_Sub:
+	case Token_Mul:
+	case Token_Quo:
+	case Token_Mod:
+	case Token_And:
+	case Token_Or:
+	case Token_Xor:
+	case Token_AndNot:
+	case Token_Shl:
+	case Token_Shr:
+		return fast_backend_scalar_is_integer_like(scalar_type);
+	case Token_CmpEq:
+	case Token_NotEq:
+		return fast_backend_scalar_is_integer_like(scalar_type) || scalar_type.kind == FastScalar_Pointer;
+	case Token_Lt:
+	case Token_LtEq:
+	case Token_Gt:
+	case Token_GtEq:
+		return fast_backend_scalar_supports_ordered_cmp(scalar_type);
 	}
 	return false;
 }
@@ -1863,8 +1910,40 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 	gb_unused(gen);
 
 	if (as->op.kind != Token_Eq) {
-		error(as->op, "Fast backend currently only supports simple '=' assignments");
-		return false;
+		if (as->lhs.count != 1 || as->rhs.count != 1) {
+			error(as->op, "Fast backend assignment operators require one-to-one operands");
+			return false;
+		}
+		TokenKind binary_op = Token_Invalid;
+		if (!fast_backend_assign_op_to_binary(as->op.kind, &binary_op)) {
+			error(as->op, "Fast backend does not yet support this assignment operator");
+			return false;
+		}
+
+		Ast *lhs = unparen_expr(as->lhs[0]);
+		Ast *rhs = as->rhs[0];
+		Type *target_type = nullptr;
+		if (!fast_backend_can_emit_address_expr(plan, lhs, &target_type, nullptr, nullptr)) {
+			error(lhs, "Fast backend expected a supported assignment target");
+			return false;
+		}
+
+		FastScalarType scalar_type = {};
+		if (!fast_backend_expr_scalar_type(lhs, target_type, &scalar_type)) {
+			error(lhs, "Fast backend currently only supports scalar assignment operators");
+			return false;
+		}
+		if (!fast_backend_scalar_binary_op_supported(binary_op, scalar_type)) {
+			error(as->op, "Fast backend does not yet support this assignment operator for the target type");
+			return false;
+		}
+		if (!fast_backend_can_emit_leaf_expr(plan, rhs, target_type)) {
+			error(rhs, "Fast backend does not yet support this assignment expression");
+			return false;
+		}
+
+		plan->spill_depth = gb_max(plan->spill_depth, gb_max(1 + fast_backend_address_expr_spill_depth(lhs), 2 + fast_backend_leaf_expr_spill_depth(rhs)));
+		return true;
 	}
 	if (as->lhs.count != as->rhs.count) {
 		error(as->op, "Fast backend currently only supports one-to-one assignments");
@@ -4053,24 +4132,7 @@ gb_internal char const *fast_backend_arm64_cmp_suffix(TokenKind op, FastScalarTy
 	return nullptr;
 }
 
-gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast *expr) {
-	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.left).type);
-	FastScalarType scalar_type = {};
-	if (!fast_backend_classify_scalar_type(operand_type, &scalar_type)) {
-		return false;
-	}
-
-	TokenKind op = expr->BinaryExpr.op.kind;
-	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.left)) {
-		return false;
-	}
-
-	fast_backend_emit_push_work_reg(emitter);
-	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.right)) {
-		return false;
-	}
-	fast_backend_emit_pop_tmp_reg(emitter);
-
+gb_internal bool fast_backend_emit_scalar_binary_op(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType scalar_type, Ast *rhs) {
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		auto *work = fast_backend_x64_work_reg();
 		auto *tmp  = fast_backend_x64_tmp_reg();
@@ -4131,8 +4193,8 @@ gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast
 		case Token_Shr: {
 			char const *inst = op == Token_Shl ? "shl" : (fast_backend_scalar_is_unsigned(scalar_type) ? "shr" : "sar");
 			gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
-			if (type_and_value_of_expr(expr->BinaryExpr.right).mode == Addressing_Constant) {
-				ExactValue shift_value = type_and_value_of_expr(expr->BinaryExpr.right).value;
+			if (rhs != nullptr && type_and_value_of_expr(rhs).mode == Addressing_Constant) {
+				ExactValue shift_value = type_and_value_of_expr(rhs).value;
 				u64 shift = exact_value_to_u64(shift_value);
 				gb_fprintf(emitter->file, "\t%s %s, %llu\n", inst, work->r64, cast(unsigned long long)shift);
 			} else {
@@ -4227,6 +4289,25 @@ gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast
 	}
 
 	return false;
+}
+
+gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast *expr) {
+	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(expr->BinaryExpr.left).type);
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(operand_type, &scalar_type)) {
+		return false;
+	}
+
+	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.left)) {
+		return false;
+	}
+
+	fast_backend_emit_push_work_reg(emitter);
+	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.right)) {
+		return false;
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+	return fast_backend_emit_scalar_binary_op(emitter, expr->BinaryExpr.op.kind, scalar_type, expr->BinaryExpr.right);
 }
 
 gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *expr) {
@@ -5246,6 +5327,45 @@ gb_internal bool fast_backend_emit_value_decl(FastLeafProcEmitter *emitter, AstV
 }
 
 gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, AstAssignStmt *as) {
+	if (as->op.kind != Token_Eq) {
+		TokenKind binary_op = Token_Invalid;
+		if (as->lhs.count != 1 || as->rhs.count != 1 || !fast_backend_assign_op_to_binary(as->op.kind, &binary_op)) {
+			return false;
+		}
+
+		Ast *lhs = unparen_expr(as->lhs[0]);
+		Ast *rhs = as->rhs[0];
+		Type *target_type = nullptr;
+		if (!fast_backend_can_emit_address_expr(emitter->plan, lhs, &target_type, nullptr, nullptr)) {
+			return false;
+		}
+
+		FastScalarType scalar_type = {};
+		if (!fast_backend_expr_scalar_type(lhs, target_type, &scalar_type)) {
+			return false;
+		}
+		if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
+			return false;
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
+		} else {
+			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (!fast_backend_emit_leaf_expr(emitter, rhs)) {
+			return false;
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		if (!fast_backend_emit_scalar_binary_op(emitter, binary_op, scalar_type, rhs)) {
+			return false;
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_store_work_to_tmp_address(emitter, scalar_type);
+		return true;
+	}
+
 	for_array(i, as->lhs) {
 		Ast *lhs = unparen_expr(as->lhs[i]);
 		if (lhs->kind == Ast_Ident && is_blank_ident(lhs)) {
