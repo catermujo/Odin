@@ -2570,6 +2570,100 @@ gb_internal void export_linked_libraries(LinkerData *gen) {
 	}
 }
 
+struct FastLLVMEntityState {
+	Entity *entity;
+	i64 min_dep_count;
+	lbModule *entity_code_gen_module;
+	lbModule *decl_code_gen_module;
+};
+
+gb_internal void linker_data_append(LinkerData *dst, LinkerData *src) {
+	GB_ASSERT(dst != nullptr);
+	GB_ASSERT(src != nullptr);
+
+	for (String const &path : src->output_object_paths) {
+		array_add(&dst->output_object_paths, path);
+	}
+	for (String const &path : src->output_temp_paths) {
+		array_add(&dst->output_temp_paths, path);
+	}
+	for (Entity *e : src->foreign_libraries) {
+		if (!ptr_set_update(&dst->foreign_libraries_set, e)) {
+			array_add(&dst->foreign_libraries, e);
+		}
+	}
+	if (src->needs_system_library_linked) {
+		dst->needs_system_library_linked = true;
+	}
+}
+
+gb_internal void fast_backend_hide_emitted_entities_from_llvm(FastGenerator *gen, lbModule *extern_module, Array<FastLLVMEntityState> *states) {
+	GB_ASSERT(gen != nullptr);
+	GB_ASSERT(extern_module != nullptr);
+	GB_ASSERT(states != nullptr);
+
+	for (Entity *e : gen->emitted_entities) {
+		FastLLVMEntityState state = {};
+		state.entity = e;
+		state.min_dep_count = e->min_dep_count.load(std::memory_order_relaxed);
+		state.entity_code_gen_module = e->code_gen_module.load(std::memory_order_relaxed);
+		if (e->decl_info != nullptr) {
+			state.decl_code_gen_module = e->decl_info->code_gen_module.load(std::memory_order_relaxed);
+			e->decl_info->code_gen_module.store(extern_module, std::memory_order_relaxed);
+		}
+		array_add(states, state);
+		e->min_dep_count.store(0, std::memory_order_relaxed);
+		e->code_gen_module.store(extern_module, std::memory_order_relaxed);
+	}
+}
+
+gb_internal void fast_backend_restore_hidden_entities(Array<FastLLVMEntityState> *states) {
+	GB_ASSERT(states != nullptr);
+
+	for (FastLLVMEntityState const &state : *states) {
+		state.entity->min_dep_count.store(state.min_dep_count, std::memory_order_relaxed);
+		state.entity->code_gen_module.store(state.entity_code_gen_module, std::memory_order_relaxed);
+		if (state.entity->decl_info != nullptr) {
+			state.entity->decl_info->code_gen_module.store(state.decl_code_gen_module, std::memory_order_relaxed);
+		}
+	}
+}
+
+gb_internal bool fast_generate_code_with_llvm_support(FastGenerator *fast_gen, Checker *checker) {
+	GB_ASSERT(fast_gen != nullptr);
+	GB_ASSERT(checker != nullptr);
+
+	if (!fast_generate_code(fast_gen)) {
+		return false;
+	}
+
+	auto *llvm_gen = permanent_alloc_item<lbGenerator>();
+	if (!lb_init_generator(llvm_gen, checker)) {
+		return false;
+	}
+
+	auto *extern_module = permanent_alloc_item<lbModule>();
+	extern_module->gen = llvm_gen;
+	extern_module->checker = checker;
+	lb_init_module(extern_module, false);
+
+	auto hidden_entities = array_make<FastLLVMEntityState>(heap_allocator(), 0, fast_gen->emitted_entities.count);
+	fast_backend_hide_emitted_entities_from_llvm(fast_gen, extern_module, &hidden_entities);
+	defer (fast_backend_restore_hidden_entities(&hidden_entities));
+
+	bool ok = false;
+	{
+		TIME_SECTION("LLVM Support Code Gen");
+		ok = lb_generate_code(llvm_gen);
+	}
+	if (!ok) {
+		return false;
+	}
+
+	linker_data_append(fast_gen, llvm_gen);
+	return true;
+}
+
 gb_internal void remove_temp_files(LinkerData *gen) {
 	if (build_context.keep_temp_files) return;
 
@@ -4148,7 +4242,7 @@ int main(int arg_count, char const **arg_ptr) {
 					break;
 				case BuildMode_Executable:
 				case BuildMode_DynamicLibrary:
-					fast_backend_reason = str_lit("fast backend currently emits object files and static libraries");
+					fast_backend_reason = fast_backend_hybrid_linked_output_reason();
 					break;
 				case BuildMode_Assembly:
 				case BuildMode_LLVM_IR:
@@ -4448,7 +4542,11 @@ int main(int arg_count, char const **arg_ptr) {
 
 			gbString label_code_gen = gb_string_make(heap_allocator(), "Fast Backend Code Gen");
 			MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
-			codegen_ok = fast_generate_code(fast_gen);
+			if (fast_backend_can_fallback_to_llvm_per_entity()) {
+				codegen_ok = fast_generate_code_with_llvm_support(fast_gen, checker);
+			} else {
+				codegen_ok = fast_generate_code(fast_gen);
+			}
 			break;
 		}
 

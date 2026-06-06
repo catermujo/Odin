@@ -8,6 +8,7 @@ struct FastGenerator : LinkerData {
 	CheckerInfo *info;
 	Checker *checker;
 	Array<FastLiteralBlob> literal_blobs;
+	Array<Entity *> emitted_entities;
 };
 
 enum FastScalarKind {
@@ -82,6 +83,12 @@ struct FastLeafProcEmitter {
 	bool use_frame;
 };
 
+struct FastBackendErrorState {
+	i64 error_count;
+	i64 warning_count;
+	isize error_value_count;
+};
+
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out);
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot);
 gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce);
@@ -120,6 +127,61 @@ gb_internal void fast_backend_emit_label(gbFile *file, FastLeafProcPlan *plan, i
 gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
 
+gb_internal String fast_backend_hybrid_linked_output_reason(void) {
+	switch (build_context.build_mode) {
+	case BuildMode_Executable:
+		break;
+	case BuildMode_DynamicLibrary:
+		return str_lit("fast backend dynamic libraries still fall back to LLVM on macOS");
+	case BuildMode_Object:
+	case BuildMode_StaticLibrary:
+	case BuildMode_Assembly:
+	case BuildMode_LLVM_IR:
+		return {};
+	}
+
+	if (build_context.metrics.os != TargetOs_darwin) {
+		return str_lit("fast backend linked output currently supports only macOS");
+	}
+	if (!build_context.use_separate_modules) {
+		return str_lit("fast backend linked output requires -use-separate-modules");
+	}
+	if (build_context.sanitizer_flags != 0) {
+		return str_lit("fast backend linked output does not yet support sanitizers");
+	}
+	if (build_context.lto_kind != LTO_None) {
+		return str_lit("fast backend linked output does not yet support LTO");
+	}
+	return {};
+}
+
+gb_internal bool fast_backend_can_fallback_to_llvm_per_entity(void) {
+	return fast_backend_hybrid_linked_output_reason().len != 0 ? false : build_context.build_mode == BuildMode_Executable;
+}
+
+gb_internal FastBackendErrorState fast_backend_save_error_state(void) {
+	mutex_lock(&global_error_collector.mutex);
+	FastBackendErrorState state = {};
+	state.error_count = global_error_collector.count.load();
+	state.warning_count = global_error_collector.warning_count.load();
+	state.error_value_count = global_error_collector.error_values.count;
+	mutex_unlock(&global_error_collector.mutex);
+	return state;
+}
+
+gb_internal void fast_backend_restore_error_state(FastBackendErrorState const &state) {
+	mutex_lock(&global_error_collector.mutex);
+	for (isize i = state.error_value_count; i < global_error_collector.error_values.count; i++) {
+		array_free(&global_error_collector.error_values[i].msg);
+	}
+	array_resize(&global_error_collector.error_values, state.error_value_count);
+	global_error_collector.count.store(state.error_count);
+	global_error_collector.warning_count.store(state.warning_count);
+	global_error_collector.curr_error_value = {};
+	global_error_collector.curr_error_value_set.store(false);
+	mutex_unlock(&global_error_collector.mutex);
+}
+
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
 		return false;
@@ -147,6 +209,7 @@ gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	gen->info = &c->info;
 	gen->checker = c;
 	gen->literal_blobs = array_make<FastLiteralBlob>(heap_allocator(), 0, 8);
+	gen->emitted_entities = array_make<Entity *>(heap_allocator(), 0, c->info.definitions.count);
 	return true;
 }
 
@@ -2110,6 +2173,7 @@ gb_internal bool fast_backend_plan_global_var(FastGenerator *gen, Entity *e, Fas
 }
 
 gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlobalVarPlan> *globals, Array<FastLeafProcPlan> *procedures) {
+	bool allow_llvm_fallback = fast_backend_can_fallback_to_llvm_per_entity();
 	for (Entity *e : gen->info->definitions) {
 		if (!fast_entity_is_local(gen->info, e)) {
 			continue;
@@ -2133,16 +2197,26 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 			             EntityFlag_Require|
 			             EntityFlag_CustomLinkage_Weak|
 			             EntityFlag_CustomLinkage_LinkOnce)) {
+				if (allow_llvm_fallback) {
+					continue;
+				}
 				error(e->token, "Fast backend only supports plain top-level procedures right now");
 				return false;
 			}
 
 			FastLeafProcPlan plan = {};
-			if (!fast_backend_plan_leaf_proc(gen, e, &plan)) {
+			if (allow_llvm_fallback) {
+				FastBackendErrorState error_state = fast_backend_save_error_state();
+				if (!fast_backend_plan_leaf_proc(gen, e, &plan)) {
+					fast_backend_restore_error_state(error_state);
+					continue;
+				}
+			} else if (!fast_backend_plan_leaf_proc(gen, e, &plan)) {
 				return false;
 			}
 			plan.proc_index = cast(i32)procedures->count;
 			array_add(procedures, plan);
+			array_add(&gen->emitted_entities, e);
 			break;
 		}
 
@@ -2153,14 +2227,24 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 			if (flags & (EntityFlag_Overridden|
 			             EntityFlag_CustomLinkage_Weak|
 			             EntityFlag_CustomLinkage_LinkOnce)) {
+				if (allow_llvm_fallback) {
+					break;
+				}
 				error(e->token, "Fast backend does not yet support this global variable linkage");
 				return false;
 			}
 			FastGlobalVarPlan plan = {};
-			if (!fast_backend_plan_global_var(gen, e, &plan)) {
+			if (allow_llvm_fallback) {
+				FastBackendErrorState error_state = fast_backend_save_error_state();
+				if (!fast_backend_plan_global_var(gen, e, &plan)) {
+					fast_backend_restore_error_state(error_state);
+					break;
+				}
+			} else if (!fast_backend_plan_global_var(gen, e, &plan)) {
 				return false;
 			}
 			array_add(globals, plan);
+			array_add(&gen->emitted_entities, e);
 			break;
 		}
 
