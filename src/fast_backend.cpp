@@ -1818,10 +1818,6 @@ gb_internal bool fast_backend_plan_for_stmt(FastGenerator *gen, FastLeafProcPlan
 }
 
 gb_internal bool fast_backend_plan_switch_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstSwitchStmt *ss) {
-	if (ss->partial) {
-		error(ss->token, "Fast backend does not yet support #partial switch statements");
-		return false;
-	}
 	if (ss->label != nullptr && fast_backend_label_name(ss->label).len == 0) {
 		error(ss->label, "Fast backend expected an identifier switch label");
 		return false;
