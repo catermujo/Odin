@@ -196,6 +196,12 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	case Type_Array:
 		return fast_backend_type_is_supported_value(type->Array.elem, nullptr, nullptr);
 
+	case Type_DynamicArray:
+		return fast_backend_type_is_supported_value(type->DynamicArray.elem, nullptr, nullptr);
+
+	case Type_FixedCapacityDynamicArray:
+		return fast_backend_type_is_supported_value(type->FixedCapacityDynamicArray.elem, nullptr, nullptr);
+
 	case Type_Struct:
 		if (type->Struct.is_raw_union || type->Struct.soa_kind != StructSoa_None) {
 			return false;
@@ -579,6 +585,13 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 	case Type_Slice:
 		base_uses_data_pointer = true;
 		value_type = indexed_type->Slice.elem;
+		break;
+	case Type_DynamicArray:
+		base_uses_data_pointer = true;
+		value_type = indexed_type->DynamicArray.elem;
+		break;
+	case Type_FixedCapacityDynamicArray:
+		value_type = indexed_type->FixedCapacityDynamicArray.elem;
 		break;
 	case Type_Basic:
 		if (indexed_type->Basic.kind == Basic_string || indexed_type->Basic.kind == Basic_UntypedString) {
@@ -1163,7 +1176,7 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
-	if (id != BuiltinProc_len) {
+	if (id != BuiltinProc_len && id != BuiltinProc_cap) {
 		return false;
 	}
 	if (ce->args.count != 1) {
@@ -1187,7 +1200,14 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 		return false;
 	}
 
-	if (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type)) {
+	if (id == BuiltinProc_len && (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type))) {
+		if (arg_is_pointer) {
+			return fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg));
+		}
+		return fast_backend_can_emit_address_expr(plan, arg, nullptr, nullptr, nullptr);
+	}
+
+	if (is_type_dynamic_array(arg_type) || is_type_fixed_capacity_dynamic_array(arg_type)) {
 		if (arg_is_pointer) {
 			return fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg));
 		}
@@ -1364,7 +1384,7 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 		}
 
 		if (!fast_backend_type_is_supported_value(entity->type, nullptr, nullptr)) {
-			error(name, "Fast backend currently only supports scalar, array, struct, slice, and string local variable types");
+			error(name, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array local variable types");
 			return false;
 		}
 		if (!fast_backend_add_slot(plan, entity, entity->type)) {
@@ -1735,7 +1755,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 			}
 
 			if (!fast_backend_type_is_supported_value(param->type, nullptr, nullptr)) {
-				error(param->token, "Fast backend currently only supports scalar, array, struct, slice, and string parameter types");
+				error(param->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array parameter types");
 				return false;
 			}
 			array_add(&plan->params, param);
@@ -1763,7 +1783,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 		GB_ASSERT(result_entity != nullptr);
 		if (!fast_backend_classify_scalar_type(result_entity->type, &plan->return_type)) {
 			if (!fast_backend_type_is_supported_aggregate(result_entity->type)) {
-				error(result_entity->token, "Fast backend currently only supports scalar, array, struct, slice, and string result types");
+				error(result_entity->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array result types");
 				return false;
 			}
 			if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
@@ -1793,7 +1813,7 @@ gb_internal bool fast_backend_plan_global_var(FastGenerator *gen, Entity *e, Fas
 	}
 
 	if (!fast_backend_type_is_supported_value(e->type, nullptr, nullptr)) {
-		error(e->token, "Fast backend currently only supports scalar, array, struct, slice, and string global variable types");
+		error(e->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array global variable types");
 		return false;
 	}
 
@@ -3203,7 +3223,7 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
-	if (id != BuiltinProc_len || ce->args.count != 1) {
+	if ((id != BuiltinProc_len && id != BuiltinProc_cap) || ce->args.count != 1) {
 		return false;
 	}
 
@@ -3227,8 +3247,12 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 	}
 
 	i64 offset = -1;
-	if (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type)) {
+	if (id == BuiltinProc_len && (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type))) {
 		offset = build_context.int_size;
+	} else if (is_type_dynamic_array(arg_type)) {
+		offset = id == BuiltinProc_len ? 1*build_context.int_size : 2*build_context.int_size;
+	} else if (is_type_fixed_capacity_dynamic_array(arg_type) && id == BuiltinProc_len) {
+		offset = type_offset_of(arg_type, 1);
 	}
 	if (offset < 0) {
 		return false;
