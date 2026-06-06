@@ -128,6 +128,8 @@ gb_internal bool fast_backend_can_emit_aggregate_call_expr(FastLeafProcPlan *pla
 gb_internal bool fast_backend_can_emit_slice_expr(FastLeafProcPlan *plan, AstSliceExpr *se, Type *expected_type);
 gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_is_array_binary_expr(Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
@@ -145,6 +147,7 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 gb_internal bool fast_backend_emit_call_expr_to_address(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
 gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
+gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
 gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr);
 gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProcEmitter *emitter, Ast *lhs, Type *type, AstCompoundLit *cl);
 gb_internal bool fast_backend_expr_is_string_literal_value(Type *type, Ast *expr);
@@ -153,6 +156,7 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal i32 fast_backend_slice_expr_spill_depth(AstSliceExpr *se);
 gb_internal i32 fast_backend_slice_compound_lit_spill_depth(Ast *expr, Type *expected_type);
+gb_internal i32 fast_backend_array_binary_expr_spill_depth(Ast *expr);
 gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce);
 gb_internal bool fast_backend_can_emit_raw_data_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_emit_raw_data_expr(FastLeafProcEmitter *emitter, Ast *expr);
@@ -1268,6 +1272,8 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 				Ast *arg = unparen_expr(ce->args[i]);
 				if (fast_backend_is_slice_compound_lit_expr(arg, param->type)) {
 					arg_depth = fast_backend_slice_compound_lit_spill_depth(arg, param->type);
+				} else if (fast_backend_is_array_binary_expr(arg, param->type)) {
+					arg_depth = fast_backend_array_binary_expr_spill_depth(arg);
 				} else {
 					arg_depth = type_and_value_of_expr(arg).mode == Addressing_Constant ? 0 : fast_backend_address_expr_spill_depth(arg);
 				}
@@ -1326,6 +1332,9 @@ gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, As
 
 	expr = unparen_expr(expr);
 	switch (expr->kind) {
+	case Ast_BinaryExpr:
+		return fast_backend_can_emit_array_binary_expr(plan, expr, expected_type);
+
 	case Ast_DerefExpr:
 	case Ast_SelectorExpr:
 	case Ast_IndexExpr: {
@@ -1368,6 +1377,47 @@ gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *e
 		return fast_backend_can_emit_leaf_expr(plan, expr, expected_type);
 	}
 	return fast_backend_can_emit_aggregate_expr(plan, expr, expected_type);
+}
+
+gb_internal bool fast_backend_is_array_binary_expr(Ast *expr, Type *expected_type) {
+	expr = unparen_expr(expr);
+	Type *type = default_type(expected_type);
+	Type *base = base_type(type);
+	return expr != nullptr && expr->kind == Ast_BinaryExpr && type != nullptr && base != nullptr && base->kind == Type_Array;
+}
+
+gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
+	if (plan == nullptr || !fast_backend_is_array_binary_expr(expr, expected_type)) {
+		return false;
+	}
+	expr = unparen_expr(expr);
+	Type *type = default_type(expected_type);
+	Type *base = base_type(type);
+
+	Type *left_type = default_type(type_of_expr(expr->BinaryExpr.left));
+	Type *right_type = default_type(type_of_expr(expr->BinaryExpr.right));
+	if (!are_types_identical(left_type, type) || !are_types_identical(right_type, type)) {
+		return false;
+	}
+
+	FastScalarType elem_type = {};
+	if (!fast_backend_classify_scalar_type(base->Array.elem, &elem_type) ||
+	    !fast_backend_scalar_binary_op_supported(expr->BinaryExpr.op.kind, elem_type)) {
+		return false;
+	}
+
+	Type *lhs_storage_type = nullptr;
+	Type *rhs_storage_type = nullptr;
+	bool lhs_scalar = false;
+	bool rhs_scalar = false;
+	return fast_backend_can_emit_address_expr(plan, expr->BinaryExpr.left, &lhs_storage_type, nullptr, &lhs_scalar) &&
+	       fast_backend_can_emit_address_expr(plan, expr->BinaryExpr.right, &rhs_storage_type, nullptr, &rhs_scalar) &&
+	       !lhs_scalar &&
+	       !rhs_scalar &&
+	       lhs_storage_type != nullptr &&
+	       rhs_storage_type != nullptr &&
+	       are_types_identical(default_type(lhs_storage_type), type) &&
+	       are_types_identical(default_type(rhs_storage_type), type);
 }
 
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type) {
@@ -1604,6 +1654,18 @@ gb_internal i32 fast_backend_slice_compound_lit_spill_depth(Ast *expr, Type *exp
 		}
 		depth = gb_max(depth, 2 + fast_backend_leaf_expr_spill_depth(value));
 	}
+	return depth;
+}
+
+gb_internal i32 fast_backend_array_binary_expr_spill_depth(Ast *expr) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr || expr->kind != Ast_BinaryExpr) {
+		return 0;
+	}
+
+	i32 depth = 3;
+	depth = gb_max(depth, 1 + fast_backend_address_expr_spill_depth(expr->BinaryExpr.left));
+	depth = gb_max(depth, 2 + fast_backend_address_expr_spill_depth(expr->BinaryExpr.right));
 	return depth;
 }
 
@@ -2048,6 +2110,8 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
 		} else if (fast_backend_can_emit_aggregate_call_expr(plan, rhs, entity->type)) {
 			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_call_expr_spill_depth(&unparen_expr(rhs)->CallExpr));
+		} else if (fast_backend_can_emit_array_binary_expr(plan, rhs, entity->type)) {
+			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_array_binary_expr_spill_depth(rhs));
 		} else if (fast_backend_can_emit_scalar_compound_lit_expr(plan, rhs, entity->type)) {
 			plan->spill_depth = gb_max(plan->spill_depth, fast_backend_scalar_compound_lit_spill_depth(rhs, entity->type));
 		} else if (fast_backend_can_emit_slice_compound_lit_expr(plan, rhs, entity->type)) {
@@ -2121,6 +2185,8 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(rhs));
 			} else if (fast_backend_can_emit_aggregate_call_expr(plan, rhs, rhs_type)) {
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_call_expr_spill_depth(&unparen_expr(rhs)->CallExpr));
+			} else if (fast_backend_can_emit_array_binary_expr(plan, rhs, rhs_type)) {
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_array_binary_expr_spill_depth(rhs));
 			} else if (fast_backend_can_emit_slice_compound_lit_expr(plan, rhs, rhs_type)) {
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_slice_compound_lit_spill_depth(rhs, rhs_type));
 			} else if (rhs_type != nullptr && unparen_expr(rhs)->kind == Ast_SliceExpr && fast_backend_can_emit_slice_expr(plan, &unparen_expr(rhs)->SliceExpr, rhs_type)) {
@@ -2144,6 +2210,8 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 		FastScalarType scalar_type = {};
 		if (fast_backend_expr_scalar_type(rhs, target_type, &scalar_type)) {
 			plan->spill_depth = gb_max(plan->spill_depth, gb_max(fast_backend_leaf_expr_spill_depth(rhs), 1 + fast_backend_address_expr_spill_depth(lhs)));
+		} else if (fast_backend_can_emit_array_binary_expr(plan, rhs, target_type)) {
+			plan->spill_depth = gb_max(plan->spill_depth, gb_max(fast_backend_array_binary_expr_spill_depth(rhs), fast_backend_address_expr_spill_depth(lhs)));
 		} else if (fast_backend_can_emit_scalar_compound_lit_expr(plan, rhs, target_type)) {
 			plan->spill_depth = gb_max(plan->spill_depth, gb_max(fast_backend_scalar_compound_lit_spill_depth(rhs, target_type), fast_backend_address_expr_spill_depth(lhs)));
 		} else if (fast_backend_can_emit_slice_compound_lit_expr(plan, rhs, target_type)) {
@@ -2198,6 +2266,8 @@ gb_internal bool fast_backend_plan_return_stmt(FastGenerator *gen, FastLeafProcP
 
 	if (fast_backend_can_emit_aggregate_call_expr(plan, result, result_type)) {
 		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_call_expr_spill_depth(&unparen_expr(result)->CallExpr));
+	} else if (fast_backend_can_emit_array_binary_expr(plan, result, result_type)) {
+		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_array_binary_expr_spill_depth(result));
 	} else if (fast_backend_can_emit_scalar_compound_lit_expr(plan, result, result_type)) {
 		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_scalar_compound_lit_spill_depth(result, result_type));
 	} else if (fast_backend_can_emit_slice_compound_lit_expr(plan, result, result_type)) {
@@ -3925,6 +3995,9 @@ gb_internal bool fast_backend_emit_materialize_aggregate_arg_pointer(FastLeafPro
 		return false;
 	}
 	*temp_bytes_ += alloc_bytes;
+	if (fast_backend_can_emit_array_binary_expr(emitter->plan, arg, param_type)) {
+		return fast_backend_emit_store_array_binary_expr_to_work_address(emitter, param_type, arg);
+	}
 	if (fast_backend_can_emit_slice_compound_lit_expr(emitter->plan, arg, param_type)) {
 		return fast_backend_emit_store_slice_compound_lit_to_work_address(emitter, param_type, arg);
 	}
@@ -5440,6 +5513,78 @@ gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(Fast
 	return true;
 }
 
+gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
+	if (emitter == nullptr || !fast_backend_can_emit_array_binary_expr(emitter->plan, expr, type)) {
+		return false;
+	}
+
+	type = default_type(type);
+	Type *base = base_type(type);
+	Type *elem_type = base->Array.elem;
+	FastScalarType scalar_type = {};
+	if (!fast_backend_classify_scalar_type(elem_type, &scalar_type)) {
+		return false;
+	}
+
+	expr = unparen_expr(expr);
+	i32 elem_size = cast(i32)type_size_of(elem_type);
+	i64 count = base->Array.count;
+	if (elem_size <= 0 || count < 0) {
+		return false;
+	}
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	fast_backend_emit_push_work_reg(emitter);
+	i32 dst_depth = spill_base + 1;
+
+	if (!fast_backend_emit_address_expr(emitter, expr->BinaryExpr.left, nullptr)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 lhs_depth = spill_base + 2;
+
+	if (!fast_backend_emit_address_expr(emitter, expr->BinaryExpr.right, nullptr)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 rhs_depth = spill_base + 3;
+
+	for (i64 index = 0; index < count; index++) {
+		i32 offset = cast(i32)(index*elem_size);
+
+		fast_backend_emit_load_work_from_spill_depth(emitter, lhs_depth);
+		fast_backend_emit_add_imm_to_work_reg(emitter, offset);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
+		} else {
+			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
+		}
+		fast_backend_emit_push_work_reg(emitter);
+
+		fast_backend_emit_load_work_from_spill_depth(emitter, rhs_depth);
+		fast_backend_emit_add_imm_to_work_reg(emitter, offset);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
+		} else {
+			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+
+		if (!fast_backend_emit_scalar_binary_op(emitter, expr->BinaryExpr.op.kind, scalar_type, nullptr)) {
+			return false;
+		}
+
+		fast_backend_emit_load_tmp_from_spill_depth(emitter, dst_depth);
+		fast_backend_emit_add_imm_to_tmp_reg(emitter, offset);
+		fast_backend_emit_store_work_to_tmp_address(emitter, scalar_type);
+	}
+
+	fast_backend_emit_load_work_from_spill_depth(emitter, dst_depth);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
 	if (fast_backend_expr_is_string_literal_value(type, expr)) {
 		return fast_backend_emit_store_string_literal_to_address(emitter, type, expr);
@@ -5517,6 +5662,12 @@ gb_internal bool fast_backend_emit_store_value_to_entity(FastLeafProcEmitter *em
 	if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr, type)) {
 		return fast_backend_emit_store_scalar_compound_lit_to_entity(emitter, entity, type, &unparen_expr(expr)->CompoundLit);
 	}
+	if (fast_backend_can_emit_array_binary_expr(emitter->plan, expr, type)) {
+		if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+			return false;
+		}
+		return fast_backend_emit_store_array_binary_expr_to_work_address(emitter, type, expr);
+	}
 	if (fast_backend_can_emit_slice_compound_lit_expr(emitter->plan, expr, type)) {
 		if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
 			return false;
@@ -5583,6 +5734,12 @@ gb_internal bool fast_backend_emit_store_value_to_lhs(FastLeafProcEmitter *emitt
 	}
 	if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, rhs, type)) {
 		return fast_backend_emit_store_scalar_compound_lit_to_lhs(emitter, lhs, type, &unparen_expr(rhs)->CompoundLit);
+	}
+	if (fast_backend_can_emit_array_binary_expr(emitter->plan, rhs, type)) {
+		if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
+			return false;
+		}
+		return fast_backend_emit_store_array_binary_expr_to_work_address(emitter, type, rhs);
 	}
 	if (fast_backend_can_emit_slice_compound_lit_expr(emitter->plan, rhs, type)) {
 		if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
@@ -5802,6 +5959,10 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 			fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(emitter->plan->result_value_type));
 		} else if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, result, emitter->plan->result_value_type)) {
 			if (!fast_backend_emit_call_expr_to_address(emitter, &unparen_expr(result)->CallExpr)) {
+				return false;
+			}
+		} else if (fast_backend_can_emit_array_binary_expr(emitter->plan, result, emitter->plan->result_value_type)) {
+			if (!fast_backend_emit_store_array_binary_expr_to_work_address(emitter, emitter->plan->result_value_type, result)) {
 				return false;
 			}
 		} else if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, result, emitter->plan->result_value_type)) {
