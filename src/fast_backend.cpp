@@ -581,6 +581,39 @@ gb_internal bool fast_backend_get_selector_info(Ast *expr, Type **value_type_, T
 	return true;
 }
 
+gb_internal bool fast_backend_get_using_entity_info(Entity *entity, Entity **parent_, Type **value_type_, i64 *offset_, bool *parent_is_pointer_) {
+	if (entity == nullptr || entity->kind != Entity_Variable || entity->using_parent == nullptr) {
+		return false;
+	}
+
+	Entity *parent = entity->using_parent;
+	Type *container_type = default_type(parent->type);
+	if (container_type == nullptr) {
+		return false;
+	}
+
+	bool parent_is_pointer = false;
+	Type *base = base_type(container_type);
+	if (base != nullptr && (base->kind == Type_Pointer || base->kind == Type_MultiPointer)) {
+		parent_is_pointer = true;
+		container_type = default_type(type_deref(base, true));
+	}
+	if (container_type == nullptr) {
+		return false;
+	}
+
+	Selection sel = lookup_field_with_selection(container_type, entity_interned_name(entity), false, empty_selection, false);
+	if ((sel.entity == nullptr && !sel.pseudo_field) || sel.indirect || sel.is_bit_field || sel.swizzle_count != 0 || sel.index.count == 0) {
+		return false;
+	}
+
+	if (parent_) *parent_ = parent;
+	if (value_type_) *value_type_ = entity->type;
+	if (offset_) *offset_ = type_offset_of_from_selection(container_type, sel);
+	if (parent_is_pointer_) *parent_is_pointer_ = parent_is_pointer;
+	return true;
+}
+
 gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type_, i64 *elem_size_, bool *base_is_pointer_, bool *base_uses_data_pointer_) {
 	if (ie == nullptr) {
 		return false;
@@ -661,8 +694,19 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 	switch (expr->kind) {
 	case Ast_Ident: {
 		Entity *entity = expr->Ident.entity.load();
-		if (entity == nullptr || !fast_backend_find_storage(plan, entity, nullptr, &value_type, nullptr)) {
+		if (entity == nullptr) {
 			return false;
+		}
+		if (!fast_backend_find_storage(plan, entity, nullptr, &value_type, nullptr)) {
+			Entity *parent = nullptr;
+			i64 offset = 0;
+			bool parent_is_pointer = false;
+			if (!fast_backend_get_using_entity_info(entity, &parent, &value_type, &offset, &parent_is_pointer)) {
+				return false;
+			}
+			gb_unused(parent);
+			gb_unused(offset);
+			gb_unused(parent_is_pointer);
 		}
 		break;
 	}
@@ -1042,7 +1086,7 @@ gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, As
 	case Ast_Ident: {
 		Entity *entity = expr->Ident.entity.load();
 		Type *storage_type = nullptr;
-		if (entity != nullptr && fast_backend_find_storage(plan, entity, nullptr, &storage_type, nullptr)) {
+		if (entity != nullptr && fast_backend_can_emit_address_expr(plan, expr, &storage_type, nullptr, nullptr)) {
 			return storage_type != nullptr && are_types_identical(default_type(storage_type), expected_type);
 		}
 		return tv.mode == Addressing_Constant &&
@@ -1430,7 +1474,15 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 
 	case Ast_Ident: {
 		Entity *e = expr->Ident.entity.load();
-		return e != nullptr && fast_backend_find_scalar_storage(plan, e, nullptr, nullptr, nullptr);
+		if (e == nullptr) {
+			return false;
+		}
+		if (fast_backend_find_scalar_storage(plan, e, nullptr, nullptr, nullptr)) {
+			return true;
+		}
+		Type *value_type = nullptr;
+		bool is_scalar = false;
+		return fast_backend_can_emit_address_expr(plan, expr, &value_type, nullptr, &is_scalar) && is_scalar;
 	}
 
 	case Ast_DerefExpr:
@@ -1554,10 +1606,6 @@ gb_internal bool fast_backend_plan_value_decl(FastGenerator *gen, FastLeafProcPl
 
 	if (!vd->is_mutable) {
 		return true;
-	}
-	if (vd->is_using) {
-		error(vd->names[0], "Fast backend does not yet support 'using' value declarations");
-		return false;
 	}
 	if (vd->values.count != 0 && vd->values.count != vd->names.count) {
 		error(vd->names[0], "Fast backend currently only supports one-to-one value declarations");
@@ -3195,12 +3243,31 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 	switch (expr->kind) {
 	case Ast_Ident: {
 		Entity *entity = expr->Ident.entity.load();
-		if (entity == nullptr || !fast_backend_find_storage(emitter->plan, entity, nullptr, &value_type, nullptr)) {
+		if (entity == nullptr) {
 			return false;
 		}
-		if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+		if (fast_backend_find_storage(emitter->plan, entity, nullptr, &value_type, nullptr)) {
+			if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+				return false;
+			}
+			break;
+		}
+
+		Entity *parent = nullptr;
+		i64 offset = 0;
+		bool parent_is_pointer = false;
+		if (!fast_backend_get_using_entity_info(entity, &parent, &value_type, &offset, &parent_is_pointer)) {
 			return false;
 		}
+		if (parent_is_pointer) {
+			Ast *parent_expr = parent->identifier.load() ? parent->identifier.load() : entity->using_expr;
+			if (parent_expr == nullptr || !fast_backend_emit_leaf_expr(emitter, parent_expr)) {
+				return false;
+			}
+		} else if (!fast_backend_emit_address_of_storage_entity(emitter, parent)) {
+			return false;
+		}
+		fast_backend_emit_add_imm_to_work_reg(emitter, offset);
 		break;
 	}
 
