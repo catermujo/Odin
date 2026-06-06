@@ -5057,6 +5057,21 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 		fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
 	}
 
+	FastScalarType len_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+
+	if (id == BuiltinProc_cap && is_type_fixed_capacity_dynamic_array(arg_type)) {
+		u64 capacity = cast(u64)arg_type->FixedCapacityDynamicArray.capacity;
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), capacity);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+		} else {
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), capacity);
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), len_type);
+		}
+		return true;
+	}
+
 	i64 offset = -1;
 	if (id == BuiltinProc_len && (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type))) {
 		offset = build_context.int_size;
@@ -5070,8 +5085,6 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 	}
 
 	fast_backend_emit_add_imm_to_work_reg(emitter, offset);
-	FastScalarType len_type = {};
-	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
 	} else {
