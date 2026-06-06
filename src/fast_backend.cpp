@@ -51,6 +51,7 @@ struct FastLeafProcPlan {
 	i32 local_stack_size;
 	i32 proc_index;
 	bool has_calls;
+	bool has_defer;
 	bool has_context_slot;
 	bool has_result;
 	bool return_by_pointer;
@@ -70,14 +71,28 @@ struct FastGlobalVarPlan {
 struct FastControlContext {
 	Ast *label;
 	i32 break_label;
+	i32 break_scope_count;
 	i32 continue_label;
+	i32 continue_scope_count;
 	i32 fallthrough_label;
+	i32 fallthrough_scope_count;
+};
+
+struct FastDeferredStmt {
+	Ast *stmt;
+};
+
+struct FastScopeState {
+	Scope *scope;
+	isize defer_base;
 };
 
 struct FastLeafProcEmitter {
 	gbFile *file;
 	FastLeafProcPlan *plan;
 	Array<FastControlContext> control_stack;
+	Array<FastDeferredStmt> deferred_stmts;
+	Array<FastScopeState> scope_stack;
 	i32 current_spill_depth;
 	i32 epilogue_label_index;
 	i32 next_label_index;
@@ -108,6 +123,10 @@ gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, As
 gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_expr_has_call(Ast *expr);
 gb_internal bool fast_backend_stmt_has_call(Ast *stmt);
+gb_internal bool fast_backend_emit_enter_scope(FastLeafProcEmitter *emitter, Scope *scope);
+gb_internal bool fast_backend_emit_leave_scope(FastLeafProcEmitter *emitter, Scope *scope);
+gb_internal bool fast_backend_emit_scope_exit_defers(FastLeafProcEmitter *emitter, i32 keep_scope_count);
+gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt);
 gb_internal bool fast_backend_find_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, Type **type_, bool *is_global_);
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
@@ -648,6 +667,8 @@ gb_internal bool fast_backend_stmt_has_call(Ast *stmt) {
 			}
 		}
 		return false;
+	case Ast_DeferStmt:
+		return fast_backend_stmt_has_call(stmt->DeferStmt.stmt);
 	case Ast_ExprStmt:
 		return fast_backend_expr_has_call(stmt->ExprStmt.expr);
 	case Ast_IfStmt:
@@ -2072,6 +2093,11 @@ gb_internal bool fast_backend_plan_branch_stmt(FastGenerator *gen, FastLeafProcP
 	return false;
 }
 
+gb_internal bool fast_backend_plan_defer_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstDeferStmt *ds) {
+	plan->has_defer = true;
+	return fast_backend_plan_stmt(gen, plan, ds->stmt);
+}
+
 gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstExprStmt *es) {
 	gb_unused(gen);
 
@@ -2109,13 +2135,15 @@ gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *pl
 		return fast_backend_plan_for_stmt(gen, plan, &stmt->ForStmt);
 	case Ast_SwitchStmt:
 		return fast_backend_plan_switch_stmt(gen, plan, &stmt->SwitchStmt);
+	case Ast_DeferStmt:
+		return fast_backend_plan_defer_stmt(gen, plan, &stmt->DeferStmt);
 	case Ast_BranchStmt:
 		return fast_backend_plan_branch_stmt(gen, plan, &stmt->BranchStmt);
 	case Ast_ReturnStmt:
 		return fast_backend_plan_return_stmt(gen, plan, &stmt->ReturnStmt);
 	}
 
-	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, call statements, if statements, for statements, switch statements, break/continue, and returns");
+	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, defer statements, call statements, if statements, for statements, switch statements, break/continue, and returns");
 	return false;
 }
 
@@ -2157,6 +2185,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	plan->local_stack_size = 0;
 	plan->proc_index = 0;
 	plan->has_calls = false;
+	plan->has_defer = false;
 	plan->has_context_slot = false;
 	plan->params = array_make<Entity *>(heap_allocator(), 0, pt->param_count);
 	plan->slots = array_make<FastLocalSlot>(heap_allocator(), 0, pt->param_count);
@@ -2220,6 +2249,9 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 		return false;
 	}
 	plan->has_calls = fast_backend_stmt_has_call(plan->body);
+	if (plan->has_defer && plan->has_result && !plan->return_by_pointer) {
+		plan->spill_depth = gb_max(plan->spill_depth, 1);
+	}
 	return true;
 }
 
@@ -4300,6 +4332,55 @@ gb_internal FastControlContext *fast_backend_find_control_context(FastLeafProcEm
 	return nullptr;
 }
 
+gb_internal isize fast_backend_defer_base_for_scope_count(FastLeafProcEmitter *emitter, i32 keep_scope_count) {
+	if (keep_scope_count <= 0) {
+		return 0;
+	}
+	if (keep_scope_count >= cast(i32)emitter->scope_stack.count) {
+		return emitter->deferred_stmts.count;
+	}
+	return emitter->scope_stack[keep_scope_count].defer_base;
+}
+
+gb_internal bool fast_backend_emit_scope_exit_defers(FastLeafProcEmitter *emitter, i32 keep_scope_count) {
+	isize defer_base = fast_backend_defer_base_for_scope_count(emitter, keep_scope_count);
+	while (emitter->deferred_stmts.count > defer_base) {
+		FastDeferredStmt deferred = emitter->deferred_stmts[emitter->deferred_stmts.count-1];
+		emitter->deferred_stmts.count -= 1;
+		if (!fast_backend_emit_stmt(emitter, deferred.stmt)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_emit_enter_scope(FastLeafProcEmitter *emitter, Scope *scope) {
+	if (scope == nullptr) {
+		return true;
+	}
+	FastScopeState state = {};
+	state.scope = scope;
+	state.defer_base = emitter->deferred_stmts.count;
+	array_add(&emitter->scope_stack, state);
+	return true;
+}
+
+gb_internal bool fast_backend_emit_leave_scope(FastLeafProcEmitter *emitter, Scope *scope) {
+	if (scope == nullptr) {
+		return true;
+	}
+	if (emitter->scope_stack.count == 0 || emitter->scope_stack[emitter->scope_stack.count-1].scope != scope) {
+		return false;
+	}
+	FastScopeState state = emitter->scope_stack[emitter->scope_stack.count-1];
+	if (!fast_backend_emit_scope_exit_defers(emitter, cast(i32)emitter->scope_stack.count-1)) {
+		return false;
+	}
+	emitter->deferred_stmts.count = state.defer_base;
+	emitter->scope_stack.count -= 1;
+	return true;
+}
+
 gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i32 label_index) {
 	char label[64] = {};
 	fast_backend_make_label_name(label, gb_size_of(label), emitter->plan, label_index);
@@ -5200,13 +5281,41 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 	return true;
 }
 
+gb_internal bool fast_backend_emit_defer_stmt(FastLeafProcEmitter *emitter, AstDeferStmt *ds) {
+	if (emitter->scope_stack.count == 0) {
+		return false;
+	}
+	FastDeferredStmt deferred = {};
+	deferred.stmt = ds->stmt;
+	array_add(&emitter->deferred_stmts, deferred);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, AstReturnStmt *rs) {
 	if (!emitter->plan->return_by_pointer) {
+		bool preserve_result = rs->results.count != 0 && emitter->deferred_stmts.count != 0;
+		isize deferred_count = emitter->deferred_stmts.count;
 		if (rs->results.count != 0) {
 			if (!fast_backend_emit_leaf_expr(emitter, rs->results[0])) {
 				return false;
 			}
-			if (build_context.metrics.arch == TargetArch_amd64) {
+			if (preserve_result) {
+				fast_backend_emit_push_work_reg(emitter);
+			}
+		}
+		if (!fast_backend_emit_scope_exit_defers(emitter, 0)) {
+			return false;
+		}
+		emitter->deferred_stmts.count = deferred_count;
+		if (rs->results.count != 0) {
+			if (preserve_result) {
+				fast_backend_emit_pop_tmp_reg(emitter);
+				if (build_context.metrics.arch == TargetArch_amd64) {
+					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_return_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+				} else {
+					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_return_reg(), fast_backend_arm64_tmp_reg());
+				}
+			} else if (build_context.metrics.arch == TargetArch_amd64) {
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_return_reg()->r64, fast_backend_x64_work_reg()->r64);
 			} else {
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_return_reg(), fast_backend_arm64_work_reg());
@@ -5263,11 +5372,19 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		}
 	}
 
+	isize deferred_count = emitter->deferred_stmts.count;
+	if (!fast_backend_emit_scope_exit_defers(emitter, 0)) {
+		return false;
+	}
+	emitter->deferred_stmts.count = deferred_count;
 	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, emitter->epilogue_label_index);
 	return true;
 }
 
 gb_internal bool fast_backend_emit_if_stmt(FastLeafProcEmitter *emitter, AstIfStmt *is) {
+	if (!fast_backend_emit_enter_scope(emitter, is->scope)) {
+		return false;
+	}
 	if (is->init != nullptr && !fast_backend_emit_stmt(emitter, is->init)) {
 		return false;
 	}
@@ -5294,13 +5411,18 @@ gb_internal bool fast_backend_emit_if_stmt(FastLeafProcEmitter *emitter, AstIfSt
 		fast_backend_emit_label(emitter->file, emitter->plan, false_label);
 	}
 
-	return true;
+	return fast_backend_emit_leave_scope(emitter, is->scope);
 }
 
 gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstForStmt *fs) {
+	i32 outer_scope_count = cast(i32)emitter->scope_stack.count;
+	if (!fast_backend_emit_enter_scope(emitter, fs->scope)) {
+		return false;
+	}
 	if (fs->init != nullptr && !fast_backend_emit_stmt(emitter, fs->init)) {
 		return false;
 	}
+	i32 loop_scope_count = cast(i32)emitter->scope_stack.count;
 
 	i32 loop_label = fast_backend_alloc_label(emitter);
 	i32 post_label = fs->post != nullptr ? fast_backend_alloc_label(emitter) : loop_label;
@@ -5309,8 +5431,11 @@ gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstFor
 	FastControlContext ctx = {};
 	ctx.label = fs->label;
 	ctx.break_label = done_label;
+	ctx.break_scope_count = outer_scope_count;
 	ctx.continue_label = post_label;
+	ctx.continue_scope_count = loop_scope_count;
 	ctx.fallthrough_label = -1;
+	ctx.fallthrough_scope_count = -1;
 	array_add(&emitter->control_stack, ctx);
 	defer (emitter->control_stack.count -= 1);
 
@@ -5335,10 +5460,14 @@ gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstFor
 
 	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
 	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
-	return true;
+	return fast_backend_emit_leave_scope(emitter, fs->scope);
 }
 
 gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, AstSwitchStmt *ss) {
+	i32 outer_scope_count = cast(i32)emitter->scope_stack.count;
+	if (!fast_backend_emit_enter_scope(emitter, ss->scope)) {
+		return false;
+	}
 	if (ss->init != nullptr && !fast_backend_emit_stmt(emitter, ss->init)) {
 		return false;
 	}
@@ -5351,6 +5480,7 @@ gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, Ast
 	if (ss->tag != nullptr) {
 		tag_type = reduce_tuple_to_single_type(type_and_value_of_expr(ss->tag).type);
 	}
+	i32 switch_scope_count = cast(i32)emitter->scope_stack.count;
 	if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
 		return false;
 	}
@@ -5438,18 +5568,27 @@ gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, Ast
 		FastControlContext ctx = {};
 		ctx.label = ss->label;
 		ctx.break_label = done_label;
+		ctx.break_scope_count = outer_scope_count;
 		ctx.continue_label = -1;
+		ctx.continue_scope_count = -1;
 		ctx.fallthrough_label = i+1 < body_labels.count ? body_labels[i+1] : done_label;
+		ctx.fallthrough_scope_count = switch_scope_count;
 		array_add(&emitter->control_stack, ctx);
 		defer (emitter->control_stack.count -= 1);
+		if (!fast_backend_emit_enter_scope(emitter, cc->scope)) {
+			return false;
+		}
 		if (!fast_backend_emit_stmt_list(emitter, cc->stmts)) {
+			return false;
+		}
+		if (!fast_backend_emit_leave_scope(emitter, cc->scope)) {
 			return false;
 		}
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
 	}
 
 	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
-	return true;
+	return fast_backend_emit_leave_scope(emitter, ss->scope);
 }
 
 gb_internal bool fast_backend_emit_branch_stmt(FastLeafProcEmitter *emitter, AstBranchStmt *bs) {
@@ -5460,12 +5599,33 @@ gb_internal bool fast_backend_emit_branch_stmt(FastLeafProcEmitter *emitter, Ast
 
 	switch (bs->token.kind) {
 	case Token_break:
+		{
+			isize deferred_count = emitter->deferred_stmts.count;
+			if (!fast_backend_emit_scope_exit_defers(emitter, ctx->break_scope_count)) {
+				return false;
+			}
+			emitter->deferred_stmts.count = deferred_count;
+		}
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, ctx->break_label);
 		return true;
 	case Token_continue:
+		{
+			isize deferred_count = emitter->deferred_stmts.count;
+			if (!fast_backend_emit_scope_exit_defers(emitter, ctx->continue_scope_count)) {
+				return false;
+			}
+			emitter->deferred_stmts.count = deferred_count;
+		}
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, ctx->continue_label);
 		return true;
 	case Token_fallthrough:
+		{
+			isize deferred_count = emitter->deferred_stmts.count;
+			if (!fast_backend_emit_scope_exit_defers(emitter, ctx->fallthrough_scope_count)) {
+				return false;
+			}
+			emitter->deferred_stmts.count = deferred_count;
+		}
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, ctx->fallthrough_label);
 		return true;
 	}
@@ -5488,11 +5648,19 @@ gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt)
 	case Ast_EmptyStmt:
 		return true;
 	case Ast_BlockStmt:
-		return fast_backend_emit_stmt_list(emitter, stmt->BlockStmt.stmts);
+		if (!fast_backend_emit_enter_scope(emitter, stmt->BlockStmt.scope)) {
+			return false;
+		}
+		if (!fast_backend_emit_stmt_list(emitter, stmt->BlockStmt.stmts)) {
+			return false;
+		}
+		return fast_backend_emit_leave_scope(emitter, stmt->BlockStmt.scope);
 	case Ast_ValueDecl:
 		return fast_backend_emit_value_decl(emitter, &stmt->ValueDecl);
 	case Ast_AssignStmt:
 		return fast_backend_emit_assign_stmt(emitter, &stmt->AssignStmt);
+	case Ast_DeferStmt:
+		return fast_backend_emit_defer_stmt(emitter, &stmt->DeferStmt);
 	case Ast_ExprStmt:
 		return fast_backend_emit_expr_stmt(emitter, &stmt->ExprStmt);
 	case Ast_IfStmt:
@@ -5665,6 +5833,8 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.file = file;
 	emitter.plan = plan;
 	emitter.control_stack = array_make<FastControlContext>(heap_allocator(), 0, 4);
+	emitter.deferred_stmts = array_make<FastDeferredStmt>(heap_allocator(), 0, 4);
+	emitter.scope_stack = array_make<FastScopeState>(heap_allocator(), 0, 4);
 	emitter.current_spill_depth = 0;
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
@@ -5679,8 +5849,16 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 		return false;
 	}
 
+	if (!fast_backend_emit_enter_scope(&emitter, plan->body->BlockStmt.scope)) {
+		error(plan->entity->token, "Fast backend failed to initialize the procedure scope");
+		return false;
+	}
 	if (!fast_backend_emit_stmt_list(&emitter, plan->body->BlockStmt.stmts)) {
 		error(plan->entity->token, "Fast backend failed to emit the procedure body");
+		return false;
+	}
+	if (!fast_backend_emit_leave_scope(&emitter, plan->body->BlockStmt.scope)) {
+		error(plan->entity->token, "Fast backend failed to emit deferred procedure statements");
 		return false;
 	}
 
