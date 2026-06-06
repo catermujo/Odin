@@ -128,6 +128,7 @@ gb_internal bool fast_backend_can_emit_aggregate_call_expr(FastLeafProcPlan *pla
 gb_internal bool fast_backend_can_emit_slice_expr(FastLeafProcPlan *plan, AstSliceExpr *se, Type *expected_type);
 gb_internal bool fast_backend_can_emit_direct_array_index_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_can_emit_direct_slice_index_expr(FastLeafProcPlan *plan, Ast *expr);
+gb_internal bool fast_backend_can_emit_direct_struct_selector_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
@@ -188,6 +189,7 @@ gb_internal void fast_backend_emit_push_work_reg(FastLeafProcEmitter *emitter);
 gb_internal void fast_backend_emit_pop_tmp_reg(FastLeafProcEmitter *emitter);
 gb_internal bool fast_backend_emit_leaf_direct_array_index_expr(FastLeafProcEmitter *emitter, Ast *expr);
 gb_internal bool fast_backend_emit_leaf_direct_slice_index_expr(FastLeafProcEmitter *emitter, Ast *expr);
+gb_internal bool fast_backend_emit_leaf_direct_struct_selector_expr(FastLeafProcEmitter *emitter, Ast *expr);
 
 gb_internal String fast_backend_hybrid_linked_output_reason(void) {
 	switch (build_context.build_mode) {
@@ -660,6 +662,27 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 		if (base_expr_type != nullptr && (base_expr_type->kind == Type_Pointer || base_expr_type->kind == Type_MultiPointer)) {
 			return fast_backend_leaf_expr_spill_depth(expr->SelectorExpr.expr);
 		}
+		if (base_expr_type != nullptr &&
+		    base_expr_type->kind == Type_Struct &&
+		    unparen_expr(expr->SelectorExpr.expr) != nullptr &&
+		    unparen_expr(expr->SelectorExpr.expr)->kind == Ast_CompoundLit) {
+			Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
+			return temp_slots + fast_backend_scalar_compound_lit_spill_depth(expr->SelectorExpr.expr, base_value_type);
+		}
+		if (base_expr_type != nullptr &&
+		    base_expr_type->kind == Type_Struct &&
+		    unparen_expr(expr->SelectorExpr.expr) != nullptr &&
+		    unparen_expr(expr->SelectorExpr.expr)->kind == Ast_CallExpr) {
+			Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
+			return temp_slots + fast_backend_call_expr_spill_depth(&unparen_expr(expr->SelectorExpr.expr)->CallExpr);
+		}
+		if (base_expr_type != nullptr && base_expr_type->kind == Type_Struct && fast_backend_can_emit_constant_aggregate_expr(default_type(type_of_expr(expr->SelectorExpr.expr)), expr->SelectorExpr.expr)) {
+			Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
+			return temp_slots + 2;
+		}
 		return fast_backend_address_expr_spill_depth(expr->SelectorExpr.expr);
 	}
 
@@ -1028,6 +1051,12 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 		gb_unused(offset);
 		if (base_is_pointer) {
 			if (!fast_backend_can_emit_leaf_expr(plan, expr->SelectorExpr.expr, type_of_expr(expr->SelectorExpr.expr))) {
+				return false;
+			}
+		} else if (default_type(type_of_expr(expr->SelectorExpr.expr)) != nullptr &&
+		           base_type(default_type(type_of_expr(expr->SelectorExpr.expr)))->kind == Type_Struct) {
+			if (!fast_backend_can_emit_address_expr(plan, expr->SelectorExpr.expr, nullptr, nullptr, nullptr) &&
+			    !fast_backend_can_emit_direct_struct_selector_expr(plan, expr)) {
 				return false;
 			}
 		} else if (!fast_backend_can_emit_address_expr(plan, expr->SelectorExpr.expr, nullptr, nullptr, nullptr)) {
@@ -2162,6 +2191,43 @@ gb_internal bool fast_backend_can_emit_direct_slice_index_expr(FastLeafProcPlan 
 	       fast_backend_can_emit_leaf_expr(plan, expr->IndexExpr.index, type_of_expr(expr->IndexExpr.index));
 }
 
+gb_internal bool fast_backend_can_emit_direct_struct_selector_expr(FastLeafProcPlan *plan, Ast *expr) {
+	expr = unparen_expr(expr);
+	if (plan == nullptr || expr == nullptr || expr->kind != Ast_SelectorExpr) {
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (!fast_backend_expr_scalar_type(expr, type_of_expr(expr), &scalar_type)) {
+		return false;
+	}
+
+	Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+	Type *base_type_ = base_type(base_value_type);
+	if (base_value_type == nullptr || base_type_ == nullptr || base_type_->kind != Type_Struct) {
+		return false;
+	}
+
+	Ast *base_expr = unparen_expr(expr->SelectorExpr.expr);
+	if (base_expr == nullptr || fast_backend_can_emit_address_expr(plan, expr->SelectorExpr.expr, nullptr, nullptr, nullptr)) {
+		return false;
+	}
+
+	if (!fast_backend_can_emit_scalar_compound_lit_expr(plan, expr->SelectorExpr.expr, base_value_type) &&
+	    !fast_backend_can_emit_aggregate_call_expr(plan, expr->SelectorExpr.expr, base_value_type) &&
+	    !fast_backend_can_emit_constant_aggregate_expr(base_value_type, expr->SelectorExpr.expr)) {
+		return false;
+	}
+
+	Type *value_type = nullptr;
+	Type *container_type = nullptr;
+	i64 offset = 0;
+	bool base_is_pointer = false;
+	return fast_backend_get_selector_info(expr, &value_type, &container_type, &offset, &base_is_pointer) &&
+	       !base_is_pointer &&
+	       value_type != nullptr;
+}
+
 gb_internal i32 fast_backend_slice_expr_spill_depth(AstSliceExpr *se) {
 	if (se == nullptr || se->expr == nullptr) {
 		return 0;
@@ -2220,7 +2286,8 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 		return fast_backend_can_emit_deref_expr(plan, expr);
 
 	case Ast_SelectorExpr:
-		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr);
+		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr) ||
+		       fast_backend_can_emit_direct_struct_selector_expr(plan, expr);
 
 	case Ast_IndexExpr:
 		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr) ||
@@ -4054,6 +4121,9 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 		return true;
 	}
 
+	if (expr->kind == Ast_SelectorExpr && fast_backend_can_emit_direct_struct_selector_expr(emitter->plan, expr)) {
+		return fast_backend_emit_leaf_direct_struct_selector_expr(emitter, expr);
+	}
 	if (expr->kind == Ast_IndexExpr && fast_backend_can_emit_direct_array_index_expr(emitter->plan, expr)) {
 		return fast_backend_emit_leaf_direct_array_index_expr(emitter, expr);
 	}
@@ -4065,6 +4135,58 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 		return false;
 	}
 
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_emit_leaf_direct_struct_selector_expr(FastLeafProcEmitter *emitter, Ast *expr) {
+	expr = unparen_expr(expr);
+	if (emitter == nullptr || expr == nullptr || !fast_backend_can_emit_direct_struct_selector_expr(emitter->plan, expr)) {
+		return false;
+	}
+
+	Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+	FastScalarType scalar_type = {};
+	Type *value_type = nullptr;
+	Type *container_type = nullptr;
+	i64 offset = 0;
+	bool base_is_pointer = false;
+	if (base_value_type == nullptr ||
+	    !fast_backend_expr_scalar_type(expr, type_of_expr(expr), &scalar_type) ||
+	    !fast_backend_get_selector_info(expr, &value_type, &container_type, &offset, &base_is_pointer)) {
+		return false;
+	}
+	gb_unused(value_type);
+	gb_unused(container_type);
+	gb_unused(base_is_pointer);
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
+	emitter->current_spill_depth += temp_slots;
+	i32 temp_depth = emitter->current_spill_depth;
+	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
+		if (!fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, base_value_type, &unparen_expr(expr->SelectorExpr.expr)->CompoundLit)) {
+			return false;
+		}
+	} else if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
+		if (!fast_backend_emit_call_expr_to_address(emitter, &unparen_expr(expr->SelectorExpr.expr)->CallExpr)) {
+			return false;
+		}
+	} else if (fast_backend_expr_is_zero_aggregate_value(base_value_type, expr->SelectorExpr.expr)) {
+		fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(base_value_type));
+	} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->SelectorExpr.expr)) {
+		return false;
+	}
+
+	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, cast(i32)offset);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
 	} else {
@@ -4316,6 +4438,30 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			if (!fast_backend_emit_leaf_expr(emitter, expr->SelectorExpr.expr)) {
 				return false;
 			}
+		} else if (default_type(type_of_expr(expr->SelectorExpr.expr)) != nullptr &&
+		           base_type(default_type(type_of_expr(expr->SelectorExpr.expr)))->kind == Type_Struct &&
+		           !fast_backend_can_emit_address_expr(emitter->plan, expr->SelectorExpr.expr, nullptr, nullptr, nullptr)) {
+			Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
+			i32 spill_base = emitter->current_spill_depth;
+			defer (emitter->current_spill_depth = spill_base);
+			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
+			emitter->current_spill_depth += temp_slots;
+			i32 temp_depth = emitter->current_spill_depth;
+			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
+				if (!fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, base_value_type, &unparen_expr(expr->SelectorExpr.expr)->CompoundLit)) {
+					return false;
+				}
+			} else if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
+				if (!fast_backend_emit_call_expr_to_address(emitter, &unparen_expr(expr->SelectorExpr.expr)->CallExpr)) {
+					return false;
+				}
+			} else if (fast_backend_expr_is_zero_aggregate_value(base_value_type, expr->SelectorExpr.expr)) {
+				fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(base_value_type));
+			} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->SelectorExpr.expr)) {
+				return false;
+			}
+			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
 		} else if (!fast_backend_emit_address_expr(emitter, expr->SelectorExpr.expr, nullptr)) {
 			return false;
 		}
