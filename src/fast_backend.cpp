@@ -112,6 +112,10 @@ gb_internal bool fast_backend_get_string_literal_blob(FastGenerator *gen, Type *
 gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan, AstCallExpr *ce, Type *expected_type);
 gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal i32 fast_backend_slice_expr_spill_depth(AstSliceExpr *se);
+gb_internal void fast_backend_make_label_name(char *buffer, isize buffer_size, FastLeafProcPlan *plan, i32 label_index);
+gb_internal void fast_backend_emit_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
+gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
+gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
 
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -170,13 +174,20 @@ gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *o
 		bt = bt->Enum.base_type;
 	}
 
+	if (bt->kind == Type_Basic &&
+	    (bt->Basic.kind == Basic_cstring || bt->Basic.kind == Basic_cstring16)) {
+		out->kind = FastScalar_Pointer;
+		out->bit_size = 8*build_context.metrics.ptr_size;
+		return true;
+	}
+
 	if (is_type_integer(bt)) {
 		out->kind = is_type_unsigned(bt) ? FastScalar_Unsigned : FastScalar_Signed;
 		out->bit_size = 8*type_size_of(bt);
 		return out->bit_size > 0 && out->bit_size <= 64;
 	}
 
-	if (is_type_pointer(type)) {
+	if (is_type_pointer(type) || bt->kind == Type_MultiPointer) {
 		out->kind = FastScalar_Pointer;
 		out->bit_size = 8*build_context.metrics.ptr_size;
 		return true;
@@ -601,6 +612,12 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 			value_type = t_u8;
 		} else if (indexed_type->Basic.kind == Basic_string16) {
 			base_uses_data_pointer = true;
+			value_type = t_u16;
+		} else if (indexed_type->Basic.kind == Basic_cstring) {
+			base_is_pointer = true;
+			value_type = t_u8;
+		} else if (indexed_type->Basic.kind == Basic_cstring16) {
+			base_is_pointer = true;
 			value_type = t_u16;
 		}
 		break;
@@ -1210,6 +1227,10 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 			return fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg));
 		}
 		return fast_backend_can_emit_address_expr(plan, arg, nullptr, nullptr, nullptr);
+	}
+
+	if (id == BuiltinProc_len && (is_type_cstring(arg_type) || is_type_cstring16(arg_type))) {
+		return fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg));
 	}
 
 	if (is_type_dynamic_array(arg_type) || is_type_fixed_capacity_dynamic_array(arg_type)) {
@@ -3332,6 +3353,74 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 	}
 	if (arg_type == nullptr) {
 		return false;
+	}
+
+	if (id == BuiltinProc_len && (is_type_cstring(arg_type) || is_type_cstring16(arg_type))) {
+		FastScalarType pointer_type = fast_backend_context_scalar_type();
+		FastScalarType len_type = {};
+		GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+		bool is_wide = is_type_cstring16(arg_type);
+		if (arg_is_pointer) {
+			if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+				return false;
+			}
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), pointer_type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), pointer_type);
+			}
+		} else if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+			return false;
+		}
+
+		i32 loop_label = fast_backend_alloc_label(emitter);
+		i32 done_label = fast_backend_alloc_label(emitter);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_work_reg()->r64);
+			gb_fprintf(emitter->file, "\ttest %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_work_reg()->r64);
+			char done_name[64] = {};
+			fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+			gb_fprintf(emitter->file, "\tje %s\n", done_name);
+			fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+			if (is_wide) {
+				gb_fprintf(emitter->file, "\tmovzx %s, WORD PTR [%s]\n", fast_backend_x64_scratch_reg()->r64, fast_backend_x64_work_reg()->r64);
+			} else {
+				gb_fprintf(emitter->file, "\tmovzx %s, BYTE PTR [%s]\n", fast_backend_x64_scratch_reg()->r64, fast_backend_x64_work_reg()->r64);
+			}
+			gb_fprintf(emitter->file, "\ttest %s, %s\n", fast_backend_x64_scratch_reg()->r64, fast_backend_x64_scratch_reg()->r64);
+			gb_fprintf(emitter->file, "\tje %s\n", done_name);
+			gb_fprintf(emitter->file, "\tadd %s, %d\n", fast_backend_x64_work_reg()->r64, is_wide ? 2 : 1);
+			fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
+			fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+			gb_fprintf(emitter->file, "\tsub %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+			if (is_wide) {
+				gb_fprintf(emitter->file, "\tshr %s, 1\n", fast_backend_x64_work_reg()->r64);
+			}
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+		} else {
+			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg());
+			gb_fprintf(emitter->file, "\tcmp %s, #0\n", fast_backend_arm64_work_reg());
+			char done_name[64] = {};
+			fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+			gb_fprintf(emitter->file, "\tb.eq %s\n", done_name);
+			fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+			if (is_wide) {
+				gb_fprintf(emitter->file, "\tldrh w%s, [%s]\n", fast_backend_arm64_div_tmp_reg()+1, fast_backend_arm64_work_reg());
+				gb_fprintf(emitter->file, "\tcmp w%s, #0\n", fast_backend_arm64_div_tmp_reg()+1);
+			} else {
+				gb_fprintf(emitter->file, "\tldrb w%s, [%s]\n", fast_backend_arm64_div_tmp_reg()+1, fast_backend_arm64_work_reg());
+				gb_fprintf(emitter->file, "\tcmp w%s, #0\n", fast_backend_arm64_div_tmp_reg()+1);
+			}
+			gb_fprintf(emitter->file, "\tb.eq %s\n", done_name);
+			gb_fprintf(emitter->file, "\tadd %s, %s, #%d\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), is_wide ? 2 : 1);
+			fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
+			fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+			gb_fprintf(emitter->file, "\tsub %s, %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), fast_backend_arm64_tmp_reg());
+			if (is_wide) {
+				gb_fprintf(emitter->file, "\tlsr %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+			}
+		}
+		return true;
 	}
 
 	if (arg_is_pointer) {
