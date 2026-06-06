@@ -4144,11 +4144,11 @@ int main(int arg_count, char const **arg_ptr) {
 			} else {
 				switch (build_context.build_mode) {
 				case BuildMode_Object:
+				case BuildMode_StaticLibrary:
 					break;
 				case BuildMode_Executable:
 				case BuildMode_DynamicLibrary:
-				case BuildMode_StaticLibrary:
-					fast_backend_reason = str_lit("fast backend currently emits only object files");
+					fast_backend_reason = str_lit("fast backend currently emits object files and static libraries");
 					break;
 				case BuildMode_Assembly:
 				case BuildMode_LLVM_IR:

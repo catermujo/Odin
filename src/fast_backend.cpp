@@ -143,6 +143,7 @@ gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	}
 
 	linker_data_init(gen, &c->info, c->parser->init_fullpath);
+	linker_enable_system_library_linking(gen);
 	gen->info = &c->info;
 	gen->checker = c;
 	gen->literal_blobs = array_make<FastLiteralBlob>(heap_allocator(), 0, 8);
@@ -5628,7 +5629,6 @@ gb_internal bool fast_backend_assemble_object(String asm_path, String obj_path) 
 
 gb_internal bool fast_generate_code(FastGenerator *gen) {
 	GB_ASSERT(gen != nullptr);
-	GB_ASSERT(build_context.build_mode == BuildMode_Object);
 
 	auto globals = array_make<FastGlobalVarPlan>(heap_allocator(), 0, gen->info->definitions.count);
 	auto procedures = array_make<FastLeafProcPlan>(heap_allocator(), 0, gen->info->definitions.count);
@@ -5636,8 +5636,14 @@ gb_internal bool fast_generate_code(FastGenerator *gen) {
 		return false;
 	}
 
-	String obj_path = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
 	String asm_path = concatenate_strings(permanent_allocator(), gen->output_base, str_lit(".fast.S"));
+	String obj_path = {};
+	if (build_context.build_mode == BuildMode_Object) {
+		obj_path = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
+	} else {
+		String obj_ext = infer_object_extension_from_build_context();
+		obj_path = concatenate3_strings(permanent_allocator(), gen->output_base, str_lit("."), obj_ext);
+	}
 
 	if (!fast_backend_write_object_assembly(gen, globals, procedures, asm_path)) {
 		return false;
