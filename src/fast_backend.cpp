@@ -50,6 +50,7 @@ struct FastLeafProcPlan {
 	i32 spill_depth;
 	i32 local_stack_size;
 	i32 proc_index;
+	bool has_calls;
 	bool has_context_slot;
 	bool has_result;
 	bool return_by_pointer;
@@ -105,6 +106,8 @@ gb_internal bool fast_backend_can_emit_slice_expr(FastLeafProcPlan *plan, AstSli
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_expr_has_call(Ast *expr);
+gb_internal bool fast_backend_stmt_has_call(Ast *stmt);
 gb_internal bool fast_backend_find_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, Type **type_, bool *is_global_);
 gb_internal bool fast_backend_find_scalar_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, FastScalarType *type_, bool *is_global_);
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out);
@@ -130,9 +133,8 @@ gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
 gb_internal String fast_backend_hybrid_linked_output_reason(void) {
 	switch (build_context.build_mode) {
 	case BuildMode_Executable:
-		break;
 	case BuildMode_DynamicLibrary:
-		return str_lit("fast backend dynamic libraries still fall back to LLVM on macOS");
+		break;
 	case BuildMode_Object:
 	case BuildMode_StaticLibrary:
 	case BuildMode_Assembly:
@@ -156,7 +158,7 @@ gb_internal String fast_backend_hybrid_linked_output_reason(void) {
 }
 
 gb_internal bool fast_backend_can_fallback_to_llvm_per_entity(void) {
-	return fast_backend_hybrid_linked_output_reason().len != 0 ? false : build_context.build_mode == BuildMode_Executable;
+	return fast_backend_hybrid_linked_output_reason().len != 0 ? false : build_context.build_mode == BuildMode_Executable || build_context.build_mode == BuildMode_DynamicLibrary;
 }
 
 gb_internal FastBackendErrorState fast_backend_save_error_state(void) {
@@ -567,25 +569,129 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 	return 0;
 }
 
-gb_internal bool fast_backend_leaf_expr_has_call(Ast *expr) {
+gb_internal bool fast_backend_expr_has_call(Ast *expr) {
 	if (expr == nullptr) {
 		return false;
 	}
 
 	switch (expr->kind) {
 	case Ast_ParenExpr:
-		return fast_backend_leaf_expr_has_call(expr->ParenExpr.expr);
+		return fast_backend_expr_has_call(expr->ParenExpr.expr);
 	case Ast_TypeCast:
-		return fast_backend_leaf_expr_has_call(expr->TypeCast.expr);
+		return fast_backend_expr_has_call(expr->TypeCast.expr);
 	case Ast_AutoCast:
-		return fast_backend_leaf_expr_has_call(expr->AutoCast.expr);
+		return fast_backend_expr_has_call(expr->AutoCast.expr);
 	case Ast_UnaryExpr:
-		return fast_backend_leaf_expr_has_call(expr->UnaryExpr.expr);
+		return fast_backend_expr_has_call(expr->UnaryExpr.expr);
 	case Ast_BinaryExpr:
-		return fast_backend_leaf_expr_has_call(expr->BinaryExpr.left) ||
-		       fast_backend_leaf_expr_has_call(expr->BinaryExpr.right);
+		return fast_backend_expr_has_call(expr->BinaryExpr.left) ||
+		       fast_backend_expr_has_call(expr->BinaryExpr.right);
+	case Ast_SelectorExpr:
+		return fast_backend_expr_has_call(expr->SelectorExpr.expr);
+	case Ast_IndexExpr:
+		return fast_backend_expr_has_call(expr->IndexExpr.expr) ||
+		       fast_backend_expr_has_call(expr->IndexExpr.index);
+	case Ast_SliceExpr:
+		return fast_backend_expr_has_call(expr->SliceExpr.expr) ||
+		       fast_backend_expr_has_call(expr->SliceExpr.low) ||
+		       fast_backend_expr_has_call(expr->SliceExpr.high);
+	case Ast_FieldValue:
+		return fast_backend_expr_has_call(expr->FieldValue.value);
+	case Ast_CompoundLit: {
+		ast_node(cl, CompoundLit, expr);
+		for (Ast *elem : cl->elems) {
+			if (fast_backend_expr_has_call(elem)) {
+				return true;
+			}
+		}
+		return false;
+	}
 	case Ast_CallExpr:
 		return true;
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_stmt_has_call(Ast *stmt) {
+	if (stmt == nullptr) {
+		return false;
+	}
+
+	switch (stmt->kind) {
+	case Ast_EmptyStmt:
+	case Ast_BranchStmt:
+		return false;
+	case Ast_BlockStmt:
+		for (Ast *child : stmt->BlockStmt.stmts) {
+			if (fast_backend_stmt_has_call(child)) {
+				return true;
+			}
+		}
+		return false;
+	case Ast_ValueDecl:
+		for (Ast *value : stmt->ValueDecl.values) {
+			if (fast_backend_expr_has_call(value)) {
+				return true;
+			}
+		}
+		return false;
+	case Ast_AssignStmt:
+		for (Ast *lhs : stmt->AssignStmt.lhs) {
+			if (fast_backend_expr_has_call(lhs)) {
+				return true;
+			}
+		}
+		for (Ast *rhs : stmt->AssignStmt.rhs) {
+			if (fast_backend_expr_has_call(rhs)) {
+				return true;
+			}
+		}
+		return false;
+	case Ast_ExprStmt:
+		return fast_backend_expr_has_call(stmt->ExprStmt.expr);
+	case Ast_IfStmt:
+		return fast_backend_stmt_has_call(stmt->IfStmt.init) ||
+		       fast_backend_expr_has_call(stmt->IfStmt.cond) ||
+		       fast_backend_stmt_has_call(stmt->IfStmt.body) ||
+		       fast_backend_stmt_has_call(stmt->IfStmt.else_stmt);
+	case Ast_ForStmt:
+		return fast_backend_stmt_has_call(stmt->ForStmt.init) ||
+		       fast_backend_expr_has_call(stmt->ForStmt.cond) ||
+		       fast_backend_stmt_has_call(stmt->ForStmt.post) ||
+		       fast_backend_stmt_has_call(stmt->ForStmt.body);
+	case Ast_SwitchStmt: {
+		if (fast_backend_stmt_has_call(stmt->SwitchStmt.init) ||
+		    fast_backend_expr_has_call(stmt->SwitchStmt.tag)) {
+			return true;
+		}
+		if (stmt->SwitchStmt.body == nullptr || stmt->SwitchStmt.body->kind != Ast_BlockStmt) {
+			return false;
+		}
+		for (Ast *case_stmt : stmt->SwitchStmt.body->BlockStmt.stmts) {
+			if (case_stmt == nullptr || case_stmt->kind != Ast_CaseClause) {
+				continue;
+			}
+			for (Ast *expr : case_stmt->CaseClause.list) {
+				if (fast_backend_expr_has_call(expr)) {
+					return true;
+				}
+			}
+			for (Ast *child : case_stmt->CaseClause.stmts) {
+				if (fast_backend_stmt_has_call(child)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	case Ast_ReturnStmt:
+		for (Ast *result : stmt->ReturnStmt.results) {
+			if (fast_backend_expr_has_call(result)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	return false;
@@ -894,14 +1000,14 @@ gb_internal bool fast_backend_can_emit_switch_case_expr(FastLeafProcPlan *plan, 
 
 		Ast *lhs = expr->BinaryExpr.left;
 		Ast *rhs = expr->BinaryExpr.right;
-		if (fast_backend_leaf_expr_has_call(lhs) || fast_backend_leaf_expr_has_call(rhs)) {
+		if (fast_backend_expr_has_call(lhs) || fast_backend_expr_has_call(rhs)) {
 			return false;
 		}
 		return fast_backend_can_emit_leaf_expr(plan, lhs, tag_type) &&
 		       fast_backend_can_emit_leaf_expr(plan, rhs, tag_type);
 	}
 
-	if (fast_backend_leaf_expr_has_call(expr)) {
+	if (fast_backend_expr_has_call(expr)) {
 		return false;
 	}
 	return fast_backend_can_emit_leaf_expr(plan, expr, tag_type);
@@ -1901,7 +2007,7 @@ gb_internal bool fast_backend_plan_switch_stmt(FastGenerator *gen, FastLeafProcP
 			error(ss->tag, "Fast backend currently only supports scalar switch tags");
 			return false;
 		}
-		if (fast_backend_leaf_expr_has_call(ss->tag)) {
+		if (fast_backend_expr_has_call(ss->tag)) {
 			error(ss->tag, "Fast backend switch tags cannot contain calls yet");
 			return false;
 		}
@@ -2050,6 +2156,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	plan->spill_depth = 0;
 	plan->local_stack_size = 0;
 	plan->proc_index = 0;
+	plan->has_calls = false;
 	plan->has_context_slot = false;
 	plan->params = array_make<Entity *>(heap_allocator(), 0, pt->param_count);
 	plan->slots = array_make<FastLocalSlot>(heap_allocator(), 0, pt->param_count);
@@ -2109,7 +2216,11 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	}
 
 	ast_node(bs, BlockStmt, decl->proc_lit->ProcLit.body);
-	return fast_backend_plan_stmt_list(gen, plan, bs->stmts);
+	if (!fast_backend_plan_stmt_list(gen, plan, bs->stmts)) {
+		return false;
+	}
+	plan->has_calls = fast_backend_stmt_has_call(plan->body);
+	return true;
 }
 
 gb_internal bool fast_backend_plan_global_var(FastGenerator *gen, Entity *e, FastGlobalVarPlan *plan) {
@@ -5558,6 +5669,9 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;
+	if (build_context.metrics.arch == TargetArch_arm64 && plan->has_calls) {
+		emitter.use_frame = true;
+	}
 
 	fast_backend_emit_leaf_prologue(&emitter);
 	if (!fast_backend_emit_param_spills(&emitter)) {
