@@ -130,6 +130,7 @@ gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan 
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_is_array_binary_expr(Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
+gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *plan, Type *expected_type, TokenKind op, Ast *lhs, Ast *rhs);
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_aggregate_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_value_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
@@ -147,6 +148,7 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 gb_internal bool fast_backend_emit_call_expr_to_address(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
 gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
+gb_internal bool fast_backend_emit_store_array_binary_op_to_work_address(FastLeafProcEmitter *emitter, Type *type, TokenKind op, Ast *lhs, Ast *rhs);
 gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr);
 gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr);
 gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProcEmitter *emitter, Ast *lhs, Type *type, AstCompoundLit *cl);
@@ -156,6 +158,7 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 gb_internal i32 fast_backend_slice_expr_spill_depth(AstSliceExpr *se);
 gb_internal i32 fast_backend_slice_compound_lit_spill_depth(Ast *expr, Type *expected_type);
+gb_internal i32 fast_backend_array_binary_operands_spill_depth(Ast *lhs, Ast *rhs);
 gb_internal i32 fast_backend_array_binary_expr_spill_depth(Ast *expr);
 gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce);
 gb_internal bool fast_backend_can_emit_raw_data_expr(FastLeafProcPlan *plan, Ast *expr);
@@ -1391,18 +1394,29 @@ gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan,
 		return false;
 	}
 	expr = unparen_expr(expr);
+	return fast_backend_can_emit_array_binary_operands(plan, expected_type, expr->BinaryExpr.op.kind, expr->BinaryExpr.left, expr->BinaryExpr.right);
+}
+
+gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *plan, Type *expected_type, TokenKind op, Ast *lhs, Ast *rhs) {
+	if (plan == nullptr || expected_type == nullptr || lhs == nullptr || rhs == nullptr) {
+		return false;
+	}
+
 	Type *type = default_type(expected_type);
 	Type *base = base_type(type);
+	if (type == nullptr || base == nullptr || base->kind != Type_Array) {
+		return false;
+	}
 
-	Type *left_type = default_type(type_of_expr(expr->BinaryExpr.left));
-	Type *right_type = default_type(type_of_expr(expr->BinaryExpr.right));
+	Type *left_type = default_type(type_of_expr(lhs));
+	Type *right_type = default_type(type_of_expr(rhs));
 	if (!are_types_identical(left_type, type) || !are_types_identical(right_type, type)) {
 		return false;
 	}
 
 	FastScalarType elem_type = {};
 	if (!fast_backend_classify_scalar_type(base->Array.elem, &elem_type) ||
-	    !fast_backend_scalar_binary_op_supported(expr->BinaryExpr.op.kind, elem_type)) {
+	    !fast_backend_scalar_binary_op_supported(op, elem_type)) {
 		return false;
 	}
 
@@ -1410,8 +1424,8 @@ gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan,
 	Type *rhs_storage_type = nullptr;
 	bool lhs_scalar = false;
 	bool rhs_scalar = false;
-	return fast_backend_can_emit_address_expr(plan, expr->BinaryExpr.left, &lhs_storage_type, nullptr, &lhs_scalar) &&
-	       fast_backend_can_emit_address_expr(plan, expr->BinaryExpr.right, &rhs_storage_type, nullptr, &rhs_scalar) &&
+	return fast_backend_can_emit_address_expr(plan, lhs, &lhs_storage_type, nullptr, &lhs_scalar) &&
+	       fast_backend_can_emit_address_expr(plan, rhs, &rhs_storage_type, nullptr, &rhs_scalar) &&
 	       !lhs_scalar &&
 	       !rhs_scalar &&
 	       lhs_storage_type != nullptr &&
@@ -1657,15 +1671,20 @@ gb_internal i32 fast_backend_slice_compound_lit_spill_depth(Ast *expr, Type *exp
 	return depth;
 }
 
+gb_internal i32 fast_backend_array_binary_operands_spill_depth(Ast *lhs, Ast *rhs) {
+	i32 depth = 3;
+	depth = gb_max(depth, 1 + fast_backend_address_expr_spill_depth(lhs));
+	depth = gb_max(depth, 2 + fast_backend_address_expr_spill_depth(rhs));
+	return depth;
+}
+
 gb_internal i32 fast_backend_array_binary_expr_spill_depth(Ast *expr) {
 	expr = unparen_expr(expr);
 	if (expr == nullptr || expr->kind != Ast_BinaryExpr) {
 		return 0;
 	}
 
-	i32 depth = 3;
-	depth = gb_max(depth, 1 + fast_backend_address_expr_spill_depth(expr->BinaryExpr.left));
-	depth = gb_max(depth, 2 + fast_backend_address_expr_spill_depth(expr->BinaryExpr.right));
+	i32 depth = fast_backend_array_binary_operands_spill_depth(expr->BinaryExpr.left, expr->BinaryExpr.right);
 	return depth;
 }
 
@@ -2150,8 +2169,12 @@ gb_internal bool fast_backend_plan_assign_stmt(FastGenerator *gen, FastLeafProcP
 
 		FastScalarType scalar_type = {};
 		if (!fast_backend_expr_scalar_type(lhs, target_type, &scalar_type)) {
-			error(lhs, "Fast backend currently only supports scalar assignment operators");
-			return false;
+			if (!fast_backend_can_emit_array_binary_operands(plan, target_type, binary_op, lhs, rhs)) {
+				error(lhs, "Fast backend currently only supports scalar and fixed-array assignment operators");
+				return false;
+			}
+			plan->spill_depth = gb_max(plan->spill_depth, gb_max(fast_backend_address_expr_spill_depth(lhs), fast_backend_array_binary_operands_spill_depth(lhs, rhs)));
+			return true;
 		}
 		if (!fast_backend_scalar_binary_op_supported(binary_op, scalar_type)) {
 			error(as->op, "Fast backend does not yet support this assignment operator for the target type");
@@ -5513,8 +5536,8 @@ gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(Fast
 	return true;
 }
 
-gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
-	if (emitter == nullptr || !fast_backend_can_emit_array_binary_expr(emitter->plan, expr, type)) {
+gb_internal bool fast_backend_emit_store_array_binary_op_to_work_address(FastLeafProcEmitter *emitter, Type *type, TokenKind op, Ast *lhs, Ast *rhs) {
+	if (emitter == nullptr || !fast_backend_can_emit_array_binary_operands(emitter->plan, type, op, lhs, rhs)) {
 		return false;
 	}
 
@@ -5526,7 +5549,6 @@ gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastL
 		return false;
 	}
 
-	expr = unparen_expr(expr);
 	i32 elem_size = cast(i32)type_size_of(elem_type);
 	i64 count = base->Array.count;
 	if (elem_size <= 0 || count < 0) {
@@ -5539,13 +5561,13 @@ gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastL
 	fast_backend_emit_push_work_reg(emitter);
 	i32 dst_depth = spill_base + 1;
 
-	if (!fast_backend_emit_address_expr(emitter, expr->BinaryExpr.left, nullptr)) {
+	if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
 		return false;
 	}
 	fast_backend_emit_push_work_reg(emitter);
 	i32 lhs_depth = spill_base + 2;
 
-	if (!fast_backend_emit_address_expr(emitter, expr->BinaryExpr.right, nullptr)) {
+	if (!fast_backend_emit_address_expr(emitter, rhs, nullptr)) {
 		return false;
 	}
 	fast_backend_emit_push_work_reg(emitter);
@@ -5572,7 +5594,7 @@ gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastL
 		}
 		fast_backend_emit_pop_tmp_reg(emitter);
 
-		if (!fast_backend_emit_scalar_binary_op(emitter, expr->BinaryExpr.op.kind, scalar_type, nullptr)) {
+		if (!fast_backend_emit_scalar_binary_op(emitter, op, scalar_type, nullptr)) {
 			return false;
 		}
 
@@ -5583,6 +5605,14 @@ gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastL
 
 	fast_backend_emit_load_work_from_spill_depth(emitter, dst_depth);
 	return true;
+}
+
+gb_internal bool fast_backend_emit_store_array_binary_expr_to_work_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
+	if (emitter == nullptr || !fast_backend_can_emit_array_binary_expr(emitter->plan, expr, type)) {
+		return false;
+	}
+	expr = unparen_expr(expr);
+	return fast_backend_emit_store_array_binary_op_to_work_address(emitter, type, expr->BinaryExpr.op.kind, expr->BinaryExpr.left, expr->BinaryExpr.right);
 }
 
 gb_internal bool fast_backend_emit_store_constant_aggregate_to_address(FastLeafProcEmitter *emitter, Type *type, Ast *expr) {
@@ -5845,7 +5875,13 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 
 		FastScalarType scalar_type = {};
 		if (!fast_backend_expr_scalar_type(lhs, target_type, &scalar_type)) {
-			return false;
+			if (!fast_backend_can_emit_array_binary_operands(emitter->plan, target_type, binary_op, lhs, rhs)) {
+				return false;
+			}
+			if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
+				return false;
+			}
+			return fast_backend_emit_store_array_binary_op_to_work_address(emitter, target_type, binary_op, lhs, rhs);
 		}
 		if (!fast_backend_emit_address_expr(emitter, lhs, nullptr)) {
 			return false;
