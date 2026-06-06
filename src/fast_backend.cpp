@@ -126,6 +126,7 @@ gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, F
 gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast *expr, Type **type_, FastScalarType *scalar_type_, bool *is_scalar_);
 gb_internal bool fast_backend_can_emit_aggregate_call_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_slice_expr(FastLeafProcPlan *plan, AstSliceExpr *se, Type *expected_type);
+gb_internal bool fast_backend_can_emit_direct_slice_index_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
@@ -181,6 +182,10 @@ gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan 
 gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i32 label_index);
 gb_internal bool fast_backend_emit_compare_scalar_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, FastScalarType type, i32 mismatch_label);
 gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
+gb_internal void fast_backend_emit_address_of_spill_depth(FastLeafProcEmitter *emitter, i32 depth);
+gb_internal void fast_backend_emit_push_work_reg(FastLeafProcEmitter *emitter);
+gb_internal void fast_backend_emit_pop_tmp_reg(FastLeafProcEmitter *emitter);
+gb_internal bool fast_backend_emit_leaf_direct_slice_index_expr(FastLeafProcEmitter *emitter, Ast *expr);
 
 gb_internal String fast_backend_hybrid_linked_output_reason(void) {
 	switch (build_context.build_mode) {
@@ -661,6 +666,13 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 		i32 base_depth = 0;
 		if (indexed_type != nullptr && (indexed_type->kind == Type_Pointer || indexed_type->kind == Type_MultiPointer)) {
 			base_depth = fast_backend_leaf_expr_spill_depth(expr->IndexExpr.expr);
+		} else if (indexed_type != nullptr &&
+		           (indexed_type->kind == Type_Slice || indexed_type->kind == Type_DynamicArray || is_type_string(indexed_type) || is_type_string16(indexed_type)) &&
+		           unparen_expr(expr->IndexExpr.expr) != nullptr &&
+		           unparen_expr(expr->IndexExpr.expr)->kind == Ast_SliceExpr) {
+			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
+			base_depth = temp_slots + fast_backend_slice_expr_spill_depth(&unparen_expr(expr->IndexExpr.expr)->SliceExpr);
 		} else {
 			base_depth = fast_backend_address_expr_spill_depth(expr->IndexExpr.expr);
 		}
@@ -1024,9 +1036,18 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 			return false;
 		}
 		gb_unused(elem_size);
-		gb_unused(base_uses_data_pointer);
 		if (base_is_pointer) {
 			if (!fast_backend_can_emit_leaf_expr(plan, expr->IndexExpr.expr, type_of_expr(expr->IndexExpr.expr))) {
+				return false;
+			}
+		} else if (base_uses_data_pointer) {
+			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+			Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
+			if (!fast_backend_can_emit_address_expr(plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr) &&
+			    !(base_expr != nullptr &&
+			      base_expr->kind == Ast_SliceExpr &&
+			      base_value_type != nullptr &&
+			      fast_backend_can_emit_slice_expr(plan, &base_expr->SliceExpr, base_value_type))) {
 				return false;
 			}
 		} else if (!fast_backend_can_emit_address_expr(plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
@@ -2062,6 +2083,39 @@ gb_internal bool fast_backend_can_emit_slice_expr(FastLeafProcPlan *plan, AstSli
 	return true;
 }
 
+gb_internal bool fast_backend_can_emit_direct_slice_index_expr(FastLeafProcPlan *plan, Ast *expr) {
+	expr = unparen_expr(expr);
+	if (plan == nullptr || expr == nullptr || expr->kind != Ast_IndexExpr) {
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (!fast_backend_expr_scalar_type(expr, type_of_expr(expr), &scalar_type)) {
+		return false;
+	}
+
+	Type *value_type = nullptr;
+	i64 elem_size = 0;
+	bool base_is_pointer = false;
+	bool base_uses_data_pointer = false;
+	if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer, &base_uses_data_pointer)) {
+		return false;
+	}
+	gb_unused(value_type);
+	gb_unused(elem_size);
+	if (base_is_pointer || !base_uses_data_pointer) {
+		return false;
+	}
+
+	Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
+	Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+	return base_expr != nullptr &&
+	       base_expr->kind == Ast_SliceExpr &&
+	       base_value_type != nullptr &&
+	       fast_backend_can_emit_slice_expr(plan, &base_expr->SliceExpr, base_value_type) &&
+	       fast_backend_can_emit_leaf_expr(plan, expr->IndexExpr.index, type_of_expr(expr->IndexExpr.index));
+}
+
 gb_internal i32 fast_backend_slice_expr_spill_depth(AstSliceExpr *se) {
 	if (se == nullptr || se->expr == nullptr) {
 		return 0;
@@ -2120,8 +2174,11 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 		return fast_backend_can_emit_deref_expr(plan, expr);
 
 	case Ast_SelectorExpr:
-	case Ast_IndexExpr:
 		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr);
+
+	case Ast_IndexExpr:
+		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr) ||
+		       fast_backend_can_emit_direct_slice_index_expr(plan, expr);
 
 	case Ast_CallExpr:
 		if (expr->CallExpr.proc != nullptr && type_and_value_of_expr(expr->CallExpr.proc).mode == Addressing_Type) {
@@ -3950,10 +4007,70 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 		return true;
 	}
 
+	if (expr->kind == Ast_IndexExpr && fast_backend_can_emit_direct_slice_index_expr(emitter->plan, expr)) {
+		return fast_backend_emit_leaf_direct_slice_index_expr(emitter, expr);
+	}
+
 	if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
 		return false;
 	}
 
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_emit_leaf_direct_slice_index_expr(FastLeafProcEmitter *emitter, Ast *expr) {
+	expr = unparen_expr(expr);
+	if (emitter == nullptr || expr == nullptr || !fast_backend_can_emit_direct_slice_index_expr(emitter->plan, expr)) {
+		return false;
+	}
+
+	Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
+	Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+	FastScalarType scalar_type = {};
+	Type *value_type = nullptr;
+	i64 elem_size = 0;
+	bool base_is_pointer = false;
+	bool base_uses_data_pointer = false;
+	if (base_expr == nullptr ||
+	    base_value_type == nullptr ||
+	    !fast_backend_expr_scalar_type(expr, type_of_expr(expr), &scalar_type) ||
+	    !fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer, &base_uses_data_pointer)) {
+		return false;
+	}
+	gb_unused(value_type);
+	gb_unused(base_is_pointer);
+	gb_unused(base_uses_data_pointer);
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
+	emitter->current_spill_depth += temp_slots;
+	i32 temp_depth = emitter->current_spill_depth;
+	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	if (!fast_backend_emit_store_slice_expr_to_address(emitter, base_value_type, &base_expr->SliceExpr)) {
+		return false;
+	}
+	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+
+	FastScalarType data_pointer_type = fast_backend_context_scalar_type();
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), data_pointer_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), data_pointer_type);
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	if (!fast_backend_emit_leaf_expr(emitter, expr->IndexExpr.index)) {
+		return false;
+	}
+	fast_backend_emit_scale_work_reg(emitter, elem_size);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_add_tmp_reg_to_work_reg(emitter);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
 	} else {
@@ -4001,6 +4118,15 @@ gb_internal void fast_backend_emit_store_work_to_spill_depth(FastLeafProcEmitter
 		gb_fprintf(emitter->file, "\tmov QWORD PTR [rbp-%d], %s\n", offset, fast_backend_x64_work_reg()->r64);
 	} else {
 		gb_fprintf(emitter->file, "\tstr %s, [x29, #-%d]\n", fast_backend_arm64_work_reg(), offset);
+	}
+}
+
+gb_internal void fast_backend_emit_address_of_spill_depth(FastLeafProcEmitter *emitter, i32 depth) {
+	i32 offset = fast_backend_spill_slot_offset_from_depth(depth);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tlea %s, [rbp-%d]\n", fast_backend_x64_work_reg()->r64, offset);
+	} else {
+		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_work_reg(), "x29", -offset);
 	}
 }
 
@@ -4092,10 +4218,26 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 		if (!fast_backend_get_index_info(&expr->IndexExpr, &value_type, &elem_size, &base_is_pointer, &base_uses_data_pointer)) {
 			return false;
 		}
+		i32 spill_base = emitter->current_spill_depth;
+		defer (emitter->current_spill_depth = spill_base);
 		if (base_is_pointer) {
 			if (!fast_backend_emit_leaf_expr(emitter, expr->IndexExpr.expr)) {
 				return false;
 			}
+		} else if (base_uses_data_pointer && !fast_backend_can_emit_address_expr(emitter->plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
+			Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
+			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+			if (base_expr == nullptr || base_expr->kind != Ast_SliceExpr || base_value_type == nullptr) {
+				return false;
+			}
+			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
+			emitter->current_spill_depth += temp_slots;
+			i32 temp_depth = emitter->current_spill_depth;
+			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			if (!fast_backend_emit_store_slice_expr_to_address(emitter, base_value_type, &base_expr->SliceExpr)) {
+				return false;
+			}
+			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
 		} else if (!fast_backend_emit_address_expr(emitter, expr->IndexExpr.expr, nullptr)) {
 			return false;
 		}
