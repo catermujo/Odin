@@ -85,6 +85,7 @@ struct FastLeafProcEmitter {
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out);
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot);
 gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce);
+gb_internal BuiltinProcId fast_backend_builtin_proc_id(Ast *expr);
 gb_internal bool fast_backend_type_is_supported_aggregate(Type *type);
 gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType *scalar_type_, bool *is_scalar_);
 gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, Type *type);
@@ -107,6 +108,8 @@ gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr
 gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProcEmitter *emitter, Ast *lhs, Type *type, AstCompoundLit *cl);
 gb_internal bool fast_backend_expr_is_string_literal_value(Type *type, Ast *expr);
 gb_internal bool fast_backend_get_string_literal_blob(FastGenerator *gen, Type *type, Ast *expr, i32 *blob_index_, i64 *len_);
+gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan, AstCallExpr *ce, Type *expected_type);
+gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitter, AstCallExpr *ce);
 
 gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	if (e == nullptr || info == nullptr || e->pkg == nullptr || e->pkg != info->init_package) {
@@ -380,6 +383,14 @@ gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 	return false;
 }
 
+gb_internal BuiltinProcId fast_backend_builtin_proc_id(Ast *expr) {
+	Entity *e = entity_of_node(expr);
+	if (e != nullptr && e->kind == Entity_Builtin && e->Builtin.id && e->Builtin.id != BuiltinProc_DIRECTIVE) {
+		return cast(BuiltinProcId)e->Builtin.id;
+	}
+	return BuiltinProc_Invalid;
+}
+
 gb_internal String fast_backend_label_name(Ast *label) {
 	if (label == nullptr) {
 		return {};
@@ -413,6 +424,9 @@ gb_internal i32 fast_backend_leaf_expr_spill_depth(Ast *expr) {
 		return gb_max(left_depth, 1 + right_depth);
 	}
 	case Ast_CallExpr: {
+		if (fast_backend_builtin_proc_id(expr->CallExpr.proc) != BuiltinProc_Invalid) {
+			return fast_backend_leaf_expr_spill_depth(expr->CallExpr.args.count != 0 ? expr->CallExpr.args[0] : nullptr);
+		}
 		return fast_backend_call_expr_spill_depth(&expr->CallExpr);
 	}
 	}
@@ -1141,6 +1155,48 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 	return depth;
 }
 
+gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan, AstCallExpr *ce, Type *expected_type) {
+	gb_unused(plan);
+
+	if (ce == nullptr) {
+		return false;
+	}
+
+	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
+	if (id != BuiltinProc_len) {
+		return false;
+	}
+	if (ce->args.count != 1) {
+		return false;
+	}
+
+	FastScalarType result_type = {};
+	Type *want_type = expected_type ? expected_type : reduce_tuple_to_single_type(type_of_expr(cast(Ast *)ce));
+	if (!fast_backend_classify_scalar_type(want_type, &result_type)) {
+		return false;
+	}
+
+	Ast *arg = ce->args[0];
+	Type *arg_type = base_type(type_of_expr(arg));
+	bool arg_is_pointer = false;
+	if (arg_type != nullptr && arg_type->kind == Type_Pointer) {
+		arg_is_pointer = true;
+		arg_type = default_type(type_deref(arg_type));
+	}
+	if (arg_type == nullptr) {
+		return false;
+	}
+
+	if (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type)) {
+		if (arg_is_pointer) {
+			return fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg));
+		}
+		return fast_backend_can_emit_address_expr(plan, arg, nullptr, nullptr, nullptr);
+	}
+
+	return false;
+}
+
 gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
 	if (expr == nullptr) {
 		return false;
@@ -1179,6 +1235,9 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr);
 
 	case Ast_CallExpr:
+		if (fast_backend_can_emit_builtin_call_expr(plan, &expr->CallExpr, expected_type)) {
+			return true;
+		}
 		return fast_backend_can_emit_call_expr(plan, &expr->CallExpr, false);
 
 	case Ast_TypeCast: {
@@ -3138,6 +3197,54 @@ gb_internal bool fast_backend_emit_call_expr(FastLeafProcEmitter *emitter, AstCa
 	return fast_backend_emit_call_expr_internal(emitter, ce, false);
 }
 
+gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitter, AstCallExpr *ce) {
+	if (emitter == nullptr || ce == nullptr) {
+		return false;
+	}
+
+	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
+	if (id != BuiltinProc_len || ce->args.count != 1) {
+		return false;
+	}
+
+	Ast *arg = ce->args[0];
+	Type *arg_type = base_type(type_of_expr(arg));
+	bool arg_is_pointer = false;
+	if (arg_type != nullptr && arg_type->kind == Type_Pointer) {
+		arg_is_pointer = true;
+		arg_type = default_type(type_deref(arg_type));
+	}
+	if (arg_type == nullptr) {
+		return false;
+	}
+
+	if (arg_is_pointer) {
+		if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+			return false;
+		}
+	} else if (!fast_backend_emit_address_expr(emitter, arg, nullptr)) {
+		return false;
+	}
+
+	i64 offset = -1;
+	if (is_type_string(arg_type) || is_type_string16(arg_type) || is_type_slice(arg_type)) {
+		offset = build_context.int_size;
+	}
+	if (offset < 0) {
+		return false;
+	}
+
+	fast_backend_emit_add_imm_to_work_reg(emitter, offset);
+	FastScalarType len_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+	}
+	return true;
+}
+
 gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast *expr) {
 	if (expr->UnaryExpr.op.kind == Token_And) {
 		return fast_backend_emit_address_expr(emitter, expr->UnaryExpr.expr, nullptr);
@@ -3420,6 +3527,9 @@ gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *
 	case Ast_BinaryExpr:
 		return fast_backend_emit_leaf_binary(emitter, expr);
 	case Ast_CallExpr:
+		if (fast_backend_builtin_proc_id(expr->CallExpr.proc) != BuiltinProc_Invalid) {
+			return fast_backend_emit_builtin_call_expr(emitter, &expr->CallExpr);
+		}
 		return fast_backend_emit_call_expr(emitter, &expr->CallExpr);
 	}
 
