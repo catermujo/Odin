@@ -202,6 +202,7 @@ gb_internal void fast_backend_make_label_name(char *buffer, isize buffer_size, F
 gb_internal void fast_backend_emit_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i32 label_index);
+gb_internal void fast_backend_emit_jump_if_work_compare_imm(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType type, u64 imm, i32 true_label, i32 false_label);
 gb_internal void fast_backend_emit_store_work_to_tmp_address(FastLeafProcEmitter *emitter, FastScalarType type);
 gb_internal bool fast_backend_emit_compare_scalar_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, FastScalarType type, i32 mismatch_label);
 gb_internal bool fast_backend_emit_compare_aggregate_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, Type *type, i32 mismatch_label);
@@ -3504,6 +3505,12 @@ gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPl
 		case Type_DynamicArray:
 		case Type_FixedCapacityDynamicArray:
 			break;
+		case Type_Basic:
+			if (is_type_string(expr_type) || is_type_string16(expr_type)) {
+				break;
+			}
+			error(rs->expr, "Fast backend does not yet support iterating over this type");
+			return false;
 		default:
 			error(rs->expr, "Fast backend does not yet support iterating over this type");
 			return false;
@@ -7008,6 +7015,29 @@ gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i3
 	}
 }
 
+gb_internal void fast_backend_emit_jump_if_work_compare_imm(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType type, u64 imm, i32 true_label, i32 false_label) {
+	char true_name[64] = {};
+	char false_name[64] = {};
+	fast_backend_make_label_name(true_name, gb_size_of(true_name), emitter->plan, true_label);
+	fast_backend_make_label_name(false_name, gb_size_of(false_name), emitter->plan, false_label);
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		char const *suffix = fast_backend_x64_cmp_suffix(op, type);
+		GB_ASSERT(suffix != nullptr);
+		fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_tmp_reg(), imm);
+		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+		gb_fprintf(emitter->file, "\tj%s %s\n", suffix, true_name);
+		gb_fprintf(emitter->file, "\tjmp %s\n", false_name);
+	} else {
+		char const *suffix = fast_backend_arm64_cmp_suffix(op, type);
+		GB_ASSERT(suffix != nullptr);
+		fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_tmp_reg(), imm);
+		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_tmp_reg());
+		gb_fprintf(emitter->file, "\tb.%s %s\n", suffix, true_name);
+		gb_fprintf(emitter->file, "\tb %s\n", false_name);
+	}
+}
+
 gb_internal void fast_backend_emit_jump_if_compare(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType type, i32 true_label, i32 false_label) {
 	char true_name[64] = {};
 	char false_name[64] = {};
@@ -9002,6 +9032,446 @@ gb_internal bool fast_backend_emit_if_stmt(FastLeafProcEmitter *emitter, AstIfSt
 	return fast_backend_emit_leave_scope(emitter, is->scope);
 }
 
+gb_internal bool fast_backend_emit_load_range_expr_length(FastLeafProcEmitter *emitter, Ast *expr, FastScalarType len_type) {
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+	if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+		return false;
+	}
+	fast_backend_emit_add_imm_to_work_reg(emitter, build_context.int_size);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+	}
+	return true;
+}
+
+gb_internal bool fast_backend_emit_load_range_expr_data_pointer(FastLeafProcEmitter *emitter, Ast *expr, FastScalarType pointer_type) {
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+	if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+		return false;
+	}
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), pointer_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), pointer_type);
+	}
+	return true;
+}
+
+gb_internal void fast_backend_emit_range_advance_index(FastLeafProcEmitter *emitter, FastLocalSlot idx_slot, FastScalarType idx_type, i64 advance) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+		gb_fprintf(emitter->file, "\tadd %s, %lld\n", fast_backend_x64_work_reg()->r64, cast(long long)advance);
+		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
+	} else {
+		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+		fast_backend_emit_add_imm_to_work_reg(emitter, advance);
+		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
+	}
+	fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+}
+
+gb_internal bool fast_backend_emit_store_range_rune_and_advance(FastLeafProcEmitter *emitter, Entity *val0_entity, FastLocalSlot idx_slot, FastScalarType idx_type, i64 advance) {
+	if (val0_entity != nullptr && !fast_backend_emit_store_to_scalar_storage(emitter, val0_entity)) {
+		return false;
+	}
+	fast_backend_emit_range_advance_index(emitter, idx_slot, idx_type, advance);
+	return true;
+}
+
+gb_internal void fast_backend_emit_load_u8_at_ptr_depth(FastLeafProcEmitter *emitter, i32 ptr_depth, i32 offset) {
+	FastScalarType byte_type = {};
+	byte_type.kind = FastScalar_Unsigned;
+	byte_type.bit_size = 8;
+	fast_backend_emit_load_work_from_spill_depth(emitter, ptr_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, offset);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), byte_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), byte_type);
+	}
+}
+
+gb_internal void fast_backend_emit_load_u16_at_ptr_depth(FastLeafProcEmitter *emitter, i32 ptr_depth, i32 offset) {
+	FastScalarType char16_type = {};
+	char16_type.kind = FastScalar_Unsigned;
+	char16_type.bit_size = 16;
+	fast_backend_emit_load_work_from_spill_depth(emitter, ptr_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, offset);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), char16_type);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), char16_type);
+	}
+}
+
+gb_internal void fast_backend_emit_and_work_imm(FastLeafProcEmitter *emitter, u64 mask) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tand %s, 0x%llx\n", fast_backend_x64_work_reg()->r64, cast(unsigned long long)mask);
+	} else {
+		gb_fprintf(emitter->file, "\tand %s, %s, #0x%llx\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), cast(unsigned long long)mask);
+	}
+}
+
+gb_internal void fast_backend_emit_shift_work_left(FastLeafProcEmitter *emitter, i32 amount) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tshl %s, %d\n", fast_backend_x64_work_reg()->r64, amount);
+	} else {
+		gb_fprintf(emitter->file, "\tlsl %s, %s, #%d\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), amount);
+	}
+}
+
+gb_internal void fast_backend_emit_or_tmp_into_work(FastLeafProcEmitter *emitter) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tor %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\torr %s, %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), fast_backend_arm64_tmp_reg());
+	}
+}
+
+gb_internal void fast_backend_emit_load_rune_error(FastLeafProcEmitter *emitter) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), 0xfffd);
+	} else {
+		fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), 0xfffd);
+	}
+}
+
+gb_internal bool fast_backend_emit_range_string_utf8_decode(FastLeafProcEmitter *emitter, Ast *expr, Entity *val0_entity, FastLocalSlot idx_slot, FastScalarType idx_type) {
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+
+	FastScalarType len_type = {};
+	FastScalarType pointer_type = fast_backend_context_scalar_type();
+	FastScalarType byte_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+	byte_type.kind = FastScalar_Unsigned;
+	byte_type.bit_size = 8;
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	if (!fast_backend_emit_load_range_expr_data_pointer(emitter, expr, pointer_type)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 data_depth = emitter->current_spill_depth;
+
+	if (!fast_backend_emit_load_range_expr_length(emitter, expr, len_type)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 len_depth = emitter->current_spill_depth;
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+	} else {
+		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 idx_depth = emitter->current_spill_depth;
+
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_load_tmp_from_spill_depth(emitter, data_depth);
+	fast_backend_emit_add_tmp_reg_to_work_reg(emitter);
+	fast_backend_emit_push_work_reg(emitter);
+	i32 ptr_depth = emitter->current_spill_depth;
+
+	i32 ascii_label = fast_backend_alloc_label(emitter);
+	i32 check2_label = fast_backend_alloc_label(emitter);
+	i32 two_len_label = fast_backend_alloc_label(emitter);
+	i32 two_b1_hi_label = fast_backend_alloc_label(emitter);
+	i32 build2_label = fast_backend_alloc_label(emitter);
+	i32 build2_body_label = fast_backend_alloc_label(emitter);
+	i32 check3_label = fast_backend_alloc_label(emitter);
+	i32 three_len_label = fast_backend_alloc_label(emitter);
+	i32 three_b1_hi_label = fast_backend_alloc_label(emitter);
+	i32 three_b2_label = fast_backend_alloc_label(emitter);
+	i32 three_b2_hi_label = fast_backend_alloc_label(emitter);
+	i32 build3_label = fast_backend_alloc_label(emitter);
+	i32 build3_body_label = fast_backend_alloc_label(emitter);
+	i32 check4_label = fast_backend_alloc_label(emitter);
+	i32 four_len_label = fast_backend_alloc_label(emitter);
+	i32 four_b1_hi_label = fast_backend_alloc_label(emitter);
+	i32 four_b2_label = fast_backend_alloc_label(emitter);
+	i32 four_b2_hi_label = fast_backend_alloc_label(emitter);
+	i32 four_b3_label = fast_backend_alloc_label(emitter);
+	i32 four_b3_hi_label = fast_backend_alloc_label(emitter);
+	i32 build4_label = fast_backend_alloc_label(emitter);
+	i32 build4_body_label = fast_backend_alloc_label(emitter);
+	i32 two_b1_ok_label = fast_backend_alloc_label(emitter);
+	i32 invalid_label = fast_backend_alloc_label(emitter);
+	i32 done_label = fast_backend_alloc_label(emitter);
+
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 0);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, ascii_label, check2_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, check2_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0xc2, invalid_label, two_len_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, two_len_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_LtEq, byte_type, 0xdf, two_b1_hi_label, check3_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, two_b1_hi_label);
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, 1);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, build2_label, invalid_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build2_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 1);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, two_b1_ok_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, two_b1_ok_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, build2_body_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build2_body_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 0);
+	fast_backend_emit_and_work_imm(emitter, 0x1f);
+	fast_backend_emit_shift_work_left(emitter, 6);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 1);
+	fast_backend_emit_and_work_imm(emitter, 0x3f);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_or_tmp_into_work(emitter);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 2)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, check3_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_LtEq, byte_type, 0xef, three_len_label, check4_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, three_len_label);
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, 2);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, three_b1_hi_label, invalid_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, three_b1_hi_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 1);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, three_b2_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, three_b2_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, three_b2_hi_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, three_b2_hi_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 2);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, build3_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build3_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, build3_body_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build3_body_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 0);
+	fast_backend_emit_and_work_imm(emitter, 0x0f);
+	fast_backend_emit_shift_work_left(emitter, 12);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 1);
+	fast_backend_emit_and_work_imm(emitter, 0x3f);
+	fast_backend_emit_shift_work_left(emitter, 6);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_or_tmp_into_work(emitter);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 2);
+	fast_backend_emit_and_work_imm(emitter, 0x3f);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_or_tmp_into_work(emitter);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 3)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, check4_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_LtEq, byte_type, 0xf4, four_len_label, invalid_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_len_label);
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, 3);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, four_b1_hi_label, invalid_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_b1_hi_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 1);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, four_b2_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_b2_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, four_b2_hi_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_b2_hi_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 2);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, four_b3_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_b3_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, four_b3_hi_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, four_b3_hi_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 3);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, byte_type, 0x80, invalid_label, build4_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build4_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Gt, byte_type, 0xbf, invalid_label, build4_body_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build4_body_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 0);
+	fast_backend_emit_and_work_imm(emitter, 0x07);
+	fast_backend_emit_shift_work_left(emitter, 18);
+	fast_backend_emit_push_work_reg(emitter);
+	for (i32 i = 1; i <= 3; i++) {
+		fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, i);
+		fast_backend_emit_and_work_imm(emitter, 0x3f);
+		if (i != 3) {
+			fast_backend_emit_shift_work_left(emitter, 6*(3-i));
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_or_tmp_into_work(emitter);
+		if (i != 3) {
+			fast_backend_emit_push_work_reg(emitter);
+		}
+	}
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 4)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, ascii_label);
+	fast_backend_emit_load_u8_at_ptr_depth(emitter, ptr_depth, 0);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 1)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, invalid_label);
+	fast_backend_emit_load_rune_error(emitter);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 1)) {
+		return false;
+	}
+
+	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+	return true;
+}
+
+gb_internal bool fast_backend_emit_range_string16_decode(FastLeafProcEmitter *emitter, Ast *expr, Entity *val0_entity, FastLocalSlot idx_slot, FastScalarType idx_type) {
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+
+	FastScalarType len_type = {};
+	FastScalarType pointer_type = fast_backend_context_scalar_type();
+	FastScalarType char16_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+	char16_type.kind = FastScalar_Unsigned;
+	char16_type.bit_size = 16;
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	if (!fast_backend_emit_load_range_expr_data_pointer(emitter, expr, pointer_type)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 data_depth = emitter->current_spill_depth;
+
+	if (!fast_backend_emit_load_range_expr_length(emitter, expr, len_type)) {
+		return false;
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 len_depth = emitter->current_spill_depth;
+
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+	} else {
+		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 idx_depth = emitter->current_spill_depth;
+
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_scale_work_reg(emitter, 2);
+	fast_backend_emit_load_tmp_from_spill_depth(emitter, data_depth);
+	fast_backend_emit_add_tmp_reg_to_work_reg(emitter);
+	fast_backend_emit_push_work_reg(emitter);
+	i32 ptr_depth = emitter->current_spill_depth;
+
+	i32 direct_label = fast_backend_alloc_label(emitter);
+	i32 direct_invalid_check_label = fast_backend_alloc_label(emitter);
+	i32 maybe_pair_label = fast_backend_alloc_label(emitter);
+	i32 pair_len_label = fast_backend_alloc_label(emitter);
+	i32 pair_second_hi_label = fast_backend_alloc_label(emitter);
+	i32 build_pair_label = fast_backend_alloc_label(emitter);
+	i32 build_pair_body_label = fast_backend_alloc_label(emitter);
+	i32 invalid_label = fast_backend_alloc_label(emitter);
+	i32 done_label = fast_backend_alloc_label(emitter);
+
+	fast_backend_emit_load_u16_at_ptr_depth(emitter, ptr_depth, 0);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, char16_type, 0xd800, direct_label, maybe_pair_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, maybe_pair_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, char16_type, 0xdc00, pair_len_label, direct_invalid_check_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, direct_invalid_check_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, char16_type, 0xe000, invalid_label, direct_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, pair_len_label);
+	fast_backend_emit_load_work_from_spill_depth(emitter, idx_depth);
+	fast_backend_emit_add_imm_to_work_reg(emitter, 1);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, pair_second_hi_label, invalid_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, pair_second_hi_label);
+	fast_backend_emit_load_u16_at_ptr_depth(emitter, ptr_depth, 2);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_Lt, char16_type, 0xdc00, invalid_label, build_pair_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build_pair_label);
+	fast_backend_emit_jump_if_work_compare_imm(emitter, Token_GtEq, char16_type, 0xe000, invalid_label, build_pair_body_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, build_pair_body_label);
+	fast_backend_emit_load_u16_at_ptr_depth(emitter, ptr_depth, 0);
+	// Assemble surrogate pair into a rune value.
+	fast_backend_emit_add_imm_to_work_reg(emitter, -0xd800);
+	fast_backend_emit_shift_work_left(emitter, 10);
+	fast_backend_emit_push_work_reg(emitter);
+	fast_backend_emit_load_u16_at_ptr_depth(emitter, ptr_depth, 2);
+	fast_backend_emit_add_imm_to_work_reg(emitter, -0xdc00);
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_or_tmp_into_work(emitter);
+	fast_backend_emit_add_imm_to_work_reg(emitter, 0x10000);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 2)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, direct_label);
+	fast_backend_emit_load_u16_at_ptr_depth(emitter, ptr_depth, 0);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 1)) {
+		return false;
+	}
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, invalid_label);
+	fast_backend_emit_load_rune_error(emitter);
+	if (!fast_backend_emit_store_range_rune_and_advance(emitter, val0_entity, idx_slot, idx_type, 1)) {
+		return false;
+	}
+
+	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstRangeStmt *rs) {
 	Ast *expr = unparen_expr(rs->expr);
 	if (emitter == nullptr || expr == nullptr) {
@@ -9148,6 +9618,50 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 	}
 
 	Type *expr_type = base_type(type_deref(type_of_expr(expr)));
+	if (expr_type != nullptr && (is_type_string(expr_type) || is_type_string16(expr_type))) {
+		fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+		} else {
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (!fast_backend_emit_load_range_expr_length(emitter, expr, len_type)) {
+			return false;
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, body_label, done_label);
+
+		fast_backend_emit_label(emitter->file, emitter->plan, body_label);
+		if (val1_entity != nullptr) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+			} else {
+				fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+			}
+			if (!fast_backend_emit_store_to_scalar_storage(emitter, val1_entity)) {
+				return false;
+			}
+		}
+		if (is_type_string16(expr_type)) {
+			if (!fast_backend_emit_range_string16_decode(emitter, expr, val0_entity, idx_slot, idx_type)) {
+				return false;
+			}
+		} else {
+			if (!fast_backend_emit_range_string_utf8_decode(emitter, expr, val0_entity, idx_slot, idx_type)) {
+				return false;
+			}
+		}
+		if (!fast_backend_emit_stmt(emitter, rs->body)) {
+			return false;
+		}
+
+		fast_backend_emit_label(emitter->file, emitter->plan, post_label);
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
+		fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+		return fast_backend_emit_leave_scope(emitter, rs->scope);
+	}
+
 	Type *elem_type = nullptr;
 	i64 elem_count = 0;
 	if (expr_type == nullptr) {
