@@ -722,6 +722,13 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 		return fast_backend_leaf_expr_spill_depth(expr->DerefExpr.expr);
 
 	case Ast_SelectorExpr: {
+		if (Entity *entity = entity_from_expr(expr)) {
+			if (entity->kind == Entity_Variable &&
+			    entity->parent_proc_decl.load(std::memory_order_relaxed) == nullptr &&
+			    fast_backend_type_is_supported_value(entity->type, nullptr, nullptr)) {
+				return 0;
+			}
+		}
 		Type *base_expr_type = base_type(type_of_expr(expr->SelectorExpr.expr));
 		if (base_expr_type != nullptr && (base_expr_type->kind == Type_Pointer || base_expr_type->kind == Type_MultiPointer)) {
 			return fast_backend_leaf_expr_spill_depth(expr->SelectorExpr.expr);
@@ -1129,6 +1136,11 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 	}
 
 	case Ast_SelectorExpr: {
+		if (Entity *entity = entity_from_expr(expr)) {
+			if (entity->kind == Entity_Variable && fast_backend_find_storage(plan, entity, nullptr, &value_type, nullptr)) {
+				break;
+			}
+		}
 		Type *container_type = nullptr;
 		i64 offset = 0;
 		bool base_is_pointer = false;
@@ -2884,9 +2896,12 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 	case Ast_DerefExpr:
 		return fast_backend_can_emit_deref_expr(plan, expr);
 
-	case Ast_SelectorExpr:
-		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr) ||
+	case Ast_SelectorExpr: {
+		Type *value_type = nullptr;
+		bool is_scalar = false;
+		return (fast_backend_can_emit_address_expr(plan, expr, &value_type, nullptr, &is_scalar) && is_scalar) ||
 		       fast_backend_can_emit_direct_struct_selector_expr(plan, expr);
+	}
 
 	case Ast_IndexExpr:
 		return fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr) ||
@@ -3876,7 +3891,10 @@ gb_internal bool fast_backend_entity_is_supported_global(FastLeafProcPlan *plan,
 	if (type_) *type_ = entity->type;
 	if (scalar_type_) *scalar_type_ = scalar_type;
 	if (is_scalar_) *is_scalar_ = is_scalar;
-	return entity->Variable.is_global || entity->Variable.is_foreign || fast_entity_is_local(plan->info, entity);
+	return entity->Variable.is_global ||
+	       entity->Variable.is_foreign ||
+	       fast_entity_is_local(plan->info, entity) ||
+	       ((entity->scope->flags & (ScopeFlag_Pkg|ScopeFlag_File)) != 0);
 }
 
 gb_internal bool fast_backend_find_storage(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *slot_, Type **type_, bool *is_global_) {
@@ -5194,6 +5212,14 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 	}
 
 	case Ast_SelectorExpr: {
+		if (Entity *entity = entity_from_expr(expr)) {
+			if (entity->kind == Entity_Variable && fast_backend_find_storage(emitter->plan, entity, nullptr, &value_type, nullptr)) {
+				if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+					return false;
+				}
+				break;
+			}
+		}
 		Type *container_type = nullptr;
 		i64 offset = 0;
 		bool base_is_pointer = false;
