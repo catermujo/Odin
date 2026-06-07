@@ -135,6 +135,7 @@ gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan 
 gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_any_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_can_emit_union_expr(FastLeafProcPlan *plan, Type *union_type, Ast *expr);
+gb_internal Ast *fast_backend_unwrap_type_value_expr(Ast *expr, Type *target_type);
 gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type);
 gb_internal bool fast_backend_can_emit_constant_aggregate_expr(Type *type, Ast *expr);
 gb_internal bool fast_backend_can_emit_aggregate_compare_operand(FastLeafProcPlan *plan, Ast *expr, Type *type);
@@ -2000,12 +2001,35 @@ gb_internal bool fast_backend_type_supports_aggregate_compare(Type *type) {
 	return false;
 }
 
+gb_internal Ast *fast_backend_unwrap_type_value_expr(Ast *expr, Type *target_type) {
+	expr = unparen_expr(expr);
+	target_type = default_type(target_type);
+	if (expr == nullptr || target_type == nullptr || expr->kind != Ast_CallExpr) {
+		return expr;
+	}
+	if (type_and_value_of_expr(expr->CallExpr.proc).mode != Addressing_Type || expr->CallExpr.args.count != 1) {
+		return expr;
+	}
+	Type *expr_type = default_type(type_of_expr(expr));
+	if (expr_type == nullptr ||
+	    base_type(expr_type) == nullptr ||
+	    base_type(target_type) == nullptr ||
+	    !are_types_identical(base_type(expr_type), base_type(target_type))) {
+		return expr;
+	}
+	Ast *arg = expr->CallExpr.args[0];
+	if (arg != nullptr && arg->kind == Ast_FieldValue) {
+		arg = arg->FieldValue.value;
+	}
+	return unparen_expr(arg);
+}
+
 gb_internal bool fast_backend_can_emit_any_expr(FastLeafProcPlan *plan, Ast *expr) {
 	if (plan == nullptr || expr == nullptr || build_context.no_rtti) {
 		return false;
 	}
 
-	expr = unparen_expr(expr);
+	expr = fast_backend_unwrap_type_value_expr(expr, t_any);
 	Type *source_type = default_type(type_of_expr(expr));
 	if (source_type == nullptr || is_type_any(source_type)) {
 		return false;
@@ -2035,7 +2059,7 @@ gb_internal bool fast_backend_can_emit_union_expr(FastLeafProcPlan *plan, Type *
 	}
 
 	union_type = default_type(union_type);
-	expr = unparen_expr(expr);
+	expr = fast_backend_unwrap_type_value_expr(expr, union_type);
 	Type *source_type = default_type(type_of_expr(expr));
 	if (union_type == nullptr || source_type == nullptr || !is_type_union(union_type) || is_type_union(source_type)) {
 		return false;
@@ -7414,7 +7438,7 @@ gb_internal bool fast_backend_emit_store_any_expr_to_work_address(FastLeafProcEm
 		return false;
 	}
 
-	expr = unparen_expr(expr);
+	expr = fast_backend_unwrap_type_value_expr(expr, t_any);
 	Type *source_type = default_type(type_of_expr(expr));
 	if (source_type == nullptr || is_type_any(source_type) || !fast_backend_type_is_supported_value(source_type, nullptr, nullptr)) {
 		return false;
@@ -7478,7 +7502,7 @@ gb_internal bool fast_backend_emit_store_union_expr_to_work_address(FastLeafProc
 	}
 
 	union_type = default_type(union_type);
-	expr = unparen_expr(expr);
+	expr = fast_backend_unwrap_type_value_expr(expr, union_type);
 	Type *source_type = default_type(type_of_expr(expr));
 	if (union_type == nullptr || source_type == nullptr || is_type_union(source_type) || !is_type_union(union_type) || !union_is_variant_of(union_type, source_type)) {
 		return false;
