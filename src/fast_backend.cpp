@@ -2609,13 +2609,30 @@ gb_internal i32 fast_backend_supported_value_expr_spill_depth(Ast *expr, Type *e
 }
 
 gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
-	if (ce == nullptr || ce->args.count != 1) {
+	if (ce == nullptr) {
 		return 0;
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
 	if (id == BuiltinProc_typeid_of) {
 		return 0;
+	}
+	if (id == BuiltinProc_abs || id == BuiltinProc_sqrt) {
+		return ce->args.count == 1 ? fast_backend_leaf_expr_spill_depth(ce->args[0]) : 0;
+	}
+	if (id == BuiltinProc_fused_mul_add || id == BuiltinProc_clamp) {
+		if (ce->args.count < 3) return 0;
+		i32 d = fast_backend_leaf_expr_spill_depth(ce->args[0]);
+		d = gb_max(d, fast_backend_leaf_expr_spill_depth(ce->args[1]));
+		d = gb_max(d, fast_backend_leaf_expr_spill_depth(ce->args[2]));
+		return d;
+	}
+	if (id == BuiltinProc_min || id == BuiltinProc_max) {
+		i32 d = 0;
+		for (Ast *arg : ce->args) {
+			d = gb_max(d, fast_backend_leaf_expr_spill_depth(arg));
+		}
+		return d;
 	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
@@ -2668,12 +2685,36 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
-	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
-		if (id == BuiltinProc_typeid_of) {
-			return ce->args.count == 1 &&
-			       type_and_value_of_expr(ce->args[0]).mode == Addressing_Type &&
-			       fast_backend_classify_scalar_type(want_type, &result_type);
+	if (id == BuiltinProc_typeid_of) {
+		return ce->args.count == 1 &&
+		       type_and_value_of_expr(ce->args[0]).mode == Addressing_Type &&
+		       fast_backend_classify_scalar_type(want_type, &result_type);
+	}
+	if (id == BuiltinProc_abs || id == BuiltinProc_sqrt) {
+		return ce->args.count == 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+	}
+	if (id == BuiltinProc_fused_mul_add) {
+		if (ce->args.count != 3) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[2], type_of_expr(ce->args[2]));
+	}
+	if (id == BuiltinProc_min || id == BuiltinProc_max) {
+		if (ce->args.count < 2) return false;
+		for (Ast *arg : ce->args) {
+			if (!fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg))) {
+				return false;
+			}
 		}
+		return true;
+	}
+	if (id == BuiltinProc_clamp) {
+		if (ce->args.count != 3) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[2], type_of_expr(ce->args[2]));
+	}
+	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return false;
 	}
 	if (ce->args.count != 1) {
