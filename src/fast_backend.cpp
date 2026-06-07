@@ -358,6 +358,9 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	case Type_EnumeratedArray:
 		return fast_backend_type_is_supported_value(type->EnumeratedArray.elem, nullptr, nullptr);
 
+	case Type_Matrix:
+		return fast_backend_type_is_supported_value(type->Matrix.elem, nullptr, nullptr);
+
 	case Type_DynamicArray:
 		return fast_backend_type_is_supported_value(type->DynamicArray.elem, nullptr, nullptr);
 
@@ -1513,7 +1516,7 @@ gb_internal bool fast_backend_is_array_binary_expr(Ast *expr, Type *expected_typ
 	       expr->kind == Ast_BinaryExpr &&
 	       type != nullptr &&
 	       base != nullptr &&
-	       (base->kind == Type_Array || base->kind == Type_EnumeratedArray);
+	       (base->kind == Type_Array || base->kind == Type_EnumeratedArray || base->kind == Type_Matrix);
 }
 
 gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
@@ -1531,13 +1534,18 @@ gb_internal bool fast_backend_type_supports_array_binary_op(Type *type, TokenKin
 		return false;
 	}
 
-	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray) {
+	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray && base->kind != Type_Matrix) {
 		FastScalarType scalar_type = {};
 		return fast_backend_classify_scalar_type(type, &scalar_type) &&
 		       fast_backend_scalar_binary_op_supported(op, scalar_type);
 	}
 
-	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+	Type *elem_type = nullptr;
+	switch (base->kind) {
+	case Type_Array:           elem_type = base->Array.elem;           break;
+	case Type_EnumeratedArray: elem_type = base->EnumeratedArray.elem; break;
+	case Type_Matrix:          elem_type = base->Matrix.elem;          break;
+	}
 	return fast_backend_type_supports_array_binary_op(elem_type, op);
 }
 
@@ -1548,7 +1556,7 @@ gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *p
 
 	Type *type = default_type(expected_type);
 	Type *base = base_type(type);
-	if (type == nullptr || base == nullptr || (base->kind != Type_Array && base->kind != Type_EnumeratedArray)) {
+	if (type == nullptr || base == nullptr || (base->kind != Type_Array && base->kind != Type_EnumeratedArray && base->kind != Type_Matrix)) {
 		return false;
 	}
 
@@ -1558,7 +1566,12 @@ gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *p
 		return false;
 	}
 
-	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+	Type *elem_type = nullptr;
+	switch (base->kind) {
+	case Type_Array:           elem_type = base->Array.elem;           break;
+	case Type_EnumeratedArray: elem_type = base->EnumeratedArray.elem; break;
+	case Type_Matrix:          elem_type = base->Matrix.elem;          break;
+	}
 	if (!fast_backend_type_supports_array_binary_op(elem_type, op)) {
 		return false;
 	}
@@ -1644,6 +1657,12 @@ gb_internal bool fast_backend_type_supports_aggregate_compare(Type *type) {
 		FastScalarType scalar_type = {};
 		return fast_backend_classify_scalar_type(base->EnumeratedArray.elem, &scalar_type) ||
 		       fast_backend_type_supports_aggregate_compare(base->EnumeratedArray.elem);
+	}
+
+	case Type_Matrix: {
+		FastScalarType scalar_type = {};
+		return fast_backend_classify_scalar_type(base->Matrix.elem, &scalar_type) ||
+		       fast_backend_type_supports_aggregate_compare(base->Matrix.elem);
 	}
 
 	case Type_Struct:
@@ -1967,6 +1986,46 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 		}
 		return true;
 	}
+
+	case Type_Matrix: {
+		Type *elem_type = base->Matrix.elem;
+		i64 elem_count = base->Matrix.row_count * base->Matrix.column_count;
+		if (cl->elems.count == 0) {
+			return true;
+		}
+		if (cl->elems[0]->kind == Ast_FieldValue) {
+			for (Ast *elem : cl->elems) {
+				if (elem == nullptr || elem->kind != Ast_FieldValue) {
+					return false;
+				}
+				ast_node(fv, FieldValue, elem);
+				if (is_ast_range(fv->field)) {
+					ast_node(range, BinaryExpr, fv->field);
+					if (type_and_value_of_expr(range->left).mode != Addressing_Constant ||
+					    type_and_value_of_expr(range->right).mode != Addressing_Constant) {
+						return false;
+					}
+				} else if (type_and_value_of_expr(fv->field).mode != Addressing_Constant) {
+					return false;
+				}
+				if (!fast_backend_can_emit_value_expr(plan, fv->value, elem_type) &&
+				    !fast_backend_can_emit_aggregate_call_expr(plan, fv->value, elem_type)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		if (cl->elems.count > elem_count) {
+			return false;
+		}
+		for (Ast *elem : cl->elems) {
+			if (!fast_backend_can_emit_value_expr(plan, elem, elem_type) &&
+			    !fast_backend_can_emit_aggregate_call_expr(plan, elem, elem_type)) {
+				return false;
+			}
+		}
+		return true;
+	}
 	}
 
 	return false;
@@ -2037,7 +2096,7 @@ gb_internal i32 fast_backend_aggregate_compare_operand_spill_depth(FastLeafProcP
 	}
 	if (expr->kind == Ast_BinaryExpr &&
 	    default_type(type) != nullptr &&
-	    (base_type(default_type(type))->kind == Type_Array || base_type(default_type(type))->kind == Type_EnumeratedArray)) {
+	    (base_type(default_type(type))->kind == Type_Array || base_type(default_type(type))->kind == Type_EnumeratedArray || base_type(default_type(type))->kind == Type_Matrix)) {
 		return 1 + fast_backend_array_binary_expr_spill_depth(expr);
 	}
 	if (fast_backend_can_emit_constant_aggregate_expr(type, expr)) {
@@ -2095,6 +2154,15 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, elem_type));
 		}
 		break;
+	case Type_Matrix:
+		for (Ast *elem : cl->elems) {
+			Ast *value = elem;
+			if (elem != nullptr && elem->kind == Ast_FieldValue) {
+				value = elem->FieldValue.value;
+			}
+			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, base->Matrix.elem));
+		}
+		break;
 	}
 	return depth;
 }
@@ -2125,7 +2193,7 @@ gb_internal i32 fast_backend_supported_value_expr_spill_depth(Ast *expr, Type *e
 	}
 	if (expr->kind == Ast_BinaryExpr &&
 	    base_type(type) != nullptr &&
-	    (base_type(type)->kind == Type_Array || base_type(type)->kind == Type_EnumeratedArray)) {
+	    (base_type(type)->kind == Type_Array || base_type(type)->kind == Type_EnumeratedArray || base_type(type)->kind == Type_Matrix)) {
 		return fast_backend_array_binary_expr_spill_depth(expr);
 	}
 	if (fast_backend_can_emit_constant_aggregate_expr(type, expr)) {
@@ -3716,6 +3784,77 @@ gb_internal bool fast_backend_serialize_constant_any(Type *type, AstCompoundLit 
 	return true;
 }
 
+gb_internal bool fast_backend_serialize_constant_matrix(Type *type, AstCompoundLit *cl, u8 *dst) {
+	type = base_type(type);
+	gb_zero_size(dst, cast(isize)type_size_of(type));
+	Type *elem_type = type->Matrix.elem;
+	i64 elem_size = type_size_of(elem_type);
+	i64 elem_count = type->Matrix.row_count * type->Matrix.column_count;
+	if (elem_size <= 0) {
+		return false;
+	}
+	if (cl->elems.count == 0) {
+		return true;
+	}
+
+	if (cl->elems[0]->kind == Ast_FieldValue) {
+		for (Ast *elem : cl->elems) {
+			if (elem == nullptr || elem->kind != Ast_FieldValue) {
+				return false;
+			}
+			ast_node(fv, FieldValue, elem);
+			if (is_ast_range(fv->field)) {
+				ast_node(range, BinaryExpr, fv->field);
+				TypeAndValue lo_tav = type_and_value_of_expr(range->left);
+				TypeAndValue hi_tav = type_and_value_of_expr(range->right);
+				if (lo_tav.mode != Addressing_Constant || hi_tav.mode != Addressing_Constant) {
+					return false;
+				}
+				i64 lo = exact_value_to_i64(lo_tav.value);
+				i64 hi = exact_value_to_i64(hi_tav.value);
+				if (range->op.kind != Token_RangeHalf) {
+					hi += 1;
+				}
+				if (lo < 0 || hi < lo || hi > elem_count) {
+					return false;
+				}
+				for (i64 index = lo; index < hi; index++) {
+					i64 offset = matrix_row_major_index_to_offset(type, index) * elem_size;
+					if (!fast_backend_serialize_constant_value(elem_type, fv->value, dst + offset)) {
+						return false;
+					}
+				}
+			} else {
+				TypeAndValue index_tav = type_and_value_of_expr(fv->field);
+				if (index_tav.mode != Addressing_Constant) {
+					return false;
+				}
+				i64 index = exact_value_to_i64(index_tav.value);
+				if (index < 0 || index >= elem_count) {
+					return false;
+				}
+				i64 offset = matrix_row_major_index_to_offset(type, index) * elem_size;
+				if (!fast_backend_serialize_constant_value(elem_type, fv->value, dst + offset)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	if (cl->elems.count > elem_count) {
+		return false;
+	}
+
+	for_array(i, cl->elems) {
+		i64 offset = matrix_row_major_index_to_offset(type, i) * elem_size;
+		if (!fast_backend_serialize_constant_value(elem_type, cl->elems[i], dst + offset)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 gb_internal bool fast_backend_serialize_constant_array(Type *type, AstCompoundLit *cl, u8 *dst) {
 	Type *elem_type = type->Array.elem;
 	i64 elem_size = type_size_of(elem_type);
@@ -3805,6 +3944,8 @@ gb_internal bool fast_backend_serialize_constant_aggregate(Type *type, Ast *expr
 		return is_type_any(type) && fast_backend_serialize_constant_any(type, cl, dst);
 	case Type_Array:
 		return fast_backend_serialize_constant_array(type, cl, dst);
+	case Type_Matrix:
+		return fast_backend_serialize_constant_matrix(type, cl, dst);
 	case Type_Struct:
 		return fast_backend_serialize_constant_struct(type, cl, dst);
 	}
@@ -5660,6 +5801,19 @@ gb_internal bool fast_backend_emit_compare_aggregate_at_offset(FastLeafProcEmitt
 		return true;
 	}
 
+	case Type_Matrix: {
+		Type *elem_type = base->Matrix.elem;
+		i64 elem_size = type_size_of(elem_type);
+		i64 elem_count = base->Matrix.row_count * base->Matrix.column_count;
+		for (i64 i = 0; i < elem_count; i++) {
+			i32 elem_offset = cast(i32)(matrix_row_major_index_to_offset(base, i) * elem_size);
+			if (!fast_backend_emit_compare_aggregate_at_offset(emitter, lhs_depth, rhs_depth, offset + elem_offset, elem_type, mismatch_label)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	case Type_Struct:
 		type_set_offsets(base);
 		for (Entity *field : base->Struct.fields) {
@@ -6394,6 +6548,12 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_entity(FastLeafP
 		}
 		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
 	}
+	if (base->kind == Type_Matrix) {
+		if (!fast_backend_emit_address_of_storage_entity(emitter, entity)) {
+			return false;
+		}
+		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
+	}
 	if (!fast_backend_emit_zero_storage_entity(emitter, entity)) {
 		return false;
 	}
@@ -6473,6 +6633,7 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_entity(FastLeafP
 		}
 		return true;
 	}
+
 	}
 
 	return false;
@@ -6516,6 +6677,47 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 		for_array(i, cl->elems) {
 			i32 offset = cast(i32)type_offset_of(type, cast(i32)i);
 			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, field_types[i], cl->elems[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	case Type_Matrix: {
+		Type *elem_type = base->Matrix.elem;
+		i32 elem_size = cast(i32)type_size_of(elem_type);
+		if (cl->elems.count == 0) {
+			return true;
+		}
+		if (cl->elems[0]->kind == Ast_FieldValue) {
+			for (Ast *elem : cl->elems) {
+				ast_node(fv, FieldValue, elem);
+				if (is_ast_range(fv->field)) {
+					ast_node(range, BinaryExpr, fv->field);
+					i64 lo = exact_value_to_i64(type_and_value_of_expr(range->left).value);
+					i64 hi = exact_value_to_i64(type_and_value_of_expr(range->right).value);
+					if (range->op.kind != Token_RangeHalf) {
+						hi += 1;
+					}
+					for (i64 index = lo; index < hi; index++) {
+						i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, index) * elem_size);
+						if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, fv->value)) {
+							return false;
+						}
+					}
+				} else {
+					i64 index = exact_value_to_i64(type_and_value_of_expr(fv->field).value);
+					i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, index) * elem_size);
+					if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, fv->value)) {
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+		for_array(i, cl->elems) {
+			i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, i) * elem_size);
+			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, cl->elems[i])) {
 				return false;
 			}
 		}
@@ -6615,6 +6817,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_result_pointer(F
 	if (base->kind == Type_Basic && is_type_any(type)) {
 		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
 	}
+	if (base->kind == Type_Matrix) {
+		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
+	}
 	fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(type));
 
 	switch (base->kind) {
@@ -6707,6 +6912,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProc
 		return false;
 	}
 	if (base->kind == Type_Basic && is_type_any(type)) {
+		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
+	}
+	if (base->kind == Type_Matrix) {
 		return fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, type, cl);
 	}
 	fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(type));
@@ -7182,18 +7390,32 @@ gb_internal bool fast_backend_emit_array_binary_op_at_offset(FastLeafProcEmitter
 		return true;
 	}
 
-	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray) {
+	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray && base->kind != Type_Matrix) {
 		return false;
 	}
 
-	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
-	i32 elem_size = cast(i32)type_size_of(elem_type);
+	Type *elem_type = nullptr;
+	i64 count = 0;
+	i64 elem_size = 0;
+	if (base->kind == Type_Array) {
+		elem_type = base->Array.elem;
+		count = base->Array.count;
+		elem_size = type_size_of(elem_type);
+	} else if (base->kind == Type_EnumeratedArray) {
+		elem_type = base->EnumeratedArray.elem;
+		count = base->EnumeratedArray.count;
+		elem_size = type_size_of(elem_type);
+	} else {
+		elem_type = base->Matrix.elem;
+		count = base->Matrix.row_count * base->Matrix.column_count;
+		elem_size = type_size_of(elem_type);
+	}
 	if (elem_size <= 0) {
 		return false;
 	}
-	i64 count = base->kind == Type_Array ? base->Array.count : base->EnumeratedArray.count;
 	for (i64 i = 0; i < count; i++) {
-		if (!fast_backend_emit_array_binary_op_at_offset(emitter, dst_depth, lhs_depth, rhs_depth, offset + cast(i32)(i*elem_size), elem_type, op)) {
+		i32 elem_offset = base->kind == Type_Matrix ? cast(i32)(matrix_row_major_index_to_offset(base, i) * elem_size) : cast(i32)(i * elem_size);
+		if (!fast_backend_emit_array_binary_op_at_offset(emitter, dst_depth, lhs_depth, rhs_depth, offset + elem_offset, elem_type, op)) {
 			return false;
 		}
 	}
