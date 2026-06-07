@@ -355,7 +355,7 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 		return fast_backend_type_is_supported_value(type->FixedCapacityDynamicArray.elem, nullptr, nullptr);
 
 	case Type_Struct:
-		if (type->Struct.is_raw_union || type->Struct.soa_kind != StructSoa_None) {
+		if (type->Struct.soa_kind != StructSoa_None) {
 			return false;
 		}
 		type_set_offsets(type);
