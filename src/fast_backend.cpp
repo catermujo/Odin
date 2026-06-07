@@ -16,6 +16,7 @@ enum FastScalarKind {
 	FastScalar_Bool,
 	FastScalar_Signed,
 	FastScalar_Unsigned,
+	FastScalar_Float,
 	FastScalar_Pointer,
 };
 
@@ -342,6 +343,11 @@ gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *o
 		out->bit_size = 8*type_size_of(bt);
 		return out->bit_size > 0 && out->bit_size <= 64;
 	}
+	if (is_type_float(bt)) {
+		out->kind = FastScalar_Float;
+		out->bit_size = 8*type_size_of(bt);
+		return out->bit_size == 32 || out->bit_size == 64;
+	}
 
 	if (is_type_pointer(type) || bt->kind == Type_MultiPointer) {
 		out->kind = FastScalar_Pointer;
@@ -476,6 +482,10 @@ gb_internal bool fast_backend_scalar_is_unsigned(FastScalarType type) {
 	return type.kind == FastScalar_Unsigned || type.kind == FastScalar_Bool || type.kind == FastScalar_Pointer;
 }
 
+gb_internal bool fast_backend_scalar_is_float(FastScalarType type) {
+	return type.kind == FastScalar_Float;
+}
+
 gb_internal bool fast_backend_scalar_is_integer_like(FastScalarType type) {
 	switch (type.kind) {
 	case FastScalar_Bool:
@@ -490,6 +500,7 @@ gb_internal bool fast_backend_scalar_supports_ordered_cmp(FastScalarType type) {
 	switch (type.kind) {
 	case FastScalar_Signed:
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 		return true;
 	}
 	return false;
@@ -501,6 +512,7 @@ gb_internal bool fast_backend_scalar_binary_op_supported(TokenKind op, FastScala
 	case Token_Sub:
 	case Token_Mul:
 	case Token_Quo:
+		return fast_backend_scalar_is_integer_like(scalar_type) || fast_backend_scalar_is_float(scalar_type);
 	case Token_Mod:
 	case Token_And:
 	case Token_Or:
@@ -511,7 +523,7 @@ gb_internal bool fast_backend_scalar_binary_op_supported(TokenKind op, FastScala
 		return fast_backend_scalar_is_integer_like(scalar_type);
 	case Token_CmpEq:
 	case Token_NotEq:
-		return fast_backend_scalar_is_integer_like(scalar_type) || scalar_type.kind == FastScalar_Pointer;
+		return fast_backend_scalar_is_integer_like(scalar_type) || scalar_type.kind == FastScalar_Pointer || fast_backend_scalar_is_float(scalar_type);
 	case Token_Lt:
 	case Token_LtEq:
 	case Token_Gt:
@@ -527,11 +539,49 @@ gb_internal i32 fast_backend_scalar_byte_size(FastScalarType type) {
 		return 1;
 	case FastScalar_Signed:
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 		return cast(i32)gb_max(type.bit_size/8, cast(i64)1);
 	case FastScalar_Pointer:
 		return build_context.metrics.ptr_size;
 	}
 	return 0;
+}
+
+gb_internal bool fast_backend_scalar_cast_supported(FastScalarType source_type, FastScalarType target_type, TokenKind cast_kind) {
+	if (source_type.kind == FastScalar_Invalid || target_type.kind == FastScalar_Invalid) {
+		return false;
+	}
+	if (cast_kind == Token_transmute) {
+		if (fast_backend_scalar_byte_size(source_type) != fast_backend_scalar_byte_size(target_type)) {
+			return false;
+		}
+		if ((source_type.kind == FastScalar_Bool || target_type.kind == FastScalar_Bool) &&
+		    source_type.kind != target_type.kind) {
+			return false;
+		}
+		return true;
+	}
+
+	if (source_type.kind == target_type.kind) {
+		return true;
+	}
+	if (target_type.kind == FastScalar_Bool) {
+		return source_type.kind != FastScalar_Pointer || build_context.metrics.ptr_size == fast_backend_scalar_byte_size(source_type);
+	}
+	if (source_type.kind == FastScalar_Float) {
+		return target_type.kind == FastScalar_Float ||
+		       target_type.kind == FastScalar_Signed ||
+		       target_type.kind == FastScalar_Unsigned;
+	}
+	if (target_type.kind == FastScalar_Float) {
+		return source_type.kind == FastScalar_Bool ||
+		       source_type.kind == FastScalar_Signed ||
+		       source_type.kind == FastScalar_Unsigned;
+	}
+	if (source_type.kind == FastScalar_Pointer || target_type.kind == FastScalar_Pointer) {
+		return source_type.kind == FastScalar_Pointer && target_type.kind == FastScalar_Pointer;
+	}
+	return true;
 }
 
 gb_internal String fast_backend_get_entity_name(Entity *e) {
@@ -1260,16 +1310,7 @@ gb_internal bool fast_backend_can_emit_cast_expr(FastLeafProcPlan *plan, Ast *op
 	if (!fast_backend_can_emit_leaf_expr(plan, operand, operand_type)) {
 		return false;
 	}
-	if (cast_kind == Token_transmute) {
-		if (fast_backend_scalar_byte_size(source_type) != fast_backend_scalar_byte_size(result_type)) {
-			return false;
-		}
-		if ((source_type.kind == FastScalar_Bool || result_type.kind == FastScalar_Bool) &&
-		    source_type.kind != result_type.kind) {
-			return false;
-		}
-	}
-	return true;
+	return fast_backend_scalar_cast_supported(source_type, result_type, cast_kind);
 }
 
 gb_internal bool fast_backend_can_emit_switch_case_expr(FastLeafProcPlan *plan, Ast *expr, Type *tag_type) {
@@ -2952,9 +2993,13 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 		case Token_Add:
 			return true;
 		case Token_Sub:
-			return operand_scalar.kind == FastScalar_Signed || operand_scalar.kind == FastScalar_Unsigned;
+			return operand_scalar.kind == FastScalar_Signed ||
+			       operand_scalar.kind == FastScalar_Unsigned ||
+			       operand_scalar.kind == FastScalar_Float;
 		case Token_Not:
-			return fast_backend_scalar_is_integer_like(operand_scalar) || operand_scalar.kind == FastScalar_Pointer;
+			return fast_backend_scalar_is_integer_like(operand_scalar) ||
+			       operand_scalar.kind == FastScalar_Pointer ||
+			       operand_scalar.kind == FastScalar_Float;
 		case Token_Xor:
 			return fast_backend_scalar_is_integer_like(operand_scalar);
 		}
@@ -2976,33 +3021,7 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 			return false;
 		}
 
-		switch (expr->BinaryExpr.op.kind) {
-		case Token_Add:
-		case Token_Sub:
-		case Token_Mul:
-		case Token_Quo:
-		case Token_Mod:
-		case Token_And:
-		case Token_Or:
-		case Token_Xor:
-		case Token_AndNot:
-			return fast_backend_scalar_is_integer_like(operand_scalar);
-
-		case Token_Shl:
-		case Token_Shr:
-			return fast_backend_scalar_is_integer_like(operand_scalar);
-
-		case Token_CmpEq:
-		case Token_NotEq:
-			return fast_backend_scalar_is_integer_like(operand_scalar) || operand_scalar.kind == FastScalar_Pointer;
-
-		case Token_Lt:
-		case Token_LtEq:
-		case Token_Gt:
-		case Token_GtEq:
-			return fast_backend_scalar_supports_ordered_cmp(operand_scalar);
-		}
-		return false;
+		return fast_backend_scalar_binary_op_supported(expr->BinaryExpr.op.kind, operand_scalar);
 	}
 	}
 
@@ -3963,6 +3982,20 @@ gb_internal bool fast_backend_expr_is_zero_aggregate_value(Type *type, Ast *expr
 }
 
 gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarType type, u64 *out) {
+	if (type.kind == FastScalar_Float) {
+		f64 v = exact_value_to_f64(value);
+		if (type.bit_size == 32) {
+			f32 f = cast(f32)v;
+			*out = bit_cast<u32>(f);
+			return true;
+		}
+		if (type.bit_size == 64) {
+			*out = bit_cast<u64>(v);
+			return true;
+		}
+		return false;
+	}
+
 	switch (value.kind) {
 	case ExactValue_Bool:
 		*out = value.value_bool ? 1 : 0;
@@ -3971,6 +4004,7 @@ gb_internal bool fast_backend_exact_value_as_u64(ExactValue value, FastScalarTyp
 		*out = cast(u64)value.value_pointer;
 		return true;
 	case ExactValue_Integer:
+	case ExactValue_Float:
 		if (fast_backend_scalar_is_unsigned(type)) {
 			*out = exact_value_to_u64(value);
 		} else {
@@ -4446,6 +4480,7 @@ gb_internal void fast_backend_emit_x64_load_from_address(gbFile *file, FastX64Re
 		}
 		break;
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 	case FastScalar_Pointer:
 		switch (fast_backend_scalar_byte_size(type)) {
 		case 1: gb_fprintf(file, "\tmovzx %s, BYTE PTR [%s]\n", dst->r64, addr->r64); return;
@@ -4471,6 +4506,7 @@ gb_internal void fast_backend_emit_arm64_load_from_address(gbFile *file, char co
 		}
 		break;
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 		switch (fast_backend_scalar_byte_size(type)) {
 		case 1: gb_fprintf(file, "\tldrb w%s, [%s]\n", dst+1, addr); return;
 		case 2: gb_fprintf(file, "\tldrh w%s, [%s]\n", dst+1, addr); return;
@@ -4729,6 +4765,7 @@ gb_internal void fast_backend_emit_x64_canonicalize(gbFile *file, FastX64RegName
 		}
 		break;
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 		switch (type.bit_size) {
 		case 8:  gb_fprintf(file, "\tmovzx %s, %s\n", reg->r64, reg->r8);  break;
 		case 16: gb_fprintf(file, "\tmovzx %s, %s\n", reg->r64, reg->r16); break;
@@ -4751,6 +4788,7 @@ gb_internal void fast_backend_emit_arm64_canonicalize(gbFile *file, char const *
 		}
 		break;
 	case FastScalar_Unsigned:
+	case FastScalar_Float:
 		switch (type.bit_size) {
 		case 8:  gb_fprintf(file, "\tuxtb %s, w%s\n", reg, reg+1); break;
 		case 16: gb_fprintf(file, "\tuxth %s, w%s\n", reg, reg+1); break;
@@ -4760,22 +4798,170 @@ gb_internal void fast_backend_emit_arm64_canonicalize(gbFile *file, char const *
 	}
 }
 
-gb_internal void fast_backend_emit_convert_work_reg(FastLeafProcEmitter *emitter, FastScalarType target_type) {
+gb_internal void fast_backend_emit_x64_move_scalar_bits_to_fp(gbFile *file, char const *xmm_reg, FastX64RegNames const *src, FastScalarType type) {
+	if (type.bit_size == 32) {
+		gb_fprintf(file, "\tmovd %s, %s\n", xmm_reg, src->r32);
+	} else {
+		gb_fprintf(file, "\tmovq %s, %s\n", xmm_reg, src->r64);
+	}
+}
+
+gb_internal void fast_backend_emit_x64_move_fp_bits_to_scalar(gbFile *file, FastX64RegNames const *dst, char const *xmm_reg, FastScalarType type) {
+	if (type.bit_size == 32) {
+		gb_fprintf(file, "\tmovd %s, %s\n", dst->r32, xmm_reg);
+	} else {
+		gb_fprintf(file, "\tmovq %s, %s\n", dst->r64, xmm_reg);
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_move_scalar_bits_to_fp(gbFile *file, char const *fp_reg, char const *src, FastScalarType type) {
+	if (type.bit_size == 32) {
+		gb_fprintf(file, "\tfmov %s, w%s\n", fp_reg, src+1);
+	} else {
+		gb_fprintf(file, "\tfmov %s, %s\n", fp_reg, src);
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_move_fp_bits_to_scalar(gbFile *file, char const *dst, char const *fp_reg, FastScalarType type) {
+	if (type.bit_size == 32) {
+		gb_fprintf(file, "\tfmov w%s, %s\n", dst+1, fp_reg);
+	} else {
+		gb_fprintf(file, "\tfmov %s, %s\n", dst, fp_reg);
+	}
+}
+
+gb_internal void fast_backend_emit_convert_work_reg(FastLeafProcEmitter *emitter, FastScalarType source_type, FastScalarType target_type) {
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		auto *work = fast_backend_x64_work_reg();
+		auto *tmp  = fast_backend_x64_tmp_reg();
+		if (source_type.kind == target_type.kind) {
+			fast_backend_emit_x64_canonicalize(emitter->file, work, target_type);
+			return;
+		}
+
 		if (target_type.kind == FastScalar_Bool) {
-			gb_fprintf(emitter->file, "\tcmp %s, 0\n", work->r64);
-			gb_fprintf(emitter->file, "\tsetne %s\n", work->r8);
-			gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
-		} else {
+			if (source_type.kind == FastScalar_Float) {
+				fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", work, source_type);
+				if (source_type.bit_size == 32) {
+					gb_fprintf(emitter->file, "\txorps xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tucomiss xmm0, xmm1\n");
+				} else {
+					gb_fprintf(emitter->file, "\txorpd xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tucomisd xmm0, xmm1\n");
+				}
+				gb_fprintf(emitter->file, "\tsetne %s\n", work->r8);
+				gb_fprintf(emitter->file, "\tsetp %s\n", tmp->r8);
+				gb_fprintf(emitter->file, "\tor %s, %s\n", work->r8, tmp->r8);
+				gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+			} else {
+				gb_fprintf(emitter->file, "\tcmp %s, 0\n", work->r64);
+				gb_fprintf(emitter->file, "\tsetne %s\n", work->r8);
+				gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+			}
+			return;
+		}
+
+		if (source_type.kind == FastScalar_Float) {
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", work, source_type);
+			if (target_type.kind == FastScalar_Float) {
+				if (source_type.bit_size != target_type.bit_size) {
+					gb_fprintf(emitter->file, "\t%s xmm0, xmm0\n", target_type.bit_size == 32 ? "cvtsd2ss" : "cvtss2sd");
+				}
+				fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, work, "xmm0", target_type);
+			} else {
+				gb_fprintf(emitter->file, "\t%s %s, xmm0\n",
+				           source_type.bit_size == 32 ? "cvttss2si" : "cvttsd2si",
+				           target_type.bit_size <= 32 ? work->r32 : work->r64);
+				fast_backend_emit_x64_canonicalize(emitter->file, work, target_type);
+			}
+			return;
+		}
+
+		if (target_type.kind == FastScalar_Float &&
+		    (source_type.kind == FastScalar_Bool || source_type.kind == FastScalar_Signed || source_type.kind == FastScalar_Unsigned)) {
+			if (source_type.kind == FastScalar_Unsigned && source_type.bit_size == 64) {
+				i32 positive_label = fast_backend_alloc_label(emitter);
+				i32 done_label = fast_backend_alloc_label(emitter);
+				char positive_name[64] = {};
+				char done_name[64] = {};
+				fast_backend_make_label_name(positive_name, gb_size_of(positive_name), emitter->plan, positive_label);
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\ttest %s, %s\n", work->r64, work->r64);
+				gb_fprintf(emitter->file, "\tjns %s\n", positive_name);
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", tmp->r64, work->r64);
+				gb_fprintf(emitter->file, "\tand %s, 1\n", work->r64);
+				gb_fprintf(emitter->file, "\tshr %s, 1\n", tmp->r64);
+				gb_fprintf(emitter->file, "\tor %s, %s\n", tmp->r64, work->r64);
+				gb_fprintf(emitter->file, "\t%s xmm0, %s\n", target_type.bit_size == 32 ? "cvtsi2ss" : "cvtsi2sd", tmp->r64);
+				gb_fprintf(emitter->file, "\t%s xmm0, xmm0\n", target_type.bit_size == 32 ? "addss" : "addsd");
+				gb_fprintf(emitter->file, "\tjmp %s\n", done_name);
+				fast_backend_emit_label(emitter->file, emitter->plan, positive_label);
+				gb_fprintf(emitter->file, "\t%s xmm0, %s\n", target_type.bit_size == 32 ? "cvtsi2ss" : "cvtsi2sd", work->r64);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+			} else {
+				gb_fprintf(emitter->file, "\t%s xmm0, %s\n", target_type.bit_size == 32 ? "cvtsi2ss" : "cvtsi2sd", work->r64);
+			}
+			fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, work, "xmm0", target_type);
+			return;
+		}
+
+		if (target_type.kind == FastScalar_Pointer && source_type.kind == FastScalar_Pointer) {
 			fast_backend_emit_x64_canonicalize(emitter->file, work, target_type);
 		}
 	} else {
 		char const *work = fast_backend_arm64_work_reg();
+		if (source_type.kind == target_type.kind) {
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, target_type);
+			return;
+		}
+
 		if (target_type.kind == FastScalar_Bool) {
-			gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
-			gb_fprintf(emitter->file, "\tcset w%s, ne\n", work+1);
-		} else {
+			if (source_type.kind == FastScalar_Float) {
+				fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, source_type.bit_size == 32 ? "s0" : "d0", work, source_type);
+				gb_fprintf(emitter->file, "\tfcmp %s, #0.0\n", source_type.bit_size == 32 ? "s0" : "d0");
+				gb_fprintf(emitter->file, "\tcset w%s, ne\n", work+1);
+			} else {
+				gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+				gb_fprintf(emitter->file, "\tcset w%s, ne\n", work+1);
+			}
+			return;
+		}
+
+		if (source_type.kind == FastScalar_Float) {
+			char const *src_fp = source_type.bit_size == 32 ? "s0" : "d0";
+			fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, src_fp, work, source_type);
+			if (target_type.kind == FastScalar_Float) {
+				char const *dst_fp = target_type.bit_size == 32 ? "s0" : "d0";
+				if (source_type.bit_size != target_type.bit_size) {
+					gb_fprintf(emitter->file, "\tfcvt %s, %s\n", dst_fp, src_fp);
+				}
+				fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, work, dst_fp, target_type);
+			} else {
+				char const *inst = target_type.kind == FastScalar_Unsigned ? "fcvtzu" : "fcvtzs";
+				if (target_type.bit_size <= 32) {
+					gb_fprintf(emitter->file, "\t%s w%s, %s\n", inst, work+1, src_fp);
+				} else {
+					gb_fprintf(emitter->file, "\t%s %s, %s\n", inst, work, src_fp);
+				}
+				fast_backend_emit_arm64_canonicalize(emitter->file, work, target_type);
+			}
+			return;
+		}
+
+		if (target_type.kind == FastScalar_Float &&
+		    (source_type.kind == FastScalar_Bool || source_type.kind == FastScalar_Signed || source_type.kind == FastScalar_Unsigned)) {
+			char const *dst_fp = target_type.bit_size == 32 ? "s0" : "d0";
+			char const *inst = source_type.kind == FastScalar_Unsigned ? "ucvtf" : "scvtf";
+			if (source_type.bit_size <= 32) {
+				gb_fprintf(emitter->file, "\t%s %s, w%s\n", inst, dst_fp, work+1);
+			} else {
+				gb_fprintf(emitter->file, "\t%s %s, %s\n", inst, dst_fp, work);
+			}
+			fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, work, dst_fp, target_type);
+			return;
+		}
+
+		if (target_type.kind == FastScalar_Pointer && source_type.kind == FastScalar_Pointer) {
 			fast_backend_emit_arm64_canonicalize(emitter->file, work, target_type);
 		}
 	}
@@ -4783,15 +4969,42 @@ gb_internal void fast_backend_emit_convert_work_reg(FastLeafProcEmitter *emitter
 
 gb_internal bool fast_backend_emit_leaf_expr(FastLeafProcEmitter *emitter, Ast *expr);
 
+gb_internal bool fast_backend_emit_leaf_expr_as_type(FastLeafProcEmitter *emitter, Ast *expr, FastScalarType scalar_type) {
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+	TypeAndValue tv = type_and_value_of_expr(expr);
+	if (is_type_untyped_nil(tv.type) || tv.mode == Addressing_Constant) {
+		u64 value = 0;
+		if (!is_type_untyped_nil(tv.type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+			return false;
+		}
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), value);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), scalar_type);
+		} else {
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), value);
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), scalar_type);
+		}
+		return true;
+	}
+	return fast_backend_emit_leaf_expr(emitter, expr);
+}
+
 gb_internal bool fast_backend_emit_leaf_cast(FastLeafProcEmitter *emitter, Ast *operand, Type *target_type) {
+	Type *operand_type = reduce_tuple_to_single_type(type_and_value_of_expr(operand).type);
+	FastScalarType source_type = {};
 	FastScalarType result_type = {};
+	if (!fast_backend_expr_scalar_type(operand, operand_type, &source_type)) {
+		return false;
+	}
 	if (!fast_backend_expr_scalar_type(nullptr, target_type, &result_type)) {
 		return false;
 	}
 	if (!fast_backend_emit_leaf_expr(emitter, operand)) {
 		return false;
 	}
-	fast_backend_emit_convert_work_reg(emitter, result_type);
+	fast_backend_emit_convert_work_reg(emitter, source_type, result_type);
 	return true;
 }
 
@@ -5874,7 +6087,7 @@ gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast 
 	if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
 		return false;
 	}
-	if (!fast_backend_emit_leaf_expr(emitter, expr->UnaryExpr.expr)) {
+	if (!fast_backend_emit_leaf_expr_as_type(emitter, expr->UnaryExpr.expr, scalar_type)) {
 		return false;
 	}
 
@@ -5884,10 +6097,37 @@ gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast 
 		case Token_Add:
 			return true;
 		case Token_Sub:
+			if (scalar_type.kind == FastScalar_Float) {
+				fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", work, scalar_type);
+				if (scalar_type.bit_size == 32) {
+					gb_fprintf(emitter->file, "\txorps xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tsubss xmm1, xmm0\n");
+				} else {
+					gb_fprintf(emitter->file, "\txorpd xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tsubsd xmm1, xmm0\n");
+				}
+				fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, work, "xmm1", scalar_type);
+				return true;
+			}
 			gb_fprintf(emitter->file, "\tneg %s\n", work->r64);
 			fast_backend_emit_x64_canonicalize(emitter->file, work, scalar_type);
 			return true;
 		case Token_Not:
+			if (scalar_type.kind == FastScalar_Float) {
+				fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", work, scalar_type);
+				if (scalar_type.bit_size == 32) {
+					gb_fprintf(emitter->file, "\txorps xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tucomiss xmm0, xmm1\n");
+				} else {
+					gb_fprintf(emitter->file, "\txorpd xmm1, xmm1\n");
+					gb_fprintf(emitter->file, "\tucomisd xmm0, xmm1\n");
+				}
+				gb_fprintf(emitter->file, "\tsete %s\n", work->r8);
+				gb_fprintf(emitter->file, "\tsetnp %s\n", fast_backend_x64_tmp_reg()->r8);
+				gb_fprintf(emitter->file, "\tand %s, %s\n", work->r8, fast_backend_x64_tmp_reg()->r8);
+				gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+				return true;
+			}
 			gb_fprintf(emitter->file, "\tcmp %s, 0\n", work->r64);
 			gb_fprintf(emitter->file, "\tsete %s\n", work->r8);
 			gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
@@ -5903,10 +6143,22 @@ gb_internal bool fast_backend_emit_leaf_unary(FastLeafProcEmitter *emitter, Ast 
 		case Token_Add:
 			return true;
 		case Token_Sub:
+			if (scalar_type.kind == FastScalar_Float) {
+				fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, scalar_type.bit_size == 32 ? "s0" : "d0", work, scalar_type);
+				gb_fprintf(emitter->file, "\tfneg %s, %s\n", scalar_type.bit_size == 32 ? "s0" : "d0", scalar_type.bit_size == 32 ? "s0" : "d0");
+				fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, work, scalar_type.bit_size == 32 ? "s0" : "d0", scalar_type);
+				return true;
+			}
 			gb_fprintf(emitter->file, "\tneg %s, %s\n", work, work);
 			fast_backend_emit_arm64_canonicalize(emitter->file, work, scalar_type);
 			return true;
 		case Token_Not:
+			if (scalar_type.kind == FastScalar_Float) {
+				fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, scalar_type.bit_size == 32 ? "s0" : "d0", work, scalar_type);
+				gb_fprintf(emitter->file, "\tfcmp %s, #0.0\n", scalar_type.bit_size == 32 ? "s0" : "d0");
+				gb_fprintf(emitter->file, "\tcset w9, eq\n");
+				return true;
+			}
 			gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
 			gb_fprintf(emitter->file, "\tcset w9, eq\n");
 			return true;
@@ -5947,6 +6199,105 @@ gb_internal char const *fast_backend_arm64_cmp_suffix(TokenKind op, FastScalarTy
 }
 
 gb_internal bool fast_backend_emit_scalar_binary_op(FastLeafProcEmitter *emitter, TokenKind op, FastScalarType scalar_type, Ast *rhs) {
+	if (scalar_type.kind == FastScalar_Float) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			auto *tmp  = fast_backend_x64_tmp_reg();
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", tmp, scalar_type);
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm1", work, scalar_type);
+			char const *op_suffix = scalar_type.bit_size == 32 ? "ss" : "sd";
+			switch (op) {
+			case Token_Add: gb_fprintf(emitter->file, "\tadd%s xmm0, xmm1\n", op_suffix); break;
+			case Token_Sub: gb_fprintf(emitter->file, "\tsub%s xmm0, xmm1\n", op_suffix); break;
+			case Token_Mul: gb_fprintf(emitter->file, "\tmul%s xmm0, xmm1\n", op_suffix); break;
+			case Token_Quo: gb_fprintf(emitter->file, "\tdiv%s xmm0, xmm1\n", op_suffix); break;
+			case Token_CmpEq:
+			case Token_NotEq:
+			case Token_Lt:
+			case Token_LtEq:
+			case Token_Gt:
+			case Token_GtEq:
+				gb_fprintf(emitter->file, "\tucomi%s xmm0, xmm1\n", op_suffix);
+				switch (op) {
+				case Token_CmpEq:
+					gb_fprintf(emitter->file, "\tsete %s\n", work->r8);
+					gb_fprintf(emitter->file, "\tsetnp %s\n", tmp->r8);
+					gb_fprintf(emitter->file, "\tand %s, %s\n", work->r8, tmp->r8);
+					break;
+				case Token_NotEq:
+					gb_fprintf(emitter->file, "\tsetne %s\n", work->r8);
+					gb_fprintf(emitter->file, "\tsetp %s\n", tmp->r8);
+					gb_fprintf(emitter->file, "\tor %s, %s\n", work->r8, tmp->r8);
+					break;
+				case Token_Lt:
+					gb_fprintf(emitter->file, "\tsetb %s\n", work->r8);
+					gb_fprintf(emitter->file, "\tsetnp %s\n", tmp->r8);
+					gb_fprintf(emitter->file, "\tand %s, %s\n", work->r8, tmp->r8);
+					break;
+				case Token_LtEq:
+					gb_fprintf(emitter->file, "\tsetbe %s\n", work->r8);
+					gb_fprintf(emitter->file, "\tsetnp %s\n", tmp->r8);
+					gb_fprintf(emitter->file, "\tand %s, %s\n", work->r8, tmp->r8);
+					break;
+				case Token_Gt:
+					gb_fprintf(emitter->file, "\tseta %s\n", work->r8);
+					break;
+				case Token_GtEq:
+					gb_fprintf(emitter->file, "\tsetae %s\n", work->r8);
+					break;
+				default:
+					break;
+				}
+				gb_fprintf(emitter->file, "\tmovzx %s, %s\n", work->r64, work->r8);
+				return true;
+			default:
+				return false;
+			}
+			fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, work, "xmm0", scalar_type);
+			return true;
+		}
+
+		char const *work = fast_backend_arm64_work_reg();
+		char const *tmp  = fast_backend_arm64_tmp_reg();
+		char const *fp0 = scalar_type.bit_size == 32 ? "s0" : "d0";
+		char const *fp1 = scalar_type.bit_size == 32 ? "s1" : "d1";
+		fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, fp0, tmp, scalar_type);
+		fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, fp1, work, scalar_type);
+		switch (op) {
+		case Token_Add: gb_fprintf(emitter->file, "\tfadd %s, %s, %s\n", fp0, fp0, fp1); break;
+		case Token_Sub: gb_fprintf(emitter->file, "\tfsub %s, %s, %s\n", fp0, fp0, fp1); break;
+		case Token_Mul: gb_fprintf(emitter->file, "\tfmul %s, %s, %s\n", fp0, fp0, fp1); break;
+		case Token_Quo: gb_fprintf(emitter->file, "\tfdiv %s, %s, %s\n", fp0, fp0, fp1); break;
+		case Token_CmpEq:
+		case Token_NotEq:
+		case Token_Lt:
+		case Token_LtEq:
+		case Token_Gt:
+		case Token_GtEq: {
+			char const *cond = nullptr;
+			switch (op) {
+			case Token_CmpEq: cond = "eq"; break;
+			case Token_NotEq: cond = "ne"; break;
+			case Token_Lt:    cond = "mi"; break;
+			case Token_LtEq:  cond = "ls"; break;
+			case Token_Gt:    cond = "gt"; break;
+			case Token_GtEq:  cond = "ge"; break;
+			default: break;
+			}
+			if (cond == nullptr) {
+				return false;
+			}
+			gb_fprintf(emitter->file, "\tfcmp %s, %s\n", fp0, fp1);
+			gb_fprintf(emitter->file, "\tcset w%s, %s\n", work+1, cond);
+			return true;
+		}
+		default:
+			return false;
+		}
+		fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, work, fp0, scalar_type);
+		return true;
+	}
+
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		auto *work = fast_backend_x64_work_reg();
 		auto *tmp  = fast_backend_x64_tmp_reg();
@@ -6112,12 +6463,12 @@ gb_internal bool fast_backend_emit_leaf_binary(FastLeafProcEmitter *emitter, Ast
 		return false;
 	}
 
-	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.left)) {
+	if (!fast_backend_emit_leaf_expr_as_type(emitter, expr->BinaryExpr.left, scalar_type)) {
 		return false;
 	}
 
 	fast_backend_emit_push_work_reg(emitter);
-	if (!fast_backend_emit_leaf_expr(emitter, expr->BinaryExpr.right)) {
+	if (!fast_backend_emit_leaf_expr_as_type(emitter, expr->BinaryExpr.right, scalar_type)) {
 		return false;
 	}
 	fast_backend_emit_pop_tmp_reg(emitter);
@@ -6556,6 +6907,60 @@ gb_internal void fast_backend_emit_jump_if_compare(FastLeafProcEmitter *emitter,
 	fast_backend_make_label_name(true_name, gb_size_of(true_name), emitter->plan, true_label);
 	fast_backend_make_label_name(false_name, gb_size_of(false_name), emitter->plan, false_label);
 
+	if (type.kind == FastScalar_Float) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", fast_backend_x64_tmp_reg(), type);
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm1", fast_backend_x64_work_reg(), type);
+			gb_fprintf(emitter->file, "\tucomi%s xmm0, xmm1\n", type.bit_size == 32 ? "ss" : "sd");
+			switch (op) {
+			case Token_CmpEq:
+				gb_fprintf(emitter->file, "\tjp %s\n", false_name);
+				gb_fprintf(emitter->file, "\tje %s\n", true_name);
+				break;
+			case Token_NotEq:
+				gb_fprintf(emitter->file, "\tjp %s\n", true_name);
+				gb_fprintf(emitter->file, "\tjne %s\n", true_name);
+				break;
+			case Token_Lt:
+				gb_fprintf(emitter->file, "\tjp %s\n", false_name);
+				gb_fprintf(emitter->file, "\tjb %s\n", true_name);
+				break;
+			case Token_LtEq:
+				gb_fprintf(emitter->file, "\tjp %s\n", false_name);
+				gb_fprintf(emitter->file, "\tjbe %s\n", true_name);
+				break;
+			case Token_Gt:
+				gb_fprintf(emitter->file, "\tja %s\n", true_name);
+				break;
+			case Token_GtEq:
+				gb_fprintf(emitter->file, "\tjae %s\n", true_name);
+				break;
+			default:
+				break;
+			}
+			gb_fprintf(emitter->file, "\tjmp %s\n", false_name);
+			return;
+		}
+
+		fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, type.bit_size == 32 ? "s0" : "d0", fast_backend_arm64_tmp_reg(), type);
+		fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, type.bit_size == 32 ? "s1" : "d1", fast_backend_arm64_work_reg(), type);
+		gb_fprintf(emitter->file, "\tfcmp %s, %s\n", type.bit_size == 32 ? "s0" : "d0", type.bit_size == 32 ? "s1" : "d1");
+		char const *suffix = nullptr;
+		switch (op) {
+		case Token_CmpEq: suffix = "eq"; break;
+		case Token_NotEq: suffix = "ne"; break;
+		case Token_Lt:    suffix = "mi"; break;
+		case Token_LtEq:  suffix = "ls"; break;
+		case Token_Gt:    suffix = "gt"; break;
+		case Token_GtEq:  suffix = "ge"; break;
+		default: break;
+		}
+		GB_ASSERT(suffix != nullptr);
+		gb_fprintf(emitter->file, "\tb.%s %s\n", suffix, true_name);
+		gb_fprintf(emitter->file, "\tb %s\n", false_name);
+		return;
+	}
+
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		char const *suffix = fast_backend_x64_cmp_suffix(op, type);
 		GB_ASSERT(suffix != nullptr);
@@ -6572,11 +6977,11 @@ gb_internal void fast_backend_emit_jump_if_compare(FastLeafProcEmitter *emitter,
 }
 
 gb_internal bool fast_backend_emit_compare_exprs_branch(FastLeafProcEmitter *emitter, Ast *left, Ast *right, FastScalarType type, TokenKind op, i32 true_label, i32 false_label) {
-	if (!fast_backend_emit_leaf_expr(emitter, left)) {
+	if (!fast_backend_emit_leaf_expr_as_type(emitter, left, type)) {
 		return false;
 	}
 	fast_backend_emit_push_work_reg(emitter);
-	if (!fast_backend_emit_leaf_expr(emitter, right)) {
+	if (!fast_backend_emit_leaf_expr_as_type(emitter, right, type)) {
 		return false;
 	}
 	fast_backend_emit_pop_tmp_reg(emitter);
@@ -6587,6 +6992,21 @@ gb_internal bool fast_backend_emit_compare_exprs_branch(FastLeafProcEmitter *emi
 gb_internal void fast_backend_emit_jump_if_values_not_equal(FastLeafProcEmitter *emitter, FastScalarType type, i32 mismatch_label) {
 	char mismatch_name[64] = {};
 	fast_backend_make_label_name(mismatch_name, gb_size_of(mismatch_name), emitter->plan, mismatch_label);
+	if (type.kind == FastScalar_Float) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", fast_backend_x64_tmp_reg(), type);
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm1", fast_backend_x64_work_reg(), type);
+			gb_fprintf(emitter->file, "\tucomi%s xmm0, xmm1\n", type.bit_size == 32 ? "ss" : "sd");
+			gb_fprintf(emitter->file, "\tjp %s\n", mismatch_name);
+			gb_fprintf(emitter->file, "\tjne %s\n", mismatch_name);
+		} else {
+			fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, type.bit_size == 32 ? "s0" : "d0", fast_backend_arm64_tmp_reg(), type);
+			fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, type.bit_size == 32 ? "s1" : "d1", fast_backend_arm64_work_reg(), type);
+			gb_fprintf(emitter->file, "\tfcmp %s, %s\n", type.bit_size == 32 ? "s0" : "d0", type.bit_size == 32 ? "s1" : "d1");
+			gb_fprintf(emitter->file, "\tb.ne %s\n", mismatch_name);
+		}
+		return;
+	}
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_work_reg()->r64);
 		gb_fprintf(emitter->file, "\tjne %s\n", mismatch_name);
@@ -6594,7 +7014,6 @@ gb_internal void fast_backend_emit_jump_if_values_not_equal(FastLeafProcEmitter 
 		gb_fprintf(emitter->file, "\tcmp %s, %s\n", fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg());
 		gb_fprintf(emitter->file, "\tb.ne %s\n", mismatch_name);
 	}
-	gb_unused(type);
 }
 
 gb_internal bool fast_backend_emit_compare_scalar_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, FastScalarType type, i32 mismatch_label) {
@@ -8052,7 +8471,7 @@ gb_internal bool fast_backend_emit_store_value_to_entity(FastLeafProcEmitter *em
 
 	FastScalarType scalar_type = {};
 	if (fast_backend_expr_scalar_type(expr, type, &scalar_type)) {
-		if (!fast_backend_emit_leaf_expr(emitter, expr)) {
+		if (!fast_backend_emit_leaf_expr_as_type(emitter, expr, scalar_type)) {
 			return false;
 		}
 		return fast_backend_emit_store_to_scalar_storage(emitter, entity);
@@ -8122,7 +8541,7 @@ gb_internal bool fast_backend_emit_store_value_to_lhs(FastLeafProcEmitter *emitt
 
 	FastScalarType scalar_type = {};
 	if (fast_backend_expr_scalar_type(rhs, type, &scalar_type)) {
-		if (!fast_backend_emit_leaf_expr(emitter, rhs)) {
+		if (!fast_backend_emit_leaf_expr_as_type(emitter, rhs, scalar_type)) {
 			return false;
 		}
 		fast_backend_emit_push_work_reg(emitter);
@@ -8282,7 +8701,7 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), scalar_type);
 		}
 		fast_backend_emit_push_work_reg(emitter);
-		if (!fast_backend_emit_leaf_expr(emitter, rhs)) {
+		if (!fast_backend_emit_leaf_expr_as_type(emitter, rhs, scalar_type)) {
 			return false;
 		}
 		fast_backend_emit_pop_tmp_reg(emitter);
@@ -8300,7 +8719,7 @@ gb_internal bool fast_backend_emit_assign_stmt(FastLeafProcEmitter *emitter, Ast
 			Type *rhs_type = reduce_tuple_to_single_type(type_and_value_of_expr(as->rhs[i]).type);
 			FastScalarType scalar_type = {};
 			if (rhs_type != nullptr && fast_backend_expr_scalar_type(as->rhs[i], rhs_type, &scalar_type)) {
-				if (!fast_backend_emit_leaf_expr(emitter, as->rhs[i])) {
+				if (!fast_backend_emit_leaf_expr_as_type(emitter, as->rhs[i], scalar_type)) {
 					return false;
 				}
 			} else if (rhs_type != nullptr && fast_backend_can_emit_aggregate_call_expr(emitter->plan, as->rhs[i], rhs_type)) {
@@ -8344,7 +8763,7 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		bool preserve_result = rs->results.count != 0 && emitter->deferred_stmts.count != 0;
 		isize deferred_count = emitter->deferred_stmts.count;
 		if (rs->results.count != 0) {
-			if (!fast_backend_emit_leaf_expr(emitter, rs->results[0])) {
+			if (!fast_backend_emit_leaf_expr_as_type(emitter, rs->results[0], emitter->plan->return_type)) {
 				return false;
 			}
 			if (preserve_result) {
