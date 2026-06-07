@@ -114,6 +114,7 @@ struct FastBackendErrorState {
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out);
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot);
 gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce);
+gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_type_, Entity **proc_entity_, Type **result_type_, FastScalarType *scalar_result_type_, bool *has_result_, bool *return_by_pointer_);
 gb_internal BuiltinProcId fast_backend_builtin_proc_id(Ast *expr);
 gb_internal bool fast_backend_type_is_supported_aggregate(Type *type);
 gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType *scalar_type_, bool *is_scalar_);
@@ -188,12 +189,19 @@ gb_internal i32 fast_backend_aggregate_compare_operand_spill_depth(FastLeafProcP
 gb_internal i32 fast_backend_aggregate_compare_expr_spill_depth(Ast *expr);
 gb_internal i32 fast_backend_supported_value_expr_spill_depth(Ast *expr, Type *expected_type);
 gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce);
+gb_internal bool fast_backend_get_call_split_args(AstCallExpr *ce, Slice<Ast *> *positional_, Slice<Ast *> *named_);
+gb_internal Ast *fast_backend_find_named_call_arg_value(TypeProc *pt, Slice<Ast *> named_args, i32 param_index);
+gb_internal bool fast_backend_resolve_call_param_arg(TypeProc *pt, AstCallExpr *ce, i32 param_index, Ast **expr_, Slice<Ast *> *variadic_pack_);
+gb_internal bool fast_backend_can_emit_call_arg_expr(FastLeafProcPlan *plan, Ast *arg, Type *param_type);
+gb_internal i32 fast_backend_call_arg_expr_spill_depth(FastLeafProcPlan *plan, Ast *arg, Type *param_type);
 gb_internal bool fast_backend_can_emit_raw_data_expr(FastLeafProcPlan *plan, Ast *expr);
 gb_internal bool fast_backend_emit_raw_data_expr(FastLeafProcEmitter *emitter, Ast *expr);
+gb_internal bool fast_backend_emit_pack_variadic_slice_arg(FastLeafProcEmitter *emitter, Type *slice_type, Slice<Ast *> elems, i32 *temp_bytes_);
 gb_internal void fast_backend_make_label_name(char *buffer, isize buffer_size, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_jump_if_zero(FastLeafProcEmitter *emitter, i32 label_index);
+gb_internal void fast_backend_emit_store_work_to_tmp_address(FastLeafProcEmitter *emitter, FastScalarType type);
 gb_internal bool fast_backend_emit_compare_scalar_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, FastScalarType type, i32 mismatch_label);
 gb_internal bool fast_backend_emit_compare_aggregate_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, Type *type, i32 mismatch_label);
 gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
@@ -1276,6 +1284,176 @@ gb_internal bool fast_backend_can_emit_switch_case_expr(FastLeafProcPlan *plan, 
 	return fast_backend_can_emit_leaf_expr(plan, expr, tag_type);
 }
 
+gb_internal bool fast_backend_get_call_split_args(AstCallExpr *ce, Slice<Ast *> *positional_, Slice<Ast *> *named_) {
+	if (ce == nullptr) {
+		return false;
+	}
+
+	Slice<Ast *> positional = {};
+	Slice<Ast *> named = {};
+	if (ce->split_args != nullptr) {
+		positional = ce->split_args->positional;
+		named = ce->split_args->named;
+	} else {
+		positional = ce->args;
+		for (isize i = 0; i < ce->args.count; i++) {
+			Ast *arg = ce->args[i];
+			if (arg != nullptr && arg->kind == Ast_FieldValue) {
+				positional.count = i;
+				break;
+			}
+		}
+		named = slice(ce->args, positional.count, ce->args.count);
+	}
+
+	if (positional_) *positional_ = positional;
+	if (named_) *named_ = named;
+	return true;
+}
+
+gb_internal Ast *fast_backend_find_named_call_arg_value(TypeProc *pt, Slice<Ast *> named_args, i32 param_index) {
+	if (pt == nullptr || pt->params == nullptr || pt->params->kind != Type_Tuple || param_index < 0 || param_index >= pt->param_count) {
+		return nullptr;
+	}
+
+	Entity *param = pt->params->Tuple.variables[param_index];
+	if (param == nullptr) {
+		return nullptr;
+	}
+
+	InternedString param_name = entity_interned_name(param);
+	for (Ast *arg : named_args) {
+		if (arg == nullptr || arg->kind != Ast_FieldValue) {
+			continue;
+		}
+		ast_node(fv, FieldValue, arg);
+		if (fv->field != nullptr &&
+		    fv->field->kind == Ast_Ident &&
+		    fv->field->Ident.interned == param_name) {
+			return fv->value;
+		}
+	}
+	return nullptr;
+}
+
+gb_internal bool fast_backend_resolve_call_param_arg(TypeProc *pt, AstCallExpr *ce, i32 param_index, Ast **expr_, Slice<Ast *> *variadic_pack_) {
+	if (expr_) *expr_ = nullptr;
+	if (variadic_pack_) *variadic_pack_ = {};
+	if (pt == nullptr || ce == nullptr || pt->params == nullptr || pt->params->kind != Type_Tuple || param_index < 0 || param_index >= pt->param_count) {
+		return false;
+	}
+
+	Slice<Ast *> positional = {};
+	Slice<Ast *> named = {};
+	if (!fast_backend_get_call_split_args(ce, &positional, &named)) {
+		return false;
+	}
+
+	Entity *param = pt->params->Tuple.variables[param_index];
+	if (param == nullptr || param->kind != Entity_Variable) {
+		return false;
+	}
+
+	isize positional_param_count = positional.count;
+	if (pt->variadic) {
+		positional_param_count = gb_min(positional.count, cast(isize)pt->variadic_index);
+	}
+
+	Ast *named_value = fast_backend_find_named_call_arg_value(pt, named, param_index);
+	if (named_value != nullptr) {
+		if (pt->variadic && param_index == pt->variadic_index && positional.count > positional_param_count) {
+			return false;
+		}
+		if (expr_) *expr_ = named_value;
+		return true;
+	}
+
+	if (param_index < positional_param_count) {
+		if (expr_) *expr_ = positional[param_index];
+		return true;
+	}
+
+	if (pt->variadic && param_index == pt->variadic_index) {
+		auto variadic_args = slice(positional, positional_param_count, positional.count);
+		if (ce->ellipsis.pos.line != 0) {
+			if (variadic_args.count != 1) {
+				return false;
+			}
+			if (expr_) *expr_ = variadic_args[0];
+			return true;
+		}
+		if (variadic_pack_) *variadic_pack_ = variadic_args;
+		return true;
+	}
+
+	if (param->Variable.param_value.kind != ParameterValue_Invalid &&
+	    param->Variable.param_value.original_ast_expr != nullptr) {
+		if (expr_) *expr_ = param->Variable.param_value.original_ast_expr;
+		return true;
+	}
+
+	return false;
+}
+
+gb_internal bool fast_backend_can_emit_call_arg_expr(FastLeafProcPlan *plan, Ast *arg, Type *param_type) {
+	if (plan == nullptr || arg == nullptr || param_type == nullptr) {
+		return false;
+	}
+
+	FastScalarType scalar_type = {};
+	if (fast_backend_classify_scalar_type(param_type, &scalar_type)) {
+		return fast_backend_can_emit_leaf_expr(plan, arg, param_type);
+	}
+	if (!fast_backend_type_is_supported_aggregate(param_type)) {
+		return false;
+	}
+	return fast_backend_can_emit_aggregate_expr(plan, arg, param_type) ||
+	       fast_backend_can_emit_aggregate_call_expr(plan, arg, param_type);
+}
+
+gb_internal i32 fast_backend_call_arg_expr_spill_depth(FastLeafProcPlan *plan, Ast *arg, Type *param_type) {
+	if (arg == nullptr || param_type == nullptr) {
+		return 0;
+	}
+
+	FastScalarType scalar_type = {};
+	if (fast_backend_classify_scalar_type(param_type, &scalar_type)) {
+		return fast_backend_leaf_expr_spill_depth(arg);
+	}
+
+	arg = unparen_expr(arg);
+	if (arg == nullptr) {
+		return 0;
+	}
+	if (fast_backend_is_slice_compound_lit_expr(arg, param_type)) {
+		return fast_backend_slice_compound_lit_spill_depth(arg, param_type);
+	}
+	if (fast_backend_is_array_binary_expr(arg, param_type)) {
+		return fast_backend_array_binary_expr_spill_depth(arg);
+	}
+	if (arg->kind == Ast_SliceExpr) {
+		return fast_backend_slice_expr_spill_depth(&arg->SliceExpr);
+	}
+
+	i32 depth = type_and_value_of_expr(arg).mode == Addressing_Constant ? 0 : fast_backend_address_expr_spill_depth(arg);
+	if (arg->kind == Ast_CallExpr) {
+		TypeProc *inner_pt = nullptr;
+		Entity *inner_entity = nullptr;
+		Type *inner_result_type = nullptr;
+		FastScalarType inner_scalar_result_type = {};
+		bool inner_has_result = false;
+		bool inner_return_by_pointer = false;
+		if (fast_backend_get_call_info(&arg->CallExpr, &inner_pt, &inner_entity, &inner_result_type, &inner_scalar_result_type, &inner_has_result, &inner_return_by_pointer) &&
+		    inner_has_result &&
+		    inner_return_by_pointer &&
+		    inner_result_type != nullptr &&
+		    are_types_identical(default_type(inner_result_type), default_type(param_type))) {
+			depth = 1 + fast_backend_call_expr_spill_depth(&arg->CallExpr);
+		}
+	}
+	return depth;
+}
+
 gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_type_, Entity **proc_entity_, Type **result_type_, FastScalarType *scalar_result_type_, bool *has_result_, bool *return_by_pointer_) {
 	Entity *proc_entity = ce->entity_procedure_of;
 	if (proc_entity == nullptr) {
@@ -1300,16 +1478,13 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 	}
 
 	TypeProc *pt = &proc_type->Proc;
-	if (pt->is_closure || pt->variadic || pt->c_vararg || pt->diverging || pt->is_polymorphic || proc_entity->Procedure.generated_from_polymorphic) {
+	if (pt->is_closure || pt->c_vararg || pt->diverging || pt->is_polymorphic || proc_entity->Procedure.generated_from_polymorphic) {
 		return false;
 	}
 	if (!fast_backend_supported_calling_convention(pt->calling_convention)) {
 		return false;
 	}
-	if (ce->ellipsis.string.len != 0 || ce->optional_ok_one) {
-		return false;
-	}
-	if (ce->split_args != nullptr && ce->split_args->named.count != 0) {
+	if (ce->optional_ok_one) {
 		return false;
 	}
 
@@ -1361,9 +1536,6 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 	if (!allow_void_result && !has_result) {
 		return false;
 	}
-	if (cast(i32)ce->args.count != pt->param_count) {
-		return false;
-	}
 
 	i32 total_param_count = pt->param_count + (pt->calling_convention == ProcCC_Odin ? 1 : 0) + (return_by_pointer ? 1 : 0);
 	if (total_param_count > fast_backend_param_limit_from_proc_type(pt)) {
@@ -1373,24 +1545,47 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 		return false;
 	}
 
-	for_array(i, ce->args) {
+	Slice<Ast *> positional = {};
+	Slice<Ast *> named = {};
+	if (!fast_backend_get_call_split_args(ce, &positional, &named)) {
+		return false;
+	}
+	if (!pt->variadic && positional.count > pt->param_count) {
+		return false;
+	}
+	if (ce->ellipsis.pos.line != 0 && !pt->variadic) {
+		return false;
+	}
+	gb_unused(named);
+
+	for (i32 i = 0; i < pt->param_count; i++) {
 		Entity *param = pt->params->Tuple.variables[i];
 		if (param == nullptr || param->kind != Entity_Variable) {
 			return false;
 		}
-		FastScalarType arg_type = {};
-		if (fast_backend_classify_scalar_type(param->type, &arg_type)) {
-			if (!fast_backend_can_emit_leaf_expr(plan, ce->args[i], param->type)) {
+
+		Ast *arg = nullptr;
+		Slice<Ast *> variadic_pack = {};
+		if (!fast_backend_resolve_call_param_arg(pt, ce, i, &arg, &variadic_pack)) {
+			return false;
+		}
+
+		if (pt->variadic && i == pt->variadic_index && ce->ellipsis.pos.line == 0 && arg == nullptr) {
+			Type *slice_type = default_type(param->type);
+			if (!is_type_slice(slice_type)) {
 				return false;
 			}
-		} else {
-			if (!fast_backend_type_is_supported_aggregate(param->type)) {
-				return false;
+			Type *elem_type = base_type(slice_type)->Slice.elem;
+			for (Ast *elem : variadic_pack) {
+				if (!fast_backend_can_emit_call_arg_expr(plan, elem, elem_type)) {
+					return false;
+				}
 			}
-			if (!fast_backend_can_emit_aggregate_expr(plan, ce->args[i], param->type) &&
-			    !fast_backend_can_emit_aggregate_call_expr(plan, ce->args[i], param->type)) {
-				return false;
-			}
+			continue;
+		}
+
+		if (!fast_backend_can_emit_call_arg_expr(plan, arg, param->type)) {
+			return false;
 		}
 	}
 
@@ -1442,41 +1637,45 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 	gb_unused(has_result);
 
 	i32 leading_slots = return_by_pointer ? 1 : 0;
-	for_array(i, ce->args) {
-		i32 arg_depth = fast_backend_leaf_expr_spill_depth(ce->args[i]);
-		if (have_call_info && pt != nullptr && pt->params != nullptr && pt->params->kind == Type_Tuple) {
+	if (have_call_info && pt != nullptr && pt->params != nullptr && pt->params->kind == Type_Tuple) {
+		for (i32 i = 0; i < pt->param_count; i++) {
 			Entity *param = pt->params->Tuple.variables[i];
-			FastScalarType param_scalar_type = {};
-			if (param != nullptr && !fast_backend_classify_scalar_type(param->type, &param_scalar_type)) {
-				Ast *arg = unparen_expr(ce->args[i]);
-				if (fast_backend_is_slice_compound_lit_expr(arg, param->type)) {
-					arg_depth = fast_backend_slice_compound_lit_spill_depth(arg, param->type);
-				} else if (fast_backend_is_array_binary_expr(arg, param->type)) {
-					arg_depth = fast_backend_array_binary_expr_spill_depth(arg);
-				} else {
-					arg_depth = type_and_value_of_expr(arg).mode == Addressing_Constant ? 0 : fast_backend_address_expr_spill_depth(arg);
-				}
-				if (arg != nullptr && arg->kind == Ast_CallExpr) {
-					TypeProc *inner_pt = nullptr;
-					Entity *inner_entity = nullptr;
-					Type *inner_result_type = nullptr;
-					FastScalarType inner_scalar_result_type = {};
-					bool inner_has_result = false;
-					bool inner_return_by_pointer = false;
-					if (fast_backend_get_call_info(&arg->CallExpr, &inner_pt, &inner_entity, &inner_result_type, &inner_scalar_result_type, &inner_has_result, &inner_return_by_pointer) &&
-					    inner_has_result &&
-					    inner_return_by_pointer &&
-					    inner_result_type != nullptr &&
-					    are_types_identical(default_type(inner_result_type), default_type(param->type))) {
-						arg_depth = 1 + fast_backend_call_expr_spill_depth(&arg->CallExpr);
+			if (param == nullptr || param->kind != Entity_Variable) {
+				continue;
+			}
+
+			Ast *arg = nullptr;
+			Slice<Ast *> variadic_pack = {};
+			if (!fast_backend_resolve_call_param_arg(pt, ce, i, &arg, &variadic_pack)) {
+				continue;
+			}
+
+			i32 arg_depth = 0;
+			if (pt->variadic && i == pt->variadic_index && ce->ellipsis.pos.line == 0 && arg == nullptr) {
+				Type *slice_type = default_type(param->type);
+				if (slice_type != nullptr && is_type_slice(slice_type)) {
+					Type *elem_type = base_type(slice_type)->Slice.elem;
+					for (Ast *elem : variadic_pack) {
+						arg_depth = gb_max(arg_depth, fast_backend_call_arg_expr_spill_depth(nullptr, elem, elem_type));
 					}
 				}
+			} else {
+				arg_depth = fast_backend_call_arg_expr_spill_depth(nullptr, arg, param->type);
 			}
+			depth = gb_max(depth, leading_slots + i + arg_depth);
 		}
-		depth = gb_max(depth, leading_slots + cast(i32)i + arg_depth);
+	} else {
+		for_array(i, ce->args) {
+			depth = gb_max(depth, leading_slots + cast(i32)i + fast_backend_leaf_expr_spill_depth(ce->args[i]));
+		}
 	}
 
-	i32 total_arg_count = cast(i32)ce->args.count + leading_slots;
+	i32 total_arg_count = leading_slots;
+	if (have_call_info && pt != nullptr) {
+		total_arg_count += pt->param_count;
+	} else {
+		total_arg_count += cast(i32)ce->args.count;
+	}
 	if (have_call_info && pt != nullptr && pt->calling_convention == ProcCC_Odin) {
 		total_arg_count += 1;
 	} else {
@@ -3228,7 +3427,7 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	}
 
 	TypeProc *pt = &type->Proc;
-	if (pt->variadic || pt->diverging || pt->is_polymorphic || e->Procedure.generated_from_polymorphic) {
+	if (pt->diverging || pt->is_polymorphic || e->Procedure.generated_from_polymorphic) {
 		error(e->token, "Fast backend does not yet support this procedure kind");
 		return false;
 	}
@@ -5208,6 +5407,88 @@ gb_internal bool fast_backend_emit_materialize_aggregate_arg_pointer(FastLeafPro
 	return fast_backend_emit_store_constant_aggregate_to_address(emitter, param_type, arg);
 }
 
+gb_internal bool fast_backend_emit_pack_variadic_slice_arg(FastLeafProcEmitter *emitter, Type *slice_type, Slice<Ast *> elems, i32 *temp_bytes_) {
+	if (emitter == nullptr || slice_type == nullptr || temp_bytes_ == nullptr) {
+		return false;
+	}
+
+	slice_type = default_type(slice_type);
+	Type *base = base_type(slice_type);
+	if (base == nullptr || base->kind != Type_Slice) {
+		return false;
+	}
+
+	Type *elem_type = base->Slice.elem;
+	i32 elem_size = cast(i32)type_size_of(elem_type);
+	i32 elem_align = cast(i32)type_align_of(elem_type);
+	if (elem_size <= 0 || elem_align <= 0) {
+		return false;
+	}
+
+	FastScalarType pointer_type = fast_backend_context_scalar_type();
+	FastScalarType len_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+
+	i32 spill_base = emitter->current_spill_depth;
+	defer (emitter->current_spill_depth = spill_base);
+
+	if (elems.count != 0) {
+		i64 total_elem_bytes = cast(i64)elem_size * elems.count;
+		if (total_elem_bytes > cast(i64)I32_MAX) {
+			return false;
+		}
+		i32 alloc_bytes = 0;
+		if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)total_elem_bytes, elem_align, &alloc_bytes)) {
+			return false;
+		}
+		*temp_bytes_ += alloc_bytes;
+		fast_backend_emit_push_work_reg(emitter);
+		i32 data_depth = emitter->current_spill_depth;
+		fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)total_elem_bytes);
+		for_array(i, elems) {
+			fast_backend_emit_load_work_from_spill_depth(emitter, data_depth);
+			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, cast(i32)(i*elem_size), elem_type, elems[i])) {
+				return false;
+			}
+		}
+		fast_backend_emit_load_work_from_spill_depth(emitter, data_depth);
+	} else if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\txor %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_work_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\tmov %s, xzr\n", fast_backend_arm64_work_reg());
+	}
+	fast_backend_emit_push_work_reg(emitter);
+	i32 data_ptr_depth = emitter->current_spill_depth;
+
+	i32 slice_bytes = cast(i32)type_size_of(slice_type);
+	i32 slice_align = cast(i32)type_align_of(slice_type);
+	i32 slice_alloc_bytes = 0;
+	if (!fast_backend_emit_alloc_stack_temp(emitter, slice_bytes, slice_align, &slice_alloc_bytes)) {
+		return false;
+	}
+	*temp_bytes_ += slice_alloc_bytes;
+	fast_backend_emit_push_work_reg(emitter);
+	i32 slice_depth = emitter->current_spill_depth;
+	fast_backend_emit_zero_bytes_at_work_address(emitter, slice_bytes);
+
+	fast_backend_emit_load_tmp_from_spill_depth(emitter, slice_depth);
+	fast_backend_emit_load_work_from_spill_depth(emitter, data_ptr_depth);
+	fast_backend_emit_store_work_to_tmp_address(emitter, pointer_type);
+
+	fast_backend_emit_load_tmp_from_spill_depth(emitter, slice_depth);
+	fast_backend_emit_add_imm_to_tmp_reg(emitter, build_context.int_size);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)elems.count);
+		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+	} else {
+		fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)elems.count);
+		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), len_type);
+	}
+	fast_backend_emit_store_work_to_tmp_address(emitter, len_type);
+	fast_backend_emit_load_work_from_spill_depth(emitter, slice_depth);
+	return true;
+}
+
 gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitter, AstCallExpr *ce, bool has_explicit_result_address) {
 	TypeProc *pt = nullptr;
 	Entity *proc_entity = nullptr;
@@ -5227,18 +5508,52 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		fast_backend_emit_push_work_reg(emitter);
 	}
 
-	for_array(i, ce->args) {
+	for (i32 i = 0; i < pt->param_count; i++) {
 		Entity *param = pt->params->Tuple.variables[i];
 		if (param == nullptr || param->kind != Entity_Variable) {
 			return false;
 		}
-		FastScalarType param_scalar_type = {};
-		if (fast_backend_classify_scalar_type(param->type, &param_scalar_type)) {
-			if (!fast_backend_emit_leaf_expr(emitter, ce->args[i])) {
+
+		Ast *arg = nullptr;
+		Slice<Ast *> variadic_pack = {};
+		if (!fast_backend_resolve_call_param_arg(pt, ce, i, &arg, &variadic_pack)) {
+			return false;
+		}
+
+		if (pt->variadic && i == pt->variadic_index && ce->ellipsis.pos.line == 0 && arg == nullptr) {
+			if (!fast_backend_emit_pack_variadic_slice_arg(emitter, param->type, variadic_pack, &temp_bytes)) {
 				return false;
 			}
-		} else if (!fast_backend_emit_materialize_aggregate_arg_pointer(emitter, ce->args[i], param->type, &temp_bytes)) {
-			return false;
+		} else {
+			FastScalarType param_scalar_type = {};
+			if (fast_backend_classify_scalar_type(param->type, &param_scalar_type)) {
+				TypeAndValue tav = type_and_value_of_expr(arg);
+				bool handled_constant = false;
+				u64 value = 0;
+				if (is_type_untyped_nil(tav.type)) {
+					if (param_scalar_type.kind != FastScalar_Pointer) {
+						return false;
+					}
+					handled_constant = true;
+				} else if (tav.mode == Addressing_Constant &&
+				           fast_backend_exact_value_as_u64(tav.value, param_scalar_type, &value)) {
+					handled_constant = true;
+				}
+
+				if (handled_constant) {
+					if (build_context.metrics.arch == TargetArch_amd64) {
+						fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), value);
+						fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), param_scalar_type);
+					} else {
+						fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), value);
+						fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), param_scalar_type);
+					}
+				} else if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+					return false;
+				}
+			} else if (!fast_backend_emit_materialize_aggregate_arg_pointer(emitter, arg, param->type, &temp_bytes)) {
+				return false;
+			}
 		}
 		fast_backend_emit_push_work_reg(emitter);
 	}
