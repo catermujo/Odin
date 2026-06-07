@@ -2090,7 +2090,7 @@ gb_internal bool fast_backend_is_slice_compound_lit_expr(Ast *expr, Type *expect
 	       expr->kind == Ast_CompoundLit &&
 	       type != nullptr &&
 	       base_type(type) != nullptr &&
-	       base_type(type)->kind == Type_Slice;
+	       (base_type(type)->kind == Type_Slice || base_type(type)->kind == Type_DynamicArray);
 }
 
 gb_internal bool fast_backend_slice_compound_lit_count(AstCompoundLit *cl, i64 *count_) {
@@ -2152,7 +2152,12 @@ gb_internal bool fast_backend_can_emit_slice_compound_lit_expr(FastLeafProcPlan 
 
 	Type *type = default_type(expected_type);
 	Type *base = base_type(type);
-	Type *elem_type = base->Slice.elem;
+	Type *elem_type = nullptr;
+	switch (base->kind) {
+	case Type_Slice:        elem_type = base->Slice.elem;        break;
+	case Type_DynamicArray: elem_type = base->DynamicArray.elem; break;
+	default: return false;
+	}
 	ast_node(cl, CompoundLit, unparen_expr(expr));
 
 	if (cl->elems.count != 0) {
@@ -2543,7 +2548,7 @@ gb_internal i32 fast_backend_supported_value_expr_spill_depth(Ast *expr, Type *e
 	}
 
 	if (expr->kind == Ast_CompoundLit) {
-		if (is_type_slice(type)) {
+		if (is_type_slice(type) || is_type_dynamic_array(type)) {
 			return fast_backend_slice_compound_lit_spill_depth(expr, type);
 		}
 		return fast_backend_scalar_compound_lit_spill_depth(expr, type);
@@ -8336,7 +8341,19 @@ gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(Fast
 
 	type = default_type(type);
 	Type *base = base_type(type);
-	Type *elem_type = base->Slice.elem;
+	Type *elem_type = nullptr;
+	bool is_dynamic_array = false;
+	switch (base->kind) {
+	case Type_Slice:
+		elem_type = base->Slice.elem;
+		break;
+	case Type_DynamicArray:
+		elem_type = base->DynamicArray.elem;
+		is_dynamic_array = true;
+		break;
+	default:
+		return false;
+	}
 	ast_node(cl, CompoundLit, unparen_expr(expr));
 
 	i64 count = 0;
@@ -8421,6 +8438,13 @@ gb_internal bool fast_backend_emit_store_slice_compound_lit_to_work_address(Fast
 	fast_backend_emit_add_imm_to_tmp_reg(emitter, build_context.int_size);
 	fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
 	fast_backend_emit_store_work_to_tmp_address(emitter, len_type);
+
+	if (is_dynamic_array) {
+		fast_backend_emit_load_tmp_from_spill_depth(emitter, dst_depth);
+		fast_backend_emit_add_imm_to_tmp_reg(emitter, cast(i32)type_offset_of(type, 2));
+		fast_backend_emit_load_work_from_spill_depth(emitter, len_depth);
+		fast_backend_emit_store_work_to_tmp_address(emitter, len_type);
+	}
 	fast_backend_emit_load_work_from_spill_depth(emitter, dst_depth);
 	return true;
 }
