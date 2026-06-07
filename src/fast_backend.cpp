@@ -714,11 +714,19 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 		if (indexed_type != nullptr && (indexed_type->kind == Type_Pointer || indexed_type->kind == Type_MultiPointer)) {
 			base_depth = fast_backend_leaf_expr_spill_depth(expr->IndexExpr.expr);
 		} else if (indexed_type != nullptr &&
-		           (indexed_type->kind == Type_Array || indexed_type->kind == Type_EnumeratedArray) &&
-		           fast_backend_is_array_binary_expr(expr->IndexExpr.expr, default_type(type_of_expr(expr->IndexExpr.expr)))) {
+		           (indexed_type->kind == Type_Array || indexed_type->kind == Type_EnumeratedArray || indexed_type->kind == Type_Matrix)) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
-			base_depth = temp_slots + fast_backend_array_binary_expr_spill_depth(expr->IndexExpr.expr);
+			Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
+			if (base_expr != nullptr &&
+			    (fast_backend_can_emit_constant_aggregate_expr(base_value_type, expr->IndexExpr.expr) ||
+			     base_expr->kind == Ast_CompoundLit ||
+			     base_expr->kind == Ast_CallExpr ||
+			     fast_backend_is_array_binary_expr(base_expr, base_value_type))) {
+				base_depth = temp_slots + fast_backend_supported_value_expr_spill_depth(expr->IndexExpr.expr, base_value_type);
+			} else {
+				base_depth = fast_backend_address_expr_spill_depth(expr->IndexExpr.expr);
+			}
 		} else if (indexed_type != nullptr &&
 		           (indexed_type->kind == Type_Slice || indexed_type->kind == Type_DynamicArray || is_type_string(indexed_type) || is_type_string16(indexed_type))) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
@@ -982,6 +990,13 @@ gb_internal bool fast_backend_get_index_info(AstIndexExpr *ie, Type **value_type
 	case Type_EnumeratedArray:
 		value_type = indexed_type->EnumeratedArray.elem;
 		break;
+	case Type_Matrix:
+		if (indexed_type->Matrix.is_row_major) {
+			value_type = alloc_type_array(indexed_type->Matrix.elem, indexed_type->Matrix.column_count);
+		} else {
+			value_type = alloc_type_array(indexed_type->Matrix.elem, indexed_type->Matrix.row_count);
+		}
+		break;
 	case Type_Pointer:
 		base_is_pointer = true;
 		value_type = indexed_type->Pointer.elem;
@@ -1113,9 +1128,17 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 			}
 		} else if (default_type(type_of_expr(expr->IndexExpr.expr)) != nullptr &&
 		           (base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array ||
-		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray)) {
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray ||
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Matrix)) {
+			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
+			bool can_materialize = base_value_type != nullptr &&
+				(fast_backend_can_emit_array_binary_expr(plan, expr->IndexExpr.expr, base_value_type) ||
+				 fast_backend_can_emit_scalar_compound_lit_expr(plan, expr->IndexExpr.expr, base_value_type) ||
+				 fast_backend_can_emit_aggregate_call_expr(plan, expr->IndexExpr.expr, base_value_type) ||
+				 fast_backend_can_emit_constant_aggregate_expr(base_value_type, expr->IndexExpr.expr));
 			if (!fast_backend_can_emit_address_expr(plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr) &&
-			    !fast_backend_can_emit_direct_array_index_expr(plan, expr)) {
+			    !fast_backend_can_emit_direct_array_index_expr(plan, expr) &&
+			    !can_materialize) {
 				return false;
 			}
 		} else if (base_uses_data_pointer) {
@@ -4908,7 +4931,8 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			}
 		} else if (default_type(type_of_expr(expr->IndexExpr.expr)) != nullptr &&
 		           (base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array ||
-		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray) &&
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray ||
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Matrix) &&
 		           !fast_backend_can_emit_address_expr(emitter->plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
