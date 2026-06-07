@@ -243,7 +243,18 @@ gb_internal String fast_backend_hybrid_linked_output_reason(void) {
 }
 
 gb_internal bool fast_backend_can_fallback_to_llvm_per_entity(void) {
-	return fast_backend_hybrid_linked_output_reason().len != 0 ? false : build_context.build_mode == BuildMode_Executable || build_context.build_mode == BuildMode_DynamicLibrary;
+	switch (build_context.build_mode) {
+	case BuildMode_Object:
+	case BuildMode_StaticLibrary:
+		return true;
+	case BuildMode_Executable:
+	case BuildMode_DynamicLibrary:
+		return fast_backend_hybrid_linked_output_reason().len == 0;
+	case BuildMode_Assembly:
+	case BuildMode_LLVM_IR:
+		return false;
+	}
+	return false;
 }
 
 gb_internal FastBackendErrorState fast_backend_save_error_state(void) {
@@ -10604,7 +10615,12 @@ gb_internal bool fast_generate_code(FastGenerator *gen) {
 	String asm_path = concatenate_strings(permanent_allocator(), gen->output_base, str_lit(".fast.S"));
 	String obj_path = {};
 	if (build_context.build_mode == BuildMode_Object) {
-		obj_path = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
+		if (fast_backend_can_fallback_to_llvm_per_entity()) {
+			String obj_ext = build_context.build_paths[BuildPath_Output].ext;
+			obj_path = concatenate3_strings(permanent_allocator(), gen->output_base, str_lit(".fast."), obj_ext);
+		} else {
+			obj_path = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
+		}
 	} else {
 		String obj_ext = infer_object_extension_from_build_context();
 		obj_path = concatenate3_strings(permanent_allocator(), gen->output_base, str_lit("."), obj_ext);

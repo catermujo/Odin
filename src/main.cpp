@@ -2661,6 +2661,66 @@ gb_internal bool fast_generate_code_with_llvm_support(FastGenerator *fast_gen, C
 	}
 
 	linker_data_append(fast_gen, llvm_gen);
+
+	if (build_context.build_mode == BuildMode_Object) {
+		String final_output = path_to_string(permanent_allocator(), build_context.build_paths[BuildPath_Output]);
+		String merge_output = final_output;
+		bool output_conflicts_with_input = false;
+		for (String const &path : fast_gen->output_object_paths) {
+			if (path == final_output) {
+				output_conflicts_with_input = true;
+				break;
+			}
+		}
+		if (output_conflicts_with_input) {
+			merge_output = concatenate_strings(permanent_allocator(), fast_gen->output_base, str_lit(".hybrid.o"));
+		}
+
+		gbString object_paths = gb_string_make(heap_allocator(), "");
+		defer (gb_string_free(object_paths));
+		for (String const &path : fast_gen->output_object_paths) {
+			object_paths = gb_string_append_fmt(object_paths, "\"%.*s\" ", LIT(path));
+		}
+
+		char const *clang_path = gb_get_env("ODIN_CLANG_PATH", permanent_allocator());
+		if (clang_path == nullptr) {
+			clang_path = "clang";
+		}
+
+		i32 result = system_exec_command_line_app("clang",
+			"%s "
+			"-nostdlib "
+			"-r "
+			"%s"
+			"-o \"%.*s\" "
+			"-target %.*s "
+			"",
+			clang_path,
+			object_paths,
+			LIT(merge_output),
+			LIT(build_context.metrics.target_triplet));
+		if (result != 0) {
+			gb_printf_err("executing `clang` for fast backend object merge failed\n");
+			return false;
+		}
+
+		if (merge_output != final_output) {
+			gb_file_remove(cast(char const *)final_output.text);
+			if (!gb_file_move(cast(char const *)merge_output.text, cast(char const *)final_output.text)) {
+				gb_printf_err("moving merged fast backend object output failed\n");
+				return false;
+			}
+		}
+
+		for (String const &path : fast_gen->output_object_paths) {
+			if (path != final_output) {
+				gb_file_remove(cast(char const *)path.text);
+			}
+		}
+		array_clear(&fast_gen->output_object_paths);
+		array_add(&fast_gen->output_object_paths, final_output);
+	}
+
 	return true;
 }
 
