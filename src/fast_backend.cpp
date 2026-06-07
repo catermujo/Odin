@@ -2641,6 +2641,22 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 	    id == BuiltinProc_reverse_bits || id == BuiltinProc_byte_swap) {
 		return ce->args.count == 1 ? fast_backend_leaf_expr_spill_depth(ce->args[0]) : 0;
 	}
+	// Saturating intrinsics: two-arg integer
+	if (id == BuiltinProc_saturating_add || id == BuiltinProc_saturating_sub) {
+		if (ce->args.count < 2) return 0;
+		i32 d = fast_backend_leaf_expr_spill_depth(ce->args[0]);
+		d = gb_max(d, fast_backend_leaf_expr_spill_depth(ce->args[1]));
+		return d;
+	}
+	// Memory intrinsics: 2-3 args (dst, src, len)
+	if (id == BuiltinProc_mem_copy || id == BuiltinProc_mem_copy_non_overlapping ||
+	    id == BuiltinProc_mem_zero || id == BuiltinProc_mem_zero_volatile) {
+		i32 d = 0;
+		for (Ast *arg : ce->args) {
+			d = gb_max(d, fast_backend_leaf_expr_spill_depth(arg));
+		}
+		return d;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2733,6 +2749,22 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 		if (!fast_backend_classify_scalar_type(arg_type, &st)) return false;
 		if (st.kind == FastScalar_Float) return false;
 		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+	}
+	// Saturating intrinsics: two-arg integer scalar
+	if (id == BuiltinProc_saturating_add || id == BuiltinProc_saturating_sub) {
+		if (ce->args.count != 2) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1]));
+	}
+	// Memory intrinsics: 2-3 args (all rawptr or int)
+	if (id == BuiltinProc_mem_copy || id == BuiltinProc_mem_copy_non_overlapping ||
+	    id == BuiltinProc_mem_zero || id == BuiltinProc_mem_zero_volatile) {
+		for (Ast *arg : ce->args) {
+			if (!fast_backend_can_emit_leaf_expr(plan, arg, type_of_expr(arg))) {
+				return false;
+			}
+		}
+		return true;
 	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return false;
@@ -4015,6 +4047,10 @@ gb_internal FastX64RegNames const *fast_backend_x64_work_reg(void) {
 
 gb_internal FastX64RegNames const *fast_backend_x64_tmp_reg(void) {
 	return &fast_x64_reg_r11;
+}
+
+gb_internal FastX64RegNames const *fast_backend_x64_third_reg(void) {
+	return &fast_x64_reg_r8;
 }
 
 gb_internal FastX64RegNames const *fast_backend_x64_scratch_reg(void) {
@@ -6402,6 +6438,168 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 				break;
 			}
 			fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
+		}
+		return true;
+	}
+	// Saturating intrinsics: two-arg integer
+	if (id == BuiltinProc_saturating_add || id == BuiltinProc_saturating_sub) {
+		if (ce->args.count != 2) return false;
+		Ast *arg0 = ce->args[0];
+		Ast *arg1 = ce->args[1];
+		Type *arg0_type = default_type(type_of_expr(arg0));
+		if (arg0_type == nullptr) return false;
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(arg0_type, &st)) return false;
+		if (st.kind == FastScalar_Float) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, arg0)) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, arg1)) return false;
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			auto *tmp  = fast_backend_x64_tmp_reg();
+			i32 bit_size = st.bit_size;
+			bool is_signed = st.kind == FastScalar_Signed;
+			i32 max_imm = is_signed ? (1 << (bit_size - 1)) - 1 : ((i32)1 << bit_size) - 1;
+			i32 min_imm = is_signed ? -(1 << (bit_size - 1)) : 0;
+
+			if (id == BuiltinProc_saturating_add) {
+				gb_fprintf(emitter->file, "\tadd %s, %s\n", work->r64, tmp->r64);
+				if (is_signed) {
+					gb_fprintf(emitter->file, "\tjo .Lsat_add_ovf_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tjmp .Lsat_add_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsat_add_ovf_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tjs .Lsat_add_neg_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, max_imm);
+					gb_fprintf(emitter->file, "\tjmp .Lsat_add_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsat_add_neg_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, min_imm);
+					gb_fprintf(emitter->file, ".Lsat_add_done_%d:\n", bit_size);
+				} else {
+					gb_fprintf(emitter->file, "\tjnc .Lsat_add_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, max_imm);
+					gb_fprintf(emitter->file, ".Lsat_add_done_%d:\n", bit_size);
+				}
+			} else {
+				gb_fprintf(emitter->file, "\tsub %s, %s\n", work->r64, tmp->r64);
+				if (is_signed) {
+					gb_fprintf(emitter->file, "\tjo .Lsat_sub_ovf_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tjmp .Lsat_sub_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsat_sub_ovf_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tjs .Lsat_sub_neg_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, max_imm);
+					gb_fprintf(emitter->file, "\tjmp .Lsat_sub_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsat_sub_neg_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, min_imm);
+					gb_fprintf(emitter->file, ".Lsat_sub_done_%d:\n", bit_size);
+				} else {
+					gb_fprintf(emitter->file, "\tjnc .Lsat_sub_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, min_imm);
+					gb_fprintf(emitter->file, ".Lsat_sub_done_%d:\n", bit_size);
+				}
+			}
+			fast_backend_emit_x64_canonicalize(emitter->file, work, st);
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *tmp  = fast_backend_arm64_tmp_reg();
+			i32 bit_size = st.bit_size;
+			bool is_signed = st.kind == FastScalar_Signed;
+
+			if (id == BuiltinProc_saturating_add) {
+				gb_fprintf(emitter->file, "\tadd %s, %s, %s\n", work, work, tmp);
+				if (is_signed) {
+					gb_fprintf(emitter->file, "\tb.vs .Lsad_neg_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tb .Lsad_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsad_neg_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, #-2147483648\n", work);
+					gb_fprintf(emitter->file, "\tb .Lsad_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lsad_done_%d:\n", bit_size);
+				} else {
+					gb_fprintf(emitter->file, "\tb.cc .Lsad_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, #18446744073709551615\n", work);
+					gb_fprintf(emitter->file, ".Lsad_done_%d:\n", bit_size);
+				}
+			} else {
+				gb_fprintf(emitter->file, "\tsub %s, %s, %s\n", work, work, tmp);
+				if (is_signed) {
+					gb_fprintf(emitter->file, "\tb.vs .Lssb_pos_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tb .Lssb_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lssb_pos_%d:\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, #2147483647\n", work);
+					gb_fprintf(emitter->file, "\tb .Lssb_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, ".Lssb_done_%d:\n", bit_size);
+				} else {
+					gb_fprintf(emitter->file, "\tb.cs .Lssb_done_%d\n", bit_size);
+					gb_fprintf(emitter->file, "\tmov %s, #0\n", work);
+					gb_fprintf(emitter->file, ".Lssb_done_%d:\n", bit_size);
+				}
+			}
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
+		}
+		return true;
+	}
+	// Memory intrinsics: mem_copy(dst, src, len), mem_zero(ptr, len)
+	if (id == BuiltinProc_mem_copy || id == BuiltinProc_mem_copy_non_overlapping ||
+	    id == BuiltinProc_mem_zero || id == BuiltinProc_mem_zero_volatile) {
+		GB_ASSERT(ce->args.count == 3 || ce->args.count == 2);
+		for (Ast *arg : ce->args) {
+			if (!fast_backend_emit_leaf_expr(emitter, arg)) return false;
+		}
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			auto *tmp  = fast_backend_x64_tmp_reg();
+			auto *third = fast_backend_x64_third_reg();
+			// Arg order: dst (work), src (tmp), len (third)
+			if (id == BuiltinProc_mem_zero || id == BuiltinProc_mem_zero_volatile) {
+				// stosb: (RDI=addr, RCX=count, AL=0)
+				gb_fprintf(emitter->file, "\txor %s, %s\n", "al", "al");
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", "rdi", work->r64);
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", "rcx", third->r64);
+				gb_fprintf(emitter->file, "\trep stosb\n");
+			} else {
+				// movsb: (RDI=dst, RSI=src, RCX=count)
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", "rdi", work->r64);
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", "rsi", tmp->r64);
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", "rcx", third->r64);
+				gb_fprintf(emitter->file, "\trep movsb\n");
+			}
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *tmp  = fast_backend_arm64_tmp_reg();
+			// x11 is used as loop counter; x9 holds length for mem_copy
+			i32 loop_label = fast_backend_alloc_label(emitter);
+			i32 done_label = fast_backend_alloc_label(emitter);
+			char loop_name[64] = {}, done_name[64] = {};
+			fast_backend_make_label_name(loop_name, gb_size_of(loop_name), emitter->plan, loop_label);
+			fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+
+			if (id == BuiltinProc_mem_zero || id == BuiltinProc_mem_zero_volatile) {
+				// Zero loop: for i in 0..len: ptr[i] = 0
+				// work=ptr, tmp=len, x11=counter
+				gb_fprintf(emitter->file, "\tcbz %s, %s\n", work, done_name);
+				gb_fprintf(emitter->file, "\tcbz %s, %s\n", tmp, done_name);
+				gb_fprintf(emitter->file, "\tmov x11, #0\n");
+				gb_fprintf(emitter->file, ".Lmemz_loop_%d:\n", loop_label);
+				gb_fprintf(emitter->file, "\tstrb wzr, [x10, x11]\n");
+				gb_fprintf(emitter->file, "\tadd x11, x11, #1\n");
+				gb_fprintf(emitter->file, "\tcmp x11, %s\n", tmp);
+				gb_fprintf(emitter->file, "\tb.ne .Lmemz_loop_%d\n", loop_label);
+				gb_fprintf(emitter->file, "%s:\n", done_name);
+			} else {
+				// Copy loop: for i in 0..len: dst[i] = src[i]
+				// work=dst, tmp=src, x11=len (saved to x9 for loop)
+				gb_fprintf(emitter->file, "\tcbz %s, %s\n", work, done_name);
+				gb_fprintf(emitter->file, "\tcbz %s, %s\n", tmp, done_name);
+				gb_fprintf(emitter->file, "\tcbz x11, %s\n", done_name);
+				gb_fprintf(emitter->file, "\tmov x9, x11\n");   // x9 = len (saved)
+				gb_fprintf(emitter->file, "\tmov x11, #0\n");   // x11 = counter
+				gb_fprintf(emitter->file, ".Lmemc_loop_%d:\n", loop_label);
+				gb_fprintf(emitter->file, "\tldrb w9, [x11, %s]\n", tmp);
+				gb_fprintf(emitter->file, "\tstrb w9, [x11, %s]\n", work);
+				gb_fprintf(emitter->file, "\tadd x11, x11, #1\n");
+				gb_fprintf(emitter->file, "\tcmp x11, x9\n");
+				gb_fprintf(emitter->file, "\tb.ne .Lmemc_loop_%d\n", loop_label);
+				gb_fprintf(emitter->file, "%s:\n", done_name);
+			}
 		}
 		return true;
 	}
