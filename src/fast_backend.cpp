@@ -430,6 +430,30 @@ gb_internal bool fast_backend_type_is_supported_value(Type *type, FastScalarType
 	return true;
 }
 
+gb_internal Type *fast_backend_matrix_vector_type(Type *type) {
+	Type *base = base_type(type);
+	if (base == nullptr || base->kind != Type_Matrix) {
+		return nullptr;
+	}
+	i64 count = base->Matrix.is_row_major ? base->Matrix.column_count : base->Matrix.row_count;
+	return alloc_type_array(base->Matrix.elem, count);
+}
+
+gb_internal i64 fast_backend_matrix_vector_offset(Type *type, i64 component_index) {
+	Type *base = base_type(type);
+	if (base == nullptr || base->kind != Type_Matrix) {
+		return -1;
+	}
+	i64 elem_size = type_size_of(base->Matrix.elem);
+	if (elem_size <= 0) {
+		return -1;
+	}
+	i64 elem_index = base->Matrix.is_row_major
+		? matrix_indices_to_offset(base, component_index, 0)
+		: matrix_indices_to_offset(base, 0, component_index);
+	return elem_index * elem_size;
+}
+
 gb_internal bool fast_backend_scalar_is_unsigned(FastScalarType type) {
 	return type.kind == FastScalar_Unsigned || type.kind == FastScalar_Bool || type.kind == FastScalar_Pointer;
 }
@@ -2013,6 +2037,7 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 	case Type_Matrix: {
 		Type *elem_type = base->Matrix.elem;
 		i64 elem_count = base->Matrix.row_count * base->Matrix.column_count;
+		Type *vector_type = fast_backend_matrix_vector_type(base);
 		if (cl->elems.count == 0) {
 			return true;
 		}
@@ -2042,8 +2067,15 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 			return false;
 		}
 		for (Ast *elem : cl->elems) {
-			if (!fast_backend_can_emit_value_expr(plan, elem, elem_type) &&
-			    !fast_backend_can_emit_aggregate_call_expr(plan, elem, elem_type)) {
+			Type *value_type = elem_type;
+			Type *expr_type = default_type(type_of_expr(elem));
+			if (vector_type != nullptr &&
+			    expr_type != nullptr &&
+			    are_types_identical(expr_type, vector_type)) {
+				value_type = vector_type;
+			}
+			if (!fast_backend_can_emit_value_expr(plan, elem, value_type) &&
+			    !fast_backend_can_emit_aggregate_call_expr(plan, elem, value_type)) {
 				return false;
 			}
 		}
@@ -2183,7 +2215,15 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 			if (elem != nullptr && elem->kind == Ast_FieldValue) {
 				value = elem->FieldValue.value;
 			}
-			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, base->Matrix.elem));
+			Type *value_type = base->Matrix.elem;
+			Type *vector_type = fast_backend_matrix_vector_type(base);
+			Type *expr_type = default_type(type_of_expr(value));
+			if (vector_type != nullptr &&
+			    expr_type != nullptr &&
+			    are_types_identical(expr_type, vector_type)) {
+				value_type = vector_type;
+			}
+			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, value_type));
 		}
 		break;
 	}
@@ -3811,6 +3851,7 @@ gb_internal bool fast_backend_serialize_constant_matrix(Type *type, AstCompoundL
 	type = base_type(type);
 	gb_zero_size(dst, cast(isize)type_size_of(type));
 	Type *elem_type = type->Matrix.elem;
+	Type *vector_type = fast_backend_matrix_vector_type(type);
 	i64 elem_size = type_size_of(elem_type);
 	i64 elem_count = type->Matrix.row_count * type->Matrix.column_count;
 	if (elem_size <= 0) {
@@ -3870,6 +3911,17 @@ gb_internal bool fast_backend_serialize_constant_matrix(Type *type, AstCompoundL
 	}
 
 	for_array(i, cl->elems) {
+		Type *expr_type = default_type(type_of_expr(cl->elems[i]));
+		if (vector_type != nullptr &&
+		    expr_type != nullptr &&
+		    are_types_identical(expr_type, vector_type)) {
+			i64 offset = fast_backend_matrix_vector_offset(type, i);
+			if (offset < 0 || !fast_backend_serialize_constant_value(vector_type, cl->elems[i], dst + offset)) {
+				return false;
+			}
+			continue;
+		}
+
 		i64 offset = matrix_row_major_index_to_offset(type, i) * elem_size;
 		if (!fast_backend_serialize_constant_value(elem_type, cl->elems[i], dst + offset)) {
 			return false;
@@ -6709,6 +6761,7 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 
 	case Type_Matrix: {
 		Type *elem_type = base->Matrix.elem;
+		Type *vector_type = fast_backend_matrix_vector_type(base);
 		i32 elem_size = cast(i32)type_size_of(elem_type);
 		if (cl->elems.count == 0) {
 			return true;
@@ -6740,6 +6793,16 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 			return true;
 		}
 		for_array(i, cl->elems) {
+			Type *expr_type = default_type(type_of_expr(cl->elems[i]));
+			if (vector_type != nullptr &&
+			    expr_type != nullptr &&
+			    are_types_identical(expr_type, vector_type)) {
+				i32 offset = cast(i32)fast_backend_matrix_vector_offset(base, i);
+				if (offset < 0 || !fast_backend_emit_store_value_to_work_address_offset(emitter, offset, vector_type, cl->elems[i])) {
+					return false;
+				}
+				continue;
+			}
 			i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, i) * elem_size);
 			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, cl->elems[i])) {
 				return false;
