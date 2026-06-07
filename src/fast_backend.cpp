@@ -393,6 +393,9 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	case Type_FixedCapacityDynamicArray:
 		return fast_backend_type_is_supported_value(type->FixedCapacityDynamicArray.elem, nullptr, nullptr);
 
+	case Type_Map:
+		return true;
+
 	case Type_Struct:
 		if (type->Struct.soa_kind != StructSoa_None) {
 			return false;
@@ -3488,7 +3491,8 @@ gb_internal bool fast_backend_can_emit_noop_delete_call_expr(FastLeafProcPlan *p
 	       is_type_cstring(type) ||
 	       is_type_cstring16(type) ||
 	       is_type_slice(type) ||
-	       is_type_dynamic_array(type);
+	       is_type_dynamic_array(type) ||
+	       is_type_map(type);
 }
 
 gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstExprStmt *es) {
