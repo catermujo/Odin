@@ -946,6 +946,10 @@ gb_internal bool fast_backend_stmt_has_call(Ast *stmt) {
 		       fast_backend_expr_has_call(stmt->ForStmt.cond) ||
 		       fast_backend_stmt_has_call(stmt->ForStmt.post) ||
 		       fast_backend_stmt_has_call(stmt->ForStmt.body);
+	case Ast_RangeStmt:
+		return fast_backend_stmt_has_call(stmt->RangeStmt.init) ||
+		       fast_backend_expr_has_call(stmt->RangeStmt.expr) ||
+		       fast_backend_stmt_has_call(stmt->RangeStmt.body);
 	case Ast_SwitchStmt: {
 		if (fast_backend_stmt_has_call(stmt->SwitchStmt.init) ||
 		    fast_backend_expr_has_call(stmt->SwitchStmt.tag)) {
@@ -3029,6 +3033,8 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 }
 
 gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *plan, Ast *stmt);
+gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstRangeStmt *rs);
+gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstRangeStmt *rs);
 
 gb_internal bool fast_backend_plan_stmt_list(FastGenerator *gen, FastLeafProcPlan *plan, Slice<Ast *> const &stmts) {
 	for (Ast *stmt : stmts) {
@@ -3413,6 +3419,105 @@ gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPla
 	return true;
 }
 
+gb_internal Ast *fast_backend_strip_range_value(Ast *value) {
+	value = unparen_expr(value);
+	if (value != nullptr && value->kind == Ast_UnaryExpr && value->UnaryExpr.op.kind == Token_And) {
+		value = unparen_expr(value->UnaryExpr.expr);
+	}
+	return value;
+}
+
+gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstRangeStmt *rs) {
+	if (rs->label != nullptr && fast_backend_label_name(rs->label).len == 0) {
+		error(rs->label, "Fast backend expected an identifier range label");
+		return false;
+	}
+	if (rs->reverse) {
+		error(rs->token, "Fast backend does not yet support #reverse range statements");
+		return false;
+	}
+	if (rs->init != nullptr && !fast_backend_plan_stmt(gen, plan, rs->init)) {
+		return false;
+	}
+	if (rs->vals.count == 0 || rs->vals[0] == nullptr) {
+		error(rs->token, "Fast backend expected a range value");
+		return false;
+	}
+
+	for_array(i, rs->vals) {
+		Ast *value = fast_backend_strip_range_value(rs->vals[i]);
+		if (value == nullptr || is_blank_ident(value)) {
+			continue;
+		}
+		if (value != rs->vals[i] || value->kind != Ast_Ident) {
+			error(rs->vals[i], "Fast backend does not yet support addressed range values");
+			return false;
+		}
+		Entity *entity = entity_of_node(value);
+		if (entity == nullptr || entity->kind != Entity_Variable || !fast_backend_add_slot(plan, entity, entity->type)) {
+			error(value, "Fast backend does not yet support this range value");
+			return false;
+		}
+	}
+	if (!fast_backend_add_expr_slot(plan, rs->expr, t_int, nullptr)) {
+		return false;
+	}
+
+	Ast *expr = unparen_expr(rs->expr);
+	if (expr == nullptr) {
+		error(rs->token, "Fast backend expected a range expression");
+		return false;
+	}
+
+	if (is_ast_range(expr)) {
+		Ast *value = fast_backend_strip_range_value(rs->vals[0]);
+		if (value == nullptr || is_blank_ident(value)) {
+			error(rs->vals[0], "Fast backend range intervals require a value variable");
+			return false;
+		}
+		Type *iter_type = type_of_expr(value);
+		if (iter_type == nullptr) {
+			iter_type = reduce_tuple_to_single_type(type_of_expr(expr->BinaryExpr.left));
+		}
+		FastScalarType scalar_type = {};
+		if (iter_type == nullptr || !fast_backend_classify_scalar_type(iter_type, &scalar_type) || !fast_backend_scalar_is_integer_like(scalar_type)) {
+			error(rs->expr, "Fast backend currently only supports integer-like range intervals");
+			return false;
+		}
+		if (!fast_backend_can_emit_leaf_expr(plan, expr->BinaryExpr.left, iter_type) ||
+		    !fast_backend_can_emit_leaf_expr(plan, expr->BinaryExpr.right, iter_type)) {
+			error(rs->expr, "Fast backend does not yet support this range interval");
+			return false;
+		}
+		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.left));
+		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.right));
+	} else {
+		Type *expr_type = base_type(type_deref(type_of_expr(expr)));
+		if (expr_type == nullptr) {
+			error(rs->expr, "Fast backend expected an iterable expression");
+			return false;
+		}
+		switch (expr_type->kind) {
+		case Type_Array:
+		case Type_EnumeratedArray:
+		case Type_Slice:
+		case Type_DynamicArray:
+		case Type_FixedCapacityDynamicArray:
+			break;
+		default:
+			error(rs->expr, "Fast backend does not yet support iterating over this type");
+			return false;
+		}
+		if (fast_backend_expr_has_call(expr) || !fast_backend_can_emit_address_expr(plan, expr, nullptr, nullptr, nullptr)) {
+			error(rs->expr, "Fast backend currently only supports addressable indexed range expressions");
+			return false;
+		}
+		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_address_expr_spill_depth(expr));
+	}
+
+	return fast_backend_plan_stmt(gen, plan, rs->body);
+}
+
 gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *plan, Ast *stmt) {
 	if (stmt == nullptr) {
 		return true;
@@ -3433,6 +3538,8 @@ gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *pl
 		return fast_backend_plan_if_stmt(gen, plan, &stmt->IfStmt);
 	case Ast_ForStmt:
 		return fast_backend_plan_for_stmt(gen, plan, &stmt->ForStmt);
+	case Ast_RangeStmt:
+		return fast_backend_plan_range_stmt(gen, plan, &stmt->RangeStmt);
 	case Ast_SwitchStmt:
 		return fast_backend_plan_switch_stmt(gen, plan, &stmt->SwitchStmt);
 	case Ast_DeferStmt:
@@ -3443,7 +3550,7 @@ gb_internal bool fast_backend_plan_stmt(FastGenerator *gen, FastLeafProcPlan *pl
 		return fast_backend_plan_return_stmt(gen, plan, &stmt->ReturnStmt);
 	}
 
-	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, defer statements, call statements, if statements, for statements, switch statements, break/continue, and returns");
+	error(stmt, "Fast backend currently only supports blocks, mutable local declarations, assignments, defer statements, call statements, if statements, for statements, range statements, switch statements, break/continue, and returns");
 	return false;
 }
 
@@ -8895,6 +9002,287 @@ gb_internal bool fast_backend_emit_if_stmt(FastLeafProcEmitter *emitter, AstIfSt
 	return fast_backend_emit_leave_scope(emitter, is->scope);
 }
 
+gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstRangeStmt *rs) {
+	Ast *expr = unparen_expr(rs->expr);
+	if (emitter == nullptr || expr == nullptr) {
+		return false;
+	}
+
+	Ast *val0 = rs->vals.count > 0 ? fast_backend_strip_range_value(rs->vals[0]) : nullptr;
+	Ast *val1 = rs->vals.count > 1 ? fast_backend_strip_range_value(rs->vals[1]) : nullptr;
+	Entity *val0_entity = (val0 != nullptr && !is_blank_ident(val0)) ? entity_of_node(val0) : nullptr;
+	Entity *val1_entity = (val1 != nullptr && !is_blank_ident(val1)) ? entity_of_node(val1) : nullptr;
+
+	FastLocalSlot idx_slot = {};
+	if (!fast_backend_find_expr_slot(emitter->plan, rs->expr, &idx_slot)) {
+		return false;
+	}
+	FastScalarType idx_type = idx_slot.type;
+	FastScalarType pointer_type = fast_backend_context_scalar_type();
+	FastScalarType len_type = {};
+	GB_ASSERT(fast_backend_classify_scalar_type(t_int, &len_type));
+
+	i32 outer_scope_count = cast(i32)emitter->scope_stack.count;
+	if (!fast_backend_emit_enter_scope(emitter, rs->scope)) {
+		return false;
+	}
+	if (rs->init != nullptr && !fast_backend_emit_stmt(emitter, rs->init)) {
+		return false;
+	}
+	i32 loop_scope_count = cast(i32)emitter->scope_stack.count;
+
+	i32 loop_label = fast_backend_alloc_label(emitter);
+	i32 post_label = fast_backend_alloc_label(emitter);
+	i32 body_label = fast_backend_alloc_label(emitter);
+	i32 done_label = fast_backend_alloc_label(emitter);
+
+	FastControlContext ctx = {};
+	ctx.label = rs->label;
+	ctx.break_label = done_label;
+	ctx.break_scope_count = outer_scope_count;
+	ctx.continue_label = post_label;
+	ctx.continue_scope_count = loop_scope_count;
+	ctx.fallthrough_label = -1;
+	ctx.fallthrough_scope_count = -1;
+	array_add(&emitter->control_stack, ctx);
+	defer (emitter->control_stack.count -= 1);
+
+	i64 initial_idx = is_ast_range(expr) ? 0 : -1;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)initial_idx);
+		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
+	} else {
+		fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)initial_idx);
+		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
+	}
+	fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+
+	if (is_ast_range(expr)) {
+		if (val0_entity == nullptr) {
+			return false;
+		}
+
+		Type *iter_type = type_of_expr(val0);
+		FastScalarType iter_scalar = {};
+		if (iter_type == nullptr || !fast_backend_classify_scalar_type(iter_type, &iter_scalar)) {
+			return false;
+		}
+
+		TokenKind cmp_op = Token_Lt;
+		switch (expr->BinaryExpr.op.kind) {
+		case Token_RangeFull: cmp_op = Token_LtEq; break;
+		case Token_RangeHalf: cmp_op = Token_Lt;   break;
+		default: return false;
+		}
+
+		if (!fast_backend_emit_store_value_to_entity(emitter, val0_entity, expr->BinaryExpr.left)) {
+			return false;
+		}
+
+		fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			FastLocalSlot value_slot = {};
+			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+				return false;
+			}
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_x64_work_reg());
+		} else {
+			FastLocalSlot value_slot = {};
+			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+				return false;
+			}
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_arm64_work_reg());
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (!fast_backend_emit_leaf_expr_as_type(emitter, expr->BinaryExpr.right, iter_scalar)) {
+			return false;
+		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_jump_if_compare(emitter, cmp_op, iter_scalar, body_label, done_label);
+
+		fast_backend_emit_label(emitter->file, emitter->plan, body_label);
+		if (val1_entity != nullptr) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+			} else {
+				fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+			}
+			if (!fast_backend_emit_store_to_scalar_storage(emitter, val1_entity)) {
+				return false;
+			}
+		}
+		if (!fast_backend_emit_stmt(emitter, rs->body)) {
+			return false;
+		}
+
+		fast_backend_emit_label(emitter->file, emitter->plan, post_label);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			FastLocalSlot value_slot = {};
+			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+				return false;
+			}
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_x64_work_reg());
+			gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), iter_scalar);
+			fast_backend_emit_store_work_to_slot(emitter, value_slot);
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+			gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
+		} else {
+			FastLocalSlot value_slot = {};
+			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+				return false;
+			}
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_arm64_work_reg());
+			gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), iter_scalar);
+			fast_backend_emit_store_work_to_slot(emitter, value_slot);
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+			gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
+		}
+		fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
+		fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+		return fast_backend_emit_leave_scope(emitter, rs->scope);
+	}
+
+	Type *expr_type = base_type(type_deref(type_of_expr(expr)));
+	Type *elem_type = nullptr;
+	i64 elem_count = 0;
+	if (expr_type == nullptr) {
+		return false;
+	}
+	switch (expr_type->kind) {
+	case Type_Array:
+		elem_type = expr_type->Array.elem;
+		elem_count = expr_type->Array.count;
+		break;
+	case Type_EnumeratedArray:
+		elem_type = expr_type->EnumeratedArray.elem;
+		elem_count = expr_type->EnumeratedArray.count;
+		break;
+	case Type_Slice:
+		elem_type = expr_type->Slice.elem;
+		break;
+	case Type_DynamicArray:
+		elem_type = expr_type->DynamicArray.elem;
+		break;
+	case Type_FixedCapacityDynamicArray:
+		elem_type = expr_type->FixedCapacityDynamicArray.elem;
+		break;
+	default:
+		return false;
+	}
+	i64 elem_size = type_size_of(elem_type);
+	if (elem_size <= 0) {
+		return false;
+	}
+
+	fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+		gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
+	} else {
+		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+		gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
+	}
+	fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+	fast_backend_emit_push_work_reg(emitter);
+
+	if (expr_type->kind == Type_Array || expr_type->kind == Type_EnumeratedArray) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)elem_count);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+		} else {
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)elem_count);
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), len_type);
+		}
+	} else {
+		if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+			return false;
+		}
+		fast_backend_emit_add_imm_to_work_reg(emitter, build_context.int_size);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+		} else {
+			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+		}
+	}
+	fast_backend_emit_pop_tmp_reg(emitter);
+	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, body_label, done_label);
+
+	fast_backend_emit_label(emitter->file, emitter->plan, body_label);
+	if (val1_entity != nullptr) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+		} else {
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+		}
+		if (expr_type->kind == Type_EnumeratedArray &&
+		    expr_type->EnumeratedArray.min_value != nullptr &&
+		    compare_exact_values(Token_NotEq, *expr_type->EnumeratedArray.min_value, exact_value_u64(0))) {
+			fast_backend_emit_add_imm_to_work_reg(emitter, exact_value_to_i64(*expr_type->EnumeratedArray.min_value));
+		}
+		if (!fast_backend_emit_store_to_scalar_storage(emitter, val1_entity)) {
+			return false;
+		}
+	}
+	if (val0_entity != nullptr) {
+		if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+			return false;
+		}
+		if (expr_type->kind == Type_Slice || expr_type->kind == Type_DynamicArray || expr_type->kind == Type_FixedCapacityDynamicArray) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), pointer_type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), pointer_type);
+			}
+		}
+		fast_backend_emit_push_work_reg(emitter);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+		} else {
+			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+		}
+		fast_backend_emit_scale_work_reg(emitter, elem_size);
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_add_tmp_reg_to_work_reg(emitter);
+
+		FastLocalSlot value_slot = {};
+		if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+			return false;
+		}
+		if (value_slot.is_scalar) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), value_slot.type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), value_slot.type);
+			}
+			if (!fast_backend_emit_store_to_scalar_storage(emitter, val0_entity)) {
+				return false;
+			}
+		} else {
+			fast_backend_emit_push_work_reg(emitter);
+			if (!fast_backend_emit_address_of_storage_entity(emitter, val0_entity)) {
+				return false;
+			}
+			fast_backend_emit_pop_tmp_reg(emitter);
+			fast_backend_emit_copy_bytes_between_addresses(emitter, value_slot.size);
+		}
+	}
+	if (!fast_backend_emit_stmt(emitter, rs->body)) {
+		return false;
+	}
+
+	fast_backend_emit_label(emitter->file, emitter->plan, post_label);
+	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
+	fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+	return fast_backend_emit_leave_scope(emitter, rs->scope);
+}
+
 gb_internal bool fast_backend_emit_for_stmt(FastLeafProcEmitter *emitter, AstForStmt *fs) {
 	i32 outer_scope_count = cast(i32)emitter->scope_stack.count;
 	if (!fast_backend_emit_enter_scope(emitter, fs->scope)) {
@@ -9148,6 +9536,8 @@ gb_internal bool fast_backend_emit_stmt(FastLeafProcEmitter *emitter, Ast *stmt)
 		return fast_backend_emit_if_stmt(emitter, &stmt->IfStmt);
 	case Ast_ForStmt:
 		return fast_backend_emit_for_stmt(emitter, &stmt->ForStmt);
+	case Ast_RangeStmt:
+		return fast_backend_emit_range_stmt(emitter, &stmt->RangeStmt);
 	case Ast_SwitchStmt:
 		return fast_backend_emit_switch_stmt(emitter, &stmt->SwitchStmt);
 	case Ast_BranchStmt:
