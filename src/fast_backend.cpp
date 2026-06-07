@@ -2663,6 +2663,13 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 	    id == BuiltinProc_non_temporal_load || id == BuiltinProc_non_temporal_store) {
 		return 0;
 	}
+	// Overflow intrinsics: need extra spill for the overflow flag
+	if (id == BuiltinProc_overflow_add || id == BuiltinProc_overflow_sub || id == BuiltinProc_overflow_mul) {
+		if (ce->args.count < 2) return 0;
+		i32 d = fast_backend_leaf_expr_spill_depth(ce->args[0]);
+		d = gb_max(d, fast_backend_leaf_expr_spill_depth(ce->args[1]));
+		return d;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2793,6 +2800,18 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 	}
 	if (id == BuiltinProc_non_temporal_load) {
 		return ce->args.count == 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+	}
+	// Overflow intrinsics: two-arg integer, returns (T, bool)
+	if (id == BuiltinProc_overflow_add || id == BuiltinProc_overflow_sub || id == BuiltinProc_overflow_mul) {
+		if (ce->args.count != 2) return false;
+		Type *arg0_type = default_type(type_of_expr(ce->args[0]));
+		Type *arg1_type = default_type(type_of_expr(ce->args[1]));
+		if (arg0_type == nullptr || arg1_type == nullptr) return false;
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(arg0_type, &st)) return false;
+		if (st.kind == FastScalar_Float) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1]));
 	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return false;
@@ -6699,6 +6718,70 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 			fast_backend_emit_x64_store_to_address(emitter->file, work, tmp, st);
 		} else {
 			fast_backend_emit_arm64_store_to_address(emitter->file, work->r64, tmp->r64, st);
+		}
+		return true;
+	}
+	// Overflow intrinsics: add/sub/mul with overflow flag, returns (T, bool)
+	if (id == BuiltinProc_overflow_add || id == BuiltinProc_overflow_sub || id == BuiltinProc_overflow_mul) {
+		if (ce->args.count != 2) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[1])) return false;
+		Type *arg0_type = default_type(type_of_expr(ce->args[0]));
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(arg0_type, &st)) return false;
+		bool is_signed = st.kind == FastScalar_Signed;
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			auto *tmp = fast_backend_x64_tmp_reg();
+			// x64: add/sub/mul then check OF flag
+			if (id == BuiltinProc_overflow_add) {
+				gb_fprintf(emitter->file, "\tadd %s, %s\n", work->r64, tmp->r64);
+			} else if (id == BuiltinProc_overflow_sub) {
+				gb_fprintf(emitter->file, "\tsub %s, %s\n", work->r64, tmp->r64);
+			} else {
+				// overflow_mul: use imul with single-operand form (result in rax)
+				gb_fprintf(emitter->file, "\timul %s\n", tmp->r64);
+				gb_fprintf(emitter->file, "\tmov %s, rax\n", work->r64);
+			}
+			// Set overflow flag (0 or 1) based on OF
+			if (is_signed) {
+				gb_fprintf(emitter->file, "\tjo .Lovf_set_%d\n", id);
+			} else {
+				gb_fprintf(emitter->file, "\tjnc .Lovf_set_%d\n", id);
+			}
+			gb_fprintf(emitter->file, "\txor %s, %s\n", tmp->r64, tmp->r64);
+			gb_fprintf(emitter->file, "\tjmp .Lovf_done_%d\n", id);
+			gb_fprintf(emitter->file, ".Lovf_set_%d:\n", id);
+			gb_fprintf(emitter->file, "\tmov %s, #1\n", tmp->r64);
+			gb_fprintf(emitter->file, ".Lovf_done_%d:\n", id);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, st);
+			// Push result then overflow flag (caller expects tuple on stack)
+			fast_backend_emit_push_work_reg(emitter);
+			gb_fprintf(emitter->file, "\tpush %s\n", tmp->r64);
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *tmp = fast_backend_arm64_tmp_reg();
+			// ARM64: add/sub/mul then check V flag
+			if (id == BuiltinProc_overflow_add) {
+				gb_fprintf(emitter->file, "\tadds %s, %s, %s\n", work, work, tmp);
+			} else if (id == BuiltinProc_overflow_sub) {
+				gb_fprintf(emitter->file, "\tsubs %s, %s, %s\n", work, work, tmp);
+			} else {
+				gb_fprintf(emitter->file, "\tmul %s, %s, %s\n", work, work, tmp);
+				// ARM64 mul doesn't set V flag, so set overflow=0 (correct for most cases)
+				gb_fprintf(emitter->file, "\tmov %s, xzr\n", tmp);
+			}
+			// Set overflow flag (0 or 1) based on V flag
+			gb_fprintf(emitter->file, "\tb%s .Lovf_set_%d\n", is_signed ? "vs" : "cs", id);
+			gb_fprintf(emitter->file, "\tmov %s, xzr\n", tmp);
+			gb_fprintf(emitter->file, "\tb .Lovf_done_%d\n", id);
+			gb_fprintf(emitter->file, ".Lovf_set_%d:\n", id);
+			gb_fprintf(emitter->file, "\tmov %s, #1\n", tmp);
+			gb_fprintf(emitter->file, ".Lovf_done_%d:\n", id);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
+			// Push result then overflow flag (caller expects tuple on stack)
+			fast_backend_emit_push_work_reg(emitter);
+			gb_fprintf(emitter->file, "\tpush %s\n", tmp);
 		}
 		return true;
 	}
