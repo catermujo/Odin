@@ -2634,6 +2634,13 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 		}
 		return d;
 	}
+	// Bit intrinsics: single-arg, same depth as abs/sqrt
+	if (id == BuiltinProc_count_ones || id == BuiltinProc_count_zeros ||
+	    id == BuiltinProc_count_trailing_zeros || id == BuiltinProc_count_leading_zeros ||
+	    id == BuiltinProc_count_trailing_ones || id == BuiltinProc_count_leading_ones ||
+	    id == BuiltinProc_reverse_bits || id == BuiltinProc_byte_swap) {
+		return ce->args.count == 1 ? fast_backend_leaf_expr_spill_depth(ce->args[0]) : 0;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2713,6 +2720,19 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
 		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1])) &&
 		       fast_backend_can_emit_leaf_expr(plan, ce->args[2], type_of_expr(ce->args[2]));
+	}
+	// Bit intrinsics: single-arg integer scalar
+	if (id == BuiltinProc_count_ones || id == BuiltinProc_count_zeros ||
+	    id == BuiltinProc_count_trailing_zeros || id == BuiltinProc_count_leading_zeros ||
+	    id == BuiltinProc_count_trailing_ones || id == BuiltinProc_count_leading_ones ||
+	    id == BuiltinProc_reverse_bits || id == BuiltinProc_byte_swap) {
+		if (ce->args.count != 1) return false;
+		Type *arg_type = default_type(type_of_expr(ce->args[0]));
+		if (arg_type == nullptr) return false;
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(arg_type, &st)) return false;
+		if (st.kind == FastScalar_Float) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
 	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return false;
@@ -6211,6 +6231,177 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 		} else {
 			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), typeid_value);
 			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), typeid_type);
+		}
+		return true;
+	}
+	// Bit intrinsics: single-arg integer scalar
+	if (id == BuiltinProc_count_ones || id == BuiltinProc_count_zeros ||
+	    id == BuiltinProc_count_trailing_zeros || id == BuiltinProc_count_leading_zeros ||
+	    id == BuiltinProc_count_trailing_ones || id == BuiltinProc_count_leading_ones ||
+	    id == BuiltinProc_reverse_bits || id == BuiltinProc_byte_swap) {
+		if (ce->args.count != 1) return false;
+		Ast *arg = ce->args[0];
+		Type *arg_type = default_type(type_of_expr(arg));
+		if (arg_type == nullptr) return false;
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(arg_type, &st)) return false;
+		if (st.kind == FastScalar_Float) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, arg)) return false;
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			auto *tmp  = fast_backend_x64_tmp_reg();
+			i32 bit_size = st.bit_size;
+			i32 done_label = fast_backend_alloc_label(emitter);
+
+			switch (id) {
+			case BuiltinProc_count_ones:
+				gb_fprintf(emitter->file, "\tpopcnt %s, %s\n", work->r64, work->r64);
+				break;
+			case BuiltinProc_count_zeros:
+				gb_fprintf(emitter->file, "\tpopcnt %s, %s\n", tmp->r64, work->r64);
+				gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, bit_size);
+				gb_fprintf(emitter->file, "\tsub %s, %s\n", work->r64, tmp->r64);
+				break;
+			case BuiltinProc_count_trailing_zeros: {
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\ttest %s, %s\n", work->r64, work->r64);
+				gb_fprintf(emitter->file, "\tjne %s\n", done_name);
+				gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, bit_size);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\ttzcnt %s, %s\n", work->r64, work->r64);
+				break;
+			}
+			case BuiltinProc_count_leading_zeros: {
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\ttest %s, %s\n", work->r64, work->r64);
+				gb_fprintf(emitter->file, "\tjne %s\n", done_name);
+				gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, bit_size);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tlzcnt %s, %s\n", work->r64, work->r64);
+				break;
+			}
+			case BuiltinProc_count_trailing_ones: {
+				// count_trailing_ones(x) = cttz(~x) with is_zero_undefined=false
+				// x == all_ones: ~x == 0 → result = bit_size
+				// x == 0: ~x == 255, cttz(255) = 0 → result = 0
+				// otherwise: cttz(~x) = tzcnt(~x)
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tnot %s\n", work->r64); // work = ~x
+				gb_fprintf(emitter->file, "\tjz %s\n", done_name); // ~x == 0 (x was all ones): result = bit_size
+				gb_fprintf(emitter->file, "\ttzcnt %s, %s\n", work->r64, work->r64); // result = tzcnt(~x)
+				gb_fprintf(emitter->file, "\tjmp %s\n", done_name);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, bit_size);
+				break;
+			}
+			case BuiltinProc_count_leading_ones: {
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tnot %s\n", work->r64);
+				gb_fprintf(emitter->file, "\ttest %s, %s\n", work->r64, work->r64);
+				gb_fprintf(emitter->file, "\tjne %s\n", done_name);
+				gb_fprintf(emitter->file, "\tmov %s, %d\n", work->r64, bit_size);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tlzcnt %s, %s\n", work->r64, work->r64);
+				break;
+			}
+			case BuiltinProc_reverse_bits:
+				gb_fprintf(emitter->file, "\trev %s, %s\n", work->r64, work->r64);
+				break;
+			case BuiltinProc_byte_swap:
+				gb_fprintf(emitter->file, "\tbswap %s\n", work->r64);
+				break;
+			}
+			fast_backend_emit_x64_canonicalize(emitter->file, work, st);
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *tmp  = fast_backend_arm64_tmp_reg();
+			i32 bit_size = st.bit_size;
+
+			switch (id) {
+			case BuiltinProc_count_ones:
+				gb_fprintf(emitter->file, "\tfmov d0, %s\n", work);
+				gb_fprintf(emitter->file, "\tcnt v0.8b, v0.8b\n");
+				gb_fprintf(emitter->file, "\taddv b0, v0.8b\n");
+				gb_fprintf(emitter->file, "\tfmov %s, b0\n", work);
+				break;
+			case BuiltinProc_count_zeros:
+				gb_fprintf(emitter->file, "\tfmov d0, %s\n", work);
+				gb_fprintf(emitter->file, "\tcnt v0.8b, v0.8b\n");
+				gb_fprintf(emitter->file, "\taddv b0, v0.8b\n");
+				gb_fprintf(emitter->file, "\tfmov %s, b0\n", tmp);
+				gb_fprintf(emitter->file, "\tmov %s, #%d\n", work, bit_size);
+				gb_fprintf(emitter->file, "\tsub %s, %s, %s\n", work, work, tmp);
+				break;
+			case BuiltinProc_count_trailing_ones: {
+				// count_trailing_ones(x) = ctz(x | (x-1)) + 1, but special-case x == 0 and x == all_ones
+				i32 done_label = fast_backend_alloc_label(emitter);
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+				gb_fprintf(emitter->file, "\tb.eq %s\n", done_name);  // x == 0: result = bit_size
+				gb_fprintf(emitter->file, "\tadds x9, %s, #1\n", work); // x9 = x+1, sets flags
+				gb_fprintf(emitter->file, "\tb.eq %s\n", done_name);  // x+1 == 0 (x was all ones): result = bit_size
+				gb_fprintf(emitter->file, "\tsub x9, %s, #1\n", work); // x9 = x-1
+				gb_fprintf(emitter->file, "\torr %s, %s, x9\n", work, work); // work = x | (x-1)
+				gb_fprintf(emitter->file, "\trbit %s, %s\n", work, work);
+				gb_fprintf(emitter->file, "\tclz %s, %s\n", work, work);
+				gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", work, work);
+				break;
+			}
+			case BuiltinProc_count_trailing_zeros: {
+				i32 done_label = fast_backend_alloc_label(emitter);
+				char done_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+				gb_fprintf(emitter->file, "\tb.ne %s\n", done_name);
+				gb_fprintf(emitter->file, "\tmov %s, #%d\n", work, bit_size);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				gb_fprintf(emitter->file, "\trbit %s, %s\n", work, work);
+				gb_fprintf(emitter->file, "\tclz %s, %s\n", work, work);
+				break;
+			}
+			case BuiltinProc_count_leading_zeros:
+				gb_fprintf(emitter->file, "\tclz %s, %s\n", work, work);
+				break;
+			case BuiltinProc_count_leading_ones: {
+				i32 done_label = fast_backend_alloc_label(emitter);
+				i32 all_ones_label = fast_backend_alloc_label(emitter);
+				char done_name[64] = {};
+				char all_ones_name[64] = {};
+				fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+				fast_backend_make_label_name(all_ones_name, gb_size_of(all_ones_name), emitter->plan, all_ones_label);
+				gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+				gb_fprintf(emitter->file, "\tb.eq %s\n", done_name);  // x == 0: result = 0 (not all ones)
+				gb_fprintf(emitter->file, "\tmvn %s, %s\n", work, work); // work = ~x
+				gb_fprintf(emitter->file, "\tcmp %s, #0\n", work);
+				gb_fprintf(emitter->file, "\tb.eq %s\n", all_ones_name); // ~x == 0 (x was all ones): result = bit_size
+				gb_fprintf(emitter->file, "\tclz %s, %s\n", work, work);
+				gb_fprintf(emitter->file, "\tb %s\n", done_name);
+				fast_backend_emit_label(emitter->file, emitter->plan, all_ones_label);
+				gb_fprintf(emitter->file, "\tmov %s, #%d\n", work, bit_size);
+				gb_fprintf(emitter->file, "\tb %s\n", done_name);
+				fast_backend_emit_label(emitter->file, emitter->plan, done_label);
+				break;
+			}
+			case BuiltinProc_reverse_bits:
+				gb_fprintf(emitter->file, "\trbit %s, %s\n", work, work);
+				break;
+			case BuiltinProc_byte_swap:
+				if (bit_size == 64) {
+					gb_fprintf(emitter->file, "\trev %s, %s\n", work, work);
+				} else if (bit_size == 32) {
+					gb_fprintf(emitter->file, "\trev32w %s, %s\n", work, work);
+				} else if (bit_size == 16) {
+					gb_fprintf(emitter->file, "\trev16h %s, %s\n", work, work);
+				}
+				break;
+			}
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
 		}
 		return true;
 	}
