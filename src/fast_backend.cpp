@@ -2657,6 +2657,12 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 		}
 		return d;
 	}
+	// alloca/trap/debug_trap/volatile/non_temporal: no spill needed (or handled separately)
+	if (id == BuiltinProc_alloca || id == BuiltinProc_trap || id == BuiltinProc_debug_trap ||
+	    id == BuiltinProc_volatile_load || id == BuiltinProc_volatile_store ||
+	    id == BuiltinProc_non_temporal_load || id == BuiltinProc_non_temporal_store) {
+		return 0;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2765,6 +2771,28 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 			}
 		}
 		return true;
+	}
+	// alloca(size, align): 2 int args, returns rawptr
+	if (id == BuiltinProc_alloca) {
+		return ce->args.count == 2 &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1]));
+	}
+	// trap/debug_trap: 0 args, noreturn
+	if (id == BuiltinProc_trap || id == BuiltinProc_debug_trap) {
+		return ce->args.count == 0;
+	}
+	// volatile_load/volatile_store/non_temporal_load/non_temporal_store
+	if (id == BuiltinProc_volatile_load) {
+		return ce->args.count == 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+	}
+	if (id == BuiltinProc_volatile_store || id == BuiltinProc_non_temporal_store) {
+		return ce->args.count == 2 &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0])) &&
+		       fast_backend_can_emit_leaf_expr(plan, ce->args[1], type_of_expr(ce->args[1]));
+	}
+	if (id == BuiltinProc_non_temporal_load) {
+		return ce->args.count == 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
 	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return false;
@@ -6600,6 +6628,77 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 				gb_fprintf(emitter->file, "\tb.ne .Lmemc_loop_%d\n", loop_label);
 				gb_fprintf(emitter->file, "%s:\n", done_name);
 			}
+		}
+		return true;
+	}
+	// alloca(size, align): sub rsp, align stack
+	if (id == BuiltinProc_alloca) {
+		if (ce->args.count != 2) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[1])) return false;
+		auto *work = fast_backend_x64_work_reg();
+		auto *tmp = fast_backend_x64_tmp_reg();
+		gb_fprintf(emitter->file, "\tsub %s, %s\n", work->r64, tmp->r64);
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", tmp->r64, work->r64);
+		gb_fprintf(emitter->file, "\tand %s, #~15\n", tmp->r64);
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tsub rsp, %s\n", tmp->r64);
+		} else {
+			gb_fprintf(emitter->file, "\tsub sp, sp, %s\n", tmp->r64);
+		}
+		return true;
+	}
+	// trap: ud2 on x64, brk #0 on ARM64 (noreturn)
+	if (id == BuiltinProc_trap || id == BuiltinProc_debug_trap) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tud2\n");
+		} else {
+			gb_fprintf(emitter->file, "\tbrk #0\n");
+		}
+		// noreturn - emit exit block
+		i32 done_label = fast_backend_alloc_label(emitter);
+		char done_name[64] = {};
+		fast_backend_make_label_name(done_name, gb_size_of(done_name), emitter->plan, done_label);
+		gb_fprintf(emitter->file, "%s:\n", done_name);
+		return true;
+	}
+	// volatile_load(dst): load with compiler barrier (no caching hints)
+	if (id == BuiltinProc_volatile_load || id == BuiltinProc_non_temporal_load) {
+		if (ce->args.count != 1) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		auto *work = fast_backend_x64_work_reg();
+		auto *tmp = fast_backend_x64_tmp_reg();
+		Type *val_type = default_type(type_of_expr(ce->args[0]));
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(val_type, &st)) return false;
+		// Load from address in work, result goes to tmp (don't overwrite work yet)
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_from_address(emitter->file, work, tmp, st);
+		} else {
+			fast_backend_emit_arm64_load_from_address(emitter->file, work->r64, tmp->r64, st);
+		}
+		// Move result to work then push
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", work->r64, tmp->r64);
+		fast_backend_emit_push_work_reg(emitter);
+		return true;
+	}
+	// volatile_store(dst, val): store with compiler barrier
+	if (id == BuiltinProc_volatile_store || id == BuiltinProc_non_temporal_store) {
+		if (ce->args.count != 2) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[1])) return false;
+		auto *work = fast_backend_x64_work_reg();
+		auto *tmp = fast_backend_x64_tmp_reg();
+		Type *val_type = default_type(type_of_expr(ce->args[1]));
+		FastScalarType st = {};
+		if (!fast_backend_classify_scalar_type(val_type, &st)) return false;
+		// pop value into tmp, address already in work
+		gb_fprintf(emitter->file, "\tpop %s\n", tmp->r64);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_store_to_address(emitter->file, work, tmp, st);
+		} else {
+			fast_backend_emit_arm64_store_to_address(emitter->file, work->r64, tmp->r64, st);
 		}
 		return true;
 	}
