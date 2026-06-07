@@ -3410,6 +3410,52 @@ gb_internal bool fast_backend_plan_defer_stmt(FastGenerator *gen, FastLeafProcPl
 	return fast_backend_plan_stmt(gen, plan, ds->stmt);
 }
 
+gb_internal bool fast_backend_can_emit_noop_delete_call_expr(FastLeafProcPlan *plan, AstCallExpr *ce) {
+	gb_unused(plan);
+
+	if (ce == nullptr || ce->args.count != 1) {
+		return false;
+	}
+
+	Entity *proc_entity = ce->entity_procedure_of;
+	if (proc_entity == nullptr) {
+		proc_entity = entity_from_expr(ce->proc);
+	}
+	bool is_delete = false;
+	if (proc_entity != nullptr && proc_entity->kind == Entity_ProcGroup) {
+		is_delete = str_eq(proc_entity->token.string, str_lit("delete"));
+	} else if (proc_entity != nullptr && proc_entity->kind == Entity_Procedure) {
+		is_delete =
+			str_eq(proc_entity->token.string, str_lit("delete")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_dynamic_array")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_slice")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_string")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_string16")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_cstring")) ||
+			str_eq(proc_entity->token.string, str_lit("delete_cstring16"));
+	}
+	Ast *proc_expr = unparen_expr(ce->proc);
+	if (!is_delete && proc_expr != nullptr && proc_expr->kind == Ast_Ident) {
+		is_delete = str_eq(proc_expr->Ident.token.string, str_lit("delete"));
+	}
+	if (!is_delete) {
+		return false;
+	}
+
+	Ast *arg = ce->args[0];
+	Type *type = base_type(type_of_expr(arg));
+	if (type == nullptr || fast_backend_expr_has_call(arg)) {
+		return false;
+	}
+
+	return is_type_string(type) ||
+	       is_type_string16(type) ||
+	       is_type_cstring(type) ||
+	       is_type_cstring16(type) ||
+	       is_type_slice(type) ||
+	       is_type_dynamic_array(type);
+}
+
 gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPlan *plan, AstExprStmt *es) {
 	gb_unused(gen);
 
@@ -3417,9 +3463,13 @@ gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPla
 		error(es->expr ? es->expr : cast(Ast *)es, "Fast backend currently only supports call expression statements");
 		return false;
 	}
-	if (!fast_backend_can_emit_call_expr(plan, &es->expr->CallExpr, true)) {
+	if (!fast_backend_can_emit_call_expr(plan, &es->expr->CallExpr, true) &&
+	    !fast_backend_can_emit_noop_delete_call_expr(plan, &es->expr->CallExpr)) {
 		error(es->expr, "Fast backend does not yet support this call expression");
 		return false;
+	}
+	if (fast_backend_can_emit_noop_delete_call_expr(plan, &es->expr->CallExpr)) {
+		return true;
 	}
 	plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(es->expr));
 	return true;
@@ -10042,6 +10092,9 @@ gb_internal bool fast_backend_emit_branch_stmt(FastLeafProcEmitter *emitter, Ast
 gb_internal bool fast_backend_emit_expr_stmt(FastLeafProcEmitter *emitter, AstExprStmt *es) {
 	if (es->expr == nullptr || es->expr->kind != Ast_CallExpr) {
 		return false;
+	}
+	if (fast_backend_can_emit_noop_delete_call_expr(emitter->plan, &es->expr->CallExpr)) {
+		return true;
 	}
 	return fast_backend_emit_call_expr(emitter, &es->expr->CallExpr);
 }
