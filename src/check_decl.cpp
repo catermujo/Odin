@@ -1892,6 +1892,12 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	if (ac.rodata) {
 		e->Variable.is_rodata = true;
 	}
+	if (ac.linkage.len != 0) {
+		     if (ac.linkage == "internal")  { e->flags |= EntityFlag_CustomLinkage_Internal; }
+		else if (ac.linkage == "strong")    { e->flags |= EntityFlag_CustomLinkage_Strong;   }
+		else if (ac.linkage == "weak")      { e->flags |= EntityFlag_CustomLinkage_Weak;     }
+		else if (ac.linkage == "link_once") { e->flags |= EntityFlag_CustomLinkage_LinkOnce; }
+	}
 	ac.link_name = handle_link_name(ctx, e->token, ac.link_name, ac.link_prefix, ac.link_suffix);
 
 	if (is_arch_wasm() && e->Variable.thread_local_model.len != 0) {

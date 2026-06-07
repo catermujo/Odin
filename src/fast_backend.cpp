@@ -4009,10 +4009,6 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 			}
 
 			if (flags & (EntityFlag_Overridden|
-			             EntityFlag_Init|
-			             EntityFlag_Fini|
-			             EntityFlag_Test|
-			             EntityFlag_Require|
 			             EntityFlag_CustomLinkage_Weak|
 			             EntityFlag_CustomLinkage_LinkOnce)) {
 				if (allow_llvm_fallback) {
@@ -4042,13 +4038,11 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 			if (e->Variable.is_foreign) {
 				break;
 			}
-			if (flags & (EntityFlag_Overridden|
-			             EntityFlag_CustomLinkage_Weak|
-			             EntityFlag_CustomLinkage_LinkOnce)) {
+			if (flags & EntityFlag_Overridden) {
 				if (allow_llvm_fallback) {
 					break;
 				}
-				error(e->token, "Fast backend does not yet support this global variable linkage");
+				error(e->token, "Fast backend does not yet support overridden global variables");
 				return false;
 			}
 			FastGlobalVarPlan plan = {};
@@ -10996,9 +10990,27 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan *plan) {
 	String symbol = fast_backend_get_entity_name(plan->entity);
 	String asm_name = fast_backend_mangle_asm_name(symbol);
+	u64 flags = plan->entity->flags.load(std::memory_order_relaxed);
 
+	// Handle weak/linkonce linkage
+	if (flags & EntityFlag_CustomLinkage_Weak) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, ".weak_definition \"%.*s\"\n", LIT(asm_name));
+		} else {
+			gb_fprintf(file, ".weak \"%.*s\"\n", LIT(asm_name));
+		}
+	} else if (flags & EntityFlag_CustomLinkage_LinkOnce) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, ".weak_definition \"%.*s\"\n", LIT(asm_name));
+		} else {
+			gb_fprintf(file, ".linkonce \"%.*s\"\n", LIT(asm_name));
+		}
+	}
 	if (fast_backend_allow_external_symbol(plan->entity)) {
 		gb_fprintf(file, ".globl \"%.*s\"\n", LIT(asm_name));
+	}
+	if (build_context.metrics.os != TargetOs_darwin && build_context.metrics.os != TargetOs_windows) {
+		gb_fprintf(file, ".type \"%.*s\",@function\n", LIT(asm_name));
 	}
 
 	if (build_context.metrics.arch == TargetArch_amd64) {
@@ -11119,8 +11131,23 @@ gb_internal bool fast_backend_emit_global_string_literal_init(gbFile *file, Fast
 gb_internal bool fast_backend_emit_global_var(gbFile *file, FastGlobalVarPlan const &plan) {
 	Entity *entity = plan.entity;
 	String asm_name = fast_backend_mangle_asm_name(fast_backend_get_entity_name(entity));
+	u64 flags = entity->flags.load(std::memory_order_relaxed);
 
 	fast_backend_emit_global_section(file, entity);
+	// Handle weak/linkonce linkage
+	if (flags & EntityFlag_CustomLinkage_Weak) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, ".weak_definition \"%.*s\"\n", LIT(asm_name));
+		} else {
+			gb_fprintf(file, ".weak \"%.*s\"\n", LIT(asm_name));
+		}
+	} else if (flags & EntityFlag_CustomLinkage_LinkOnce) {
+		if (build_context.metrics.os == TargetOs_darwin) {
+			gb_fprintf(file, ".weak_definition \"%.*s\"\n", LIT(asm_name));
+		} else {
+			gb_fprintf(file, ".linkonce \"%.*s\"\n", LIT(asm_name));
+		}
+	}
 	if (fast_backend_allow_external_symbol(entity)) {
 		gb_fprintf(file, ".globl \"%.*s\"\n", LIT(asm_name));
 	}
