@@ -348,6 +348,9 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	case Type_Array:
 		return fast_backend_type_is_supported_value(type->Array.elem, nullptr, nullptr);
 
+	case Type_EnumeratedArray:
+		return fast_backend_type_is_supported_value(type->EnumeratedArray.elem, nullptr, nullptr);
+
 	case Type_DynamicArray:
 		return fast_backend_type_is_supported_value(type->DynamicArray.elem, nullptr, nullptr);
 
@@ -701,7 +704,7 @@ gb_internal i32 fast_backend_address_expr_spill_depth(Ast *expr) {
 		if (indexed_type != nullptr && (indexed_type->kind == Type_Pointer || indexed_type->kind == Type_MultiPointer)) {
 			base_depth = fast_backend_leaf_expr_spill_depth(expr->IndexExpr.expr);
 		} else if (indexed_type != nullptr &&
-		           indexed_type->kind == Type_Array &&
+		           (indexed_type->kind == Type_Array || indexed_type->kind == Type_EnumeratedArray) &&
 		           fast_backend_is_array_binary_expr(expr->IndexExpr.expr, default_type(type_of_expr(expr->IndexExpr.expr)))) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 			i32 temp_slots = base_value_type != nullptr ? align_formula(cast(i32)type_size_of(base_value_type), 8)/8 : 0;
@@ -1099,7 +1102,8 @@ gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast 
 				return false;
 			}
 		} else if (default_type(type_of_expr(expr->IndexExpr.expr)) != nullptr &&
-		           base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array) {
+		           (base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array ||
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray)) {
 			if (!fast_backend_can_emit_address_expr(plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr) &&
 			    !fast_backend_can_emit_direct_array_index_expr(plan, expr)) {
 				return false;
@@ -1495,7 +1499,11 @@ gb_internal bool fast_backend_is_array_binary_expr(Ast *expr, Type *expected_typ
 	expr = unparen_expr(expr);
 	Type *type = default_type(expected_type);
 	Type *base = base_type(type);
-	return expr != nullptr && expr->kind == Ast_BinaryExpr && type != nullptr && base != nullptr && base->kind == Type_Array;
+	return expr != nullptr &&
+	       expr->kind == Ast_BinaryExpr &&
+	       type != nullptr &&
+	       base != nullptr &&
+	       (base->kind == Type_Array || base->kind == Type_EnumeratedArray);
 }
 
 gb_internal bool fast_backend_can_emit_array_binary_expr(FastLeafProcPlan *plan, Ast *expr, Type *expected_type) {
@@ -1513,13 +1521,14 @@ gb_internal bool fast_backend_type_supports_array_binary_op(Type *type, TokenKin
 		return false;
 	}
 
-	if (base->kind != Type_Array) {
+	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray) {
 		FastScalarType scalar_type = {};
 		return fast_backend_classify_scalar_type(type, &scalar_type) &&
 		       fast_backend_scalar_binary_op_supported(op, scalar_type);
 	}
 
-	return fast_backend_type_supports_array_binary_op(base->Array.elem, op);
+	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+	return fast_backend_type_supports_array_binary_op(elem_type, op);
 }
 
 gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *plan, Type *expected_type, TokenKind op, Ast *lhs, Ast *rhs) {
@@ -1529,7 +1538,7 @@ gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *p
 
 	Type *type = default_type(expected_type);
 	Type *base = base_type(type);
-	if (type == nullptr || base == nullptr || base->kind != Type_Array) {
+	if (type == nullptr || base == nullptr || (base->kind != Type_Array && base->kind != Type_EnumeratedArray)) {
 		return false;
 	}
 
@@ -1539,7 +1548,8 @@ gb_internal bool fast_backend_can_emit_array_binary_operands(FastLeafProcPlan *p
 		return false;
 	}
 
-	if (!fast_backend_type_supports_array_binary_op(base->Array.elem, op)) {
+	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+	if (!fast_backend_type_supports_array_binary_op(elem_type, op)) {
 		return false;
 	}
 
@@ -1618,6 +1628,12 @@ gb_internal bool fast_backend_type_supports_aggregate_compare(Type *type) {
 		FastScalarType scalar_type = {};
 		return fast_backend_classify_scalar_type(base->Array.elem, &scalar_type) ||
 		       fast_backend_type_supports_aggregate_compare(base->Array.elem);
+	}
+
+	case Type_EnumeratedArray: {
+		FastScalarType scalar_type = {};
+		return fast_backend_classify_scalar_type(base->EnumeratedArray.elem, &scalar_type) ||
+		       fast_backend_type_supports_aggregate_compare(base->EnumeratedArray.elem);
 	}
 
 	case Type_Struct:
@@ -1835,8 +1851,10 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+		i64 elem_count = base->kind == Type_Array ? base->Array.count : base->EnumeratedArray.count;
 		if (cl->elems.count == 0) {
 			return true;
 		}
@@ -1862,7 +1880,7 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 			}
 			return true;
 		}
-		if (cl->elems.count > base->Array.count) {
+		if (cl->elems.count > elem_count) {
 			return false;
 		}
 		for (Ast *elem : cl->elems) {
@@ -1941,7 +1959,9 @@ gb_internal i32 fast_backend_aggregate_compare_operand_spill_depth(FastLeafProcP
 	if (expr->kind == Ast_CompoundLit) {
 		return 1 + fast_backend_scalar_compound_lit_spill_depth(expr, type);
 	}
-	if (expr->kind == Ast_BinaryExpr && default_type(type) != nullptr && base_type(default_type(type))->kind == Type_Array) {
+	if (expr->kind == Ast_BinaryExpr &&
+	    default_type(type) != nullptr &&
+	    (base_type(default_type(type))->kind == Type_Array || base_type(default_type(type))->kind == Type_EnumeratedArray)) {
 		return 1 + fast_backend_array_binary_expr_spill_depth(expr);
 	}
 	if (fast_backend_can_emit_constant_aggregate_expr(type, expr)) {
@@ -1989,12 +2009,14 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 		}
 		break;
 	case Type_Array:
+	case Type_EnumeratedArray:
 		for (Ast *elem : cl->elems) {
 			Ast *value = elem;
 			if (elem != nullptr && elem->kind == Ast_FieldValue) {
 				value = elem->FieldValue.value;
 			}
-			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, base->Array.elem));
+			Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, elem_type));
 		}
 		break;
 	}
@@ -2025,7 +2047,9 @@ gb_internal i32 fast_backend_supported_value_expr_spill_depth(Ast *expr, Type *e
 	if (expr->kind == Ast_SliceExpr) {
 		return fast_backend_slice_expr_spill_depth(&expr->SliceExpr);
 	}
-	if (expr->kind == Ast_BinaryExpr && base_type(type) != nullptr && base_type(type)->kind == Type_Array) {
+	if (expr->kind == Ast_BinaryExpr &&
+	    base_type(type) != nullptr &&
+	    (base_type(type)->kind == Type_Array || base_type(type)->kind == Type_EnumeratedArray)) {
 		return fast_backend_array_binary_expr_spill_depth(expr);
 	}
 	if (fast_backend_can_emit_constant_aggregate_expr(type, expr)) {
@@ -2251,7 +2275,7 @@ gb_internal bool fast_backend_can_emit_direct_array_index_expr(FastLeafProcPlan 
 
 	Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 	Type *base_type_ = base_type(base_value_type);
-	if (base_value_type == nullptr || base_type_ == nullptr || base_type_->kind != Type_Array) {
+	if (base_value_type == nullptr || base_type_ == nullptr || (base_type_->kind != Type_Array && base_type_->kind != Type_EnumeratedArray)) {
 		return false;
 	}
 
@@ -4623,7 +4647,8 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 				return false;
 			}
 		} else if (default_type(type_of_expr(expr->IndexExpr.expr)) != nullptr &&
-		           base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array &&
+		           (base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Array ||
+		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_EnumeratedArray) &&
 		           !fast_backend_can_emit_address_expr(emitter->plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
@@ -5496,10 +5521,12 @@ gb_internal bool fast_backend_emit_compare_aggregate_at_offset(FastLeafProcEmitt
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
+		i64 elem_count = base->kind == Type_Array ? base->Array.count : base->EnumeratedArray.count;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
-		for (i64 i = 0; i < base->Array.count; i++) {
+		for (i64 i = 0; i < elem_count; i++) {
 			if (!fast_backend_emit_compare_aggregate_at_offset(emitter, lhs_depth, rhs_depth, offset + cast(i32)(i*elem_size), elem_type, mismatch_label)) {
 				return false;
 			}
@@ -6206,8 +6233,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_entity(FastLeafP
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
 		if (cl->elems.count == 0) {
 			return true;
@@ -6293,8 +6321,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
 		if (cl->elems.count == 0) {
 			return true;
@@ -6385,8 +6414,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_result_pointer(F
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
 		if (cl->elems.count == 0) {
 			return true;
@@ -6475,8 +6505,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_lhs(FastLeafProc
 		return true;
 	}
 
-	case Type_Array: {
-		Type *elem_type = base->Array.elem;
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
 		if (cl->elems.count == 0) {
 			return true;
@@ -6824,9 +6855,9 @@ gb_internal bool fast_backend_emit_store_array_binary_op_to_work_address(FastLea
 
 	type = default_type(type);
 	Type *base = base_type(type);
-	Type *elem_type = base->Array.elem;
+	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 	i32 elem_size = cast(i32)type_size_of(elem_type);
-	i64 count = base->Array.count;
+	i64 count = base->kind == Type_Array ? base->Array.count : base->EnumeratedArray.count;
 	if (elem_size <= 0 || count < 0) {
 		return false;
 	}
@@ -6908,16 +6939,17 @@ gb_internal bool fast_backend_emit_array_binary_op_at_offset(FastLeafProcEmitter
 		return true;
 	}
 
-	if (base->kind != Type_Array) {
+	if (base->kind != Type_Array && base->kind != Type_EnumeratedArray) {
 		return false;
 	}
 
-	Type *elem_type = base->Array.elem;
+	Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
 	i32 elem_size = cast(i32)type_size_of(elem_type);
 	if (elem_size <= 0) {
 		return false;
 	}
-	for (i64 i = 0; i < base->Array.count; i++) {
+	i64 count = base->kind == Type_Array ? base->Array.count : base->EnumeratedArray.count;
+	for (i64 i = 0; i < count; i++) {
 		if (!fast_backend_emit_array_binary_op_at_offset(emitter, dst_depth, lhs_depth, rhs_depth, offset + cast(i32)(i*elem_size), elem_type, op)) {
 			return false;
 		}
