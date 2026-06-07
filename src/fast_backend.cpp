@@ -2670,6 +2670,12 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 		d = gb_max(d, fast_backend_leaf_expr_spill_depth(ce->args[1]));
 		return d;
 	}
+	// cpu_relax/prefetch: no args, no spill needed
+	if (id == BuiltinProc_cpu_relax ||
+	    id == BuiltinProc_prefetch_read_instruction || id == BuiltinProc_prefetch_read_data ||
+	    id == BuiltinProc_prefetch_write_instruction || id == BuiltinProc_prefetch_write_data) {
+		return 0;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2800,6 +2806,15 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 	}
 	if (id == BuiltinProc_non_temporal_load) {
 		return ce->args.count == 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+	}
+	// cpu_relax: no args, simple hint
+	if (id == BuiltinProc_cpu_relax) {
+		return ce->args.count == 0;
+	}
+	// prefetch: one rawptr arg, optional locality (constant int)
+	if (id == BuiltinProc_prefetch_read_instruction || id == BuiltinProc_prefetch_read_data ||
+	    id == BuiltinProc_prefetch_write_instruction || id == BuiltinProc_prefetch_write_data) {
+		return ce->args.count >= 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
 	}
 	// Overflow intrinsics: two-arg integer, returns (T, bool)
 	if (id == BuiltinProc_overflow_add || id == BuiltinProc_overflow_sub || id == BuiltinProc_overflow_mul) {
@@ -6719,6 +6734,22 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 		} else {
 			fast_backend_emit_arm64_store_to_address(emitter->file, work->r64, tmp->r64, st);
 		}
+		return true;
+	}
+	// cpu_relax: pause/yield hint
+	if (id == BuiltinProc_cpu_relax) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tpause\n");
+		} else {
+			gb_fprintf(emitter->file, "\tyield\n");
+		}
+		return true;
+	}
+	// prefetch: no-op for now (architecture-specific, locality ignored)
+	if (id == BuiltinProc_prefetch_read_instruction || id == BuiltinProc_prefetch_read_data ||
+	    id == BuiltinProc_prefetch_write_instruction || id == BuiltinProc_prefetch_write_data) {
+		if (ce->args.count >= 1 && !fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		// TODO: Implement actual prefetch hints (prfm on ARM64, prefetcht0/1/2 on x64)
 		return true;
 	}
 	// Overflow intrinsics: add/sub/mul with overflow flag, returns (T, bool)
