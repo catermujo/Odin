@@ -2600,6 +2600,9 @@ gb_internal i32 fast_backend_builtin_call_spill_depth(AstCallExpr *ce) {
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
+	if (id == BuiltinProc_typeid_of) {
+		return 0;
+	}
 	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
 		return fast_backend_leaf_expr_spill_depth(ce->args.count != 0 ? ce->args[0] : nullptr);
 	}
@@ -2644,17 +2647,22 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 		return false;
 	}
 
-	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
-	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
-		return false;
-	}
-	if (ce->args.count != 1) {
-		return false;
-	}
-
 	FastScalarType result_type = {};
 	Type *want_type = expected_type ? expected_type : reduce_tuple_to_single_type(type_of_expr(cast(Ast *)ce));
 	if (!fast_backend_classify_scalar_type(want_type, &result_type)) {
+		return false;
+	}
+
+	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
+	if (id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) {
+		if (id == BuiltinProc_typeid_of) {
+			return ce->args.count == 1 &&
+			       type_and_value_of_expr(ce->args[0]).mode == Addressing_Type &&
+			       fast_backend_classify_scalar_type(want_type, &result_type);
+		}
+		return false;
+	}
+	if (ce->args.count != 1) {
 		return false;
 	}
 
@@ -2936,12 +2944,15 @@ gb_internal bool fast_backend_can_emit_leaf_expr(FastLeafProcPlan *plan, Ast *ex
 	}
 
 	TypeAndValue tv = type_and_value_of_expr(expr);
-	if (tv.mode == Addressing_Invalid) {
-		return false;
-	}
-	if (is_type_untyped_nil(tv.type)) {
+	bool expr_is_nil = expr->kind == Ast_Ident &&
+	                   expr->Ident.entity.load() != nullptr &&
+	                   expr->Ident.entity.load()->kind == Entity_Nil;
+	if (expr_is_nil || is_type_untyped_nil(tv.type)) {
 		FastScalarType type = {};
 		return fast_backend_classify_scalar_type(expected_type ? expected_type : tv.type, &type);
+	}
+	if (tv.mode == Addressing_Invalid) {
+		return false;
 	}
 	if (tv.mode == Addressing_Constant) {
 		FastScalarType type = {};
@@ -5167,9 +5178,12 @@ gb_internal bool fast_backend_emit_leaf_expr_as_type(FastLeafProcEmitter *emitte
 		return false;
 	}
 	TypeAndValue tv = type_and_value_of_expr(expr);
-	if (is_type_untyped_nil(tv.type) || tv.mode == Addressing_Constant) {
+	bool expr_is_nil = expr->kind == Ast_Ident &&
+	                   expr->Ident.entity.load() != nullptr &&
+	                   expr->Ident.entity.load()->kind == Entity_Nil;
+	if (expr_is_nil || is_type_untyped_nil(tv.type) || tv.mode == Addressing_Constant) {
 		u64 value = 0;
-		if (!is_type_untyped_nil(tv.type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+		if (!expr_is_nil && !is_type_untyped_nil(tv.type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
 			return false;
 		}
 		if (build_context.metrics.arch == TargetArch_amd64) {
@@ -5262,20 +5276,23 @@ gb_internal bool fast_backend_emit_leaf_value(FastLeafProcEmitter *emitter, Ast 
 	TypeAndValue tv = type_and_value_of_expr(expr);
 	Type *expr_type = reduce_tuple_to_single_type(tv.type);
 	FastScalarType scalar_type = {};
+	bool expr_is_nil = expr->kind == Ast_Ident &&
+	                   expr->Ident.entity.load() != nullptr &&
+	                   expr->Ident.entity.load()->kind == Entity_Nil;
 	if (expr->kind == Ast_Implicit && expr->Implicit.kind == Token_context) {
 		if (!emitter->plan->has_context_slot) {
 			return false;
 		}
 		scalar_type = emitter->plan->context_slot.type;
-	} else if (is_type_untyped_nil(expr_type)) {
+	} else if (expr_is_nil || is_type_untyped_nil(expr_type)) {
 		scalar_type = fast_backend_context_scalar_type();
 	} else if (!fast_backend_classify_scalar_type(expr_type, &scalar_type)) {
 		return false;
 	}
 
-	if (tv.mode == Addressing_Constant || is_type_untyped_nil(expr_type)) {
+	if (tv.mode == Addressing_Constant || expr_is_nil || is_type_untyped_nil(expr_type)) {
 		u64 value = 0;
-		if (!is_type_untyped_nil(expr_type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
+		if (!expr_is_nil && !is_type_untyped_nil(expr_type) && !fast_backend_exact_value_as_u64(tv.value, scalar_type, &value)) {
 			return false;
 		}
 
@@ -6122,6 +6139,25 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 	}
 
 	BuiltinProcId id = fast_backend_builtin_proc_id(ce->proc);
+	if (id == BuiltinProc_typeid_of) {
+		if (ce->args.count != 1 || type_and_value_of_expr(ce->args[0]).mode != Addressing_Type) {
+			return false;
+		}
+		Type *arg_type = default_type(type_of_expr(ce->args[0]));
+		FastScalarType typeid_type = {};
+		if (arg_type == nullptr || !fast_backend_classify_scalar_type(t_typeid, &typeid_type)) {
+			return false;
+		}
+		u64 typeid_value = type_hash_canonical_type(arg_type);
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), typeid_value);
+			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), typeid_type);
+		} else {
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), typeid_value);
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), typeid_type);
+		}
+		return true;
+	}
 	if ((id != BuiltinProc_len && id != BuiltinProc_cap && id != BuiltinProc_raw_data) || ce->args.count != 1) {
 		return false;
 	}
