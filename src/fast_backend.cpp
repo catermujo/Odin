@@ -1609,7 +1609,17 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 	}
 
 	TypeProc *pt = &proc_type->Proc;
-	if (pt->is_closure || pt->c_vararg || pt->diverging || pt->is_polymorphic || proc_entity->Procedure.generated_from_polymorphic) {
+	if (pt->is_closure || pt->diverging || pt->is_polymorphic || proc_entity->Procedure.generated_from_polymorphic) {
+		return false;
+	}
+	// Foreign `#cvararg` procs use the C va_list ABI: variadic args go
+	// in registers/stack per the platform C convention and the callee
+	// reads them with `va_arg`. The fast backend's caller-side
+	// variadic pack emits a `[]any` slice instead, so calls into
+	// foreign C-variadic procs must still fall back to LLVM. Non-
+	// foreign `#cvararg` and `..any` procs use the slice-based ABI
+	// the rest of the call site already supports.
+	if (pt->c_vararg && proc_entity->Procedure.is_foreign) {
 		return false;
 	}
 	if (!fast_backend_supported_calling_convention(pt->calling_convention)) {
@@ -3963,10 +3973,12 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 			if (param == nullptr || param->kind != Entity_Variable) {
 				continue;
 			}
-			if (param->flags.load(std::memory_order_relaxed) & EntityFlag_CVarArg) {
-				error(param->token, "Fast backend does not yet support variadic procedures");
-				return false;
-			}
+			// `#cvararg` and `..any` variadic params are typed `[]any`
+			// at the parameter level. The caller-side variadic pack
+			// already builds a `[]any` slice and passes it as two
+			// register/stack args, so the callee treats the variadic
+			// param as an ordinary slice and goes through the normal
+			// slice spill path.
 
 			if (!fast_backend_type_is_supported_value(param->type, nullptr, nullptr)) {
 				error(param->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array parameter types");
