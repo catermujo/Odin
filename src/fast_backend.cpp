@@ -123,6 +123,7 @@ gb_internal bool fast_backend_add_slot(FastLeafProcPlan *plan, Entity *entity, T
 gb_internal bool fast_backend_find_expr_slot(FastLeafProcPlan *plan, Ast *expr, FastLocalSlot *out);
 gb_internal bool fast_backend_add_expr_slot(FastLeafProcPlan *plan, Ast *expr, Type *type, FastLocalSlot *out);
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
+gb_internal i32 fast_backend_abi_arg_count(Type *t);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
 gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out);
 gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast *expr, Type **type_, FastScalarType *scalar_type_, bool *is_scalar_);
@@ -1610,7 +1611,16 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 		return false;
 	}
 
-	i32 total_param_count = pt->param_count + (pt->calling_convention == ProcCC_Odin ? 1 : 0) + (return_by_pointer ? 1 : 0);
+	i32 total_param_count = 0;
+	for (i32 i = 0; i < pt->param_count; i++) {
+		Entity *p = pt->params->Tuple.variables[i];
+		if (p == nullptr || p->kind != Entity_Variable) {
+			return false;
+		}
+		total_param_count += fast_backend_abi_arg_count(p->type);
+	}
+	total_param_count += (pt->calling_convention == ProcCC_Odin ? 1 : 0);
+	total_param_count += (return_by_pointer ? 1 : 0);
 	if (total_param_count > fast_backend_param_limit_from_proc_type(pt)) {
 		return false;
 	}
@@ -4008,9 +4018,12 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 				continue;
 			}
 
-			if (flags & (EntityFlag_Overridden|
-			             EntityFlag_CustomLinkage_Weak|
-			             EntityFlag_CustomLinkage_LinkOnce)) {
+			// @(init)/@(fini)/@(test) procs are emitted as ordinary leaf procs.
+			// The LLVM backend's __$startup_runtime / __$cleanup_runtime /
+			// test runner declare them as externals and link them in.
+			// @(require) is just a "don't DCE this proc" marker, so it
+			// behaves the same as a regular top-level proc.
+			if (flags & EntityFlag_Overridden) {
 				if (allow_llvm_fallback) {
 					continue;
 				}
@@ -6015,6 +6028,14 @@ gb_internal bool fast_backend_emit_materialize_aggregate_arg_pointer(FastLeafPro
 		return false;
 	}
 	*temp_bytes_ += alloc_bytes;
+	// After `alloc_stack_temp`, work reg holds the address of the new
+	// stack allocation. The store helpers below overwrite work reg, so
+	// spill the address to a separate spill slot here. The matching
+	// `push_slice_components_from_spill` will pop it back into tmp.
+	if (is_type_string(param_type) || is_type_string16(param_type) ||
+	    is_type_slice(param_type) || is_type_dynamic_array(param_type)) {
+		fast_backend_emit_push_work_reg(emitter);
+	}
 	if (fast_backend_can_emit_array_binary_expr(emitter->plan, arg, param_type)) {
 		return fast_backend_emit_store_array_binary_expr_to_work_address(emitter, param_type, arg);
 	}
@@ -6106,6 +6127,107 @@ gb_internal bool fast_backend_emit_pack_variadic_slice_arg(FastLeafProcEmitter *
 	return true;
 }
 
+// fast_backend_abi_arg_count returns the number of register-arg slots
+// `t` occupies on the current ABI. Scalars are 1 slot, two-scalar
+// aggregates (slices, strings, dynamic arrays) are 2 slots — passed
+// directly in two consecutive registers. Everything else (large
+// structs, arrays, maps) is 1 slot — passed by pointer.
+//
+// This matches AArch64 SysV for the small-aggregate case and the x86-64
+// SysV classification for the direct/indirect cut. The LLVM backend's
+// `lb_arg_type_direct` and `lb_arg_type_indirect_byval` produce the
+// same split at the IR level; we just hard-code the "is it small
+// enough to split?" rule here because the fast backend doesn't carry
+// LLVM's full classification.
+gb_internal i32 fast_backend_abi_arg_count(Type *t) {
+	if (t == nullptr) return 0;
+	Type *bt = base_type(t);
+	if (bt == nullptr) return 1;
+	// Scalars
+	{
+		FastScalarType scalar = {};
+		if (fast_backend_classify_scalar_type(t, &scalar)) {
+			return 1;
+		}
+	}
+	// Strings and string16: laid out as {data, len} on the callee side.
+	// `string` is `Type_Basic` with `BasicFlag_String`; the callee reads
+	// it as a struct of two scalar fields.
+	if (is_type_string(t) || is_type_string16(t)) {
+		return 2;
+	}
+	// Two-scalar aggregates: slices, dynamic arrays, and similar
+	// {data, len} layouts. The data field is always a pointer and
+	// the len field is always an integer (or pointer-sized integer for
+	// slice headers), so any slice is 2 reg args regardless of elem
+	// type. The `..any` variadic becomes `[]any` and falls here too.
+	if (bt->kind == Type_Slice || bt->kind == Type_DynamicArray) {
+		return 2;
+	}
+	// Larger aggregates: 1 slot (pointer passed by value).
+	return 1;
+}
+
+// For a param that takes 2 ABI slots (slice / string / dynamic array),
+// the caller has materialized the value at the address in work reg
+// (work reg = address of {data, len}). This helper pushes the data
+// and the len as two separate work-reg pushes (not the address — the
+// address is just the materialized value's location, not a register
+// arg).
+//
+// We use the tmp reg to hold the address while work reg carries each
+// component, since work reg is what push_work_reg stores.
+gb_internal bool fast_backend_emit_push_slice_components_from_address(FastLeafProcEmitter *emitter) {
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		// Save the slice address in tmp reg.
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_work_reg()->r64);
+		// data: load [tmp] into work, push.
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+		// len: tmp += 8; load [tmp] into work, push.
+		gb_fprintf(emitter->file, "\tlea %s, [%s+8]\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+	} else {
+		// Save the slice address in tmp reg.
+		gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg());
+		// data
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+		// len: tmp += 8; load into work; push.
+		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_tmp_reg(), 8);
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+	}
+	return true;
+}
+
+// Same as `fast_backend_emit_push_slice_components_from_address` but
+// used when the address of the slice is not currently in work reg.
+// Instead, the caller has pushed the address to the spill stack as
+// part of allocating the slice, so we pop it into the tmp reg and
+// then read out the data and len components.
+gb_internal bool fast_backend_emit_push_slice_components_from_spill(FastLeafProcEmitter *emitter) {
+	// Pop the top of the spill stack (the saved slice address) into tmp.
+	fast_backend_emit_pop_tmp_reg(emitter);
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		// data: load [tmp] into work, push.
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+		// len: tmp += 8; load [tmp] into work, push.
+		gb_fprintf(emitter->file, "\tlea %s, [%s+8]\n", fast_backend_x64_tmp_reg()->r64, fast_backend_x64_tmp_reg()->r64);
+		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_tmp_reg(), fast_backend_x64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+	} else {
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+		fast_backend_emit_arm64_add_offset(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_tmp_reg(), 8);
+		fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_tmp_reg(), fast_backend_arm64_work_reg(), fast_backend_context_scalar_type());
+		fast_backend_emit_push_work_reg(emitter);
+	}
+	return true;
+}
+
 gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitter, AstCallExpr *ce, bool has_explicit_result_address) {
 	TypeProc *pt = nullptr;
 	Entity *proc_entity = nullptr;
@@ -6137,7 +6259,10 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 			return false;
 		}
 
-		if (pt->variadic && i == pt->variadic_index && ce->ellipsis.pos.line == 0 && arg == nullptr) {
+		bool is_variadic_pack = (pt->variadic && i == pt->variadic_index && ce->ellipsis.pos.line == 0 && arg == nullptr);
+		bool is_split_abi = (fast_backend_abi_arg_count(param->type) == 2);
+
+		if (is_variadic_pack) {
 			if (!fast_backend_emit_pack_variadic_slice_arg(emitter, param->type, variadic_pack, &temp_bytes)) {
 				return false;
 			}
@@ -6172,7 +6297,20 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 				return false;
 			}
 		}
-		fast_backend_emit_push_work_reg(emitter);
+		// Push as 1 or 2 register-arg slots, matching the callee's ABI.
+		if (is_split_abi) {
+			if (is_variadic_pack) {
+				// The variadic pack left work reg = slice address; read
+				// the data and len components directly out of it.
+				fast_backend_emit_push_slice_components_from_address(emitter);
+			} else {
+				// materialize spilled the slice address; pop it back
+				// into tmp, then read the components.
+				fast_backend_emit_push_slice_components_from_spill(emitter);
+			}
+		} else {
+			fast_backend_emit_push_work_reg(emitter);
+		}
 	}
 	if (pt->calling_convention == ProcCC_Odin) {
 		if (!emitter->plan->has_context_slot) {
@@ -6186,7 +6324,15 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		fast_backend_emit_push_work_reg(emitter);
 	}
 
-	i32 total_arg_count = pt->param_count + (pt->calling_convention == ProcCC_Odin ? 1 : 0);
+	i32 total_arg_count = 0;
+	for (i32 i = 0; i < pt->param_count; i++) {
+		Entity *p = pt->params->Tuple.variables[i];
+		if (p == nullptr || p->kind != Entity_Variable) {
+			return false;
+		}
+		total_arg_count += fast_backend_abi_arg_count(p->type);
+	}
+	total_arg_count += (pt->calling_convention == ProcCC_Odin ? 1 : 0);
 	if (return_by_pointer) {
 		total_arg_count += 1;
 	}
@@ -10896,6 +11042,7 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 		}
 	}
 
+	i32 abi_index = param_offset;
 	for_array(i, emitter->plan->params) {
 		Entity *param = emitter->plan->params[i];
 		FastLocalSlot slot = {};
@@ -10903,16 +11050,34 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 			return false;
 		}
 
+		i32 abi_args = fast_backend_abi_arg_count(param->type);
+		bool is_split_aggregate = (abi_args == 2);
+
 		if (build_context.metrics.arch == TargetArch_amd64) {
-			auto *src = fast_backend_x64_param_reg(emitter->plan->type, param_offset + cast(i32)i);
-			if (src == nullptr) {
-				return false;
-			}
-			if (slot.is_scalar) {
+			if (is_split_aggregate) {
+				// data in xN, len in xN+1. Build {data, len} in slot.
+				auto *src0 = fast_backend_x64_param_reg(emitter->plan->type, abi_index);
+				if (src0 == nullptr) return false;
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src0->r64);
+				fast_backend_emit_x64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_x64_work_reg());
+				auto *src1 = fast_backend_x64_param_reg(emitter->plan->type, abi_index + 1);
+				if (src1 == nullptr) return false;
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src1->r64);
+				// slot.offset is the high address of the slot
+				// (lowest negative offset from x29). The slot spans
+				// size bytes below that, so the len field (8 bytes
+				// below the high end) lives at offset-8.
+				i32 len_off = fast_backend_slot_offset(emitter->plan, slot) - 8;
+				gb_fprintf(emitter->file, "\tmov QWORD PTR [rbp-%d], %s\n", len_off, fast_backend_x64_work_reg()->r64);
+			} else if (slot.is_scalar) {
+				auto *src = fast_backend_x64_param_reg(emitter->plan->type, abi_index);
+				if (src == nullptr) return false;
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src->r64);
 				fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), slot.type);
 				fast_backend_emit_x64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_x64_work_reg());
 			} else {
+				auto *src = fast_backend_x64_param_reg(emitter->plan->type, abi_index);
+				if (src == nullptr) return false;
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_tmp_reg()->r64, src->r64);
 				if (!fast_backend_emit_address_of_storage_entity(emitter, param)) {
 					return false;
@@ -10920,15 +11085,27 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 				fast_backend_emit_copy_bytes_between_addresses(emitter, slot.size);
 			}
 		} else {
-			char const *src = fast_backend_arm64_param_reg(param_offset + cast(i32)i);
-			if (src == nullptr) {
-				return false;
-			}
-			if (slot.is_scalar) {
+			if (is_split_aggregate) {
+				char const *src0 = fast_backend_arm64_param_reg(abi_index);
+				if (src0 == nullptr) return false;
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src0);
+				fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
+				char const *src1 = fast_backend_arm64_param_reg(abi_index + 1);
+				if (src1 == nullptr) return false;
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src1);
+				// See comment in the x64 branch above; the len field
+				// sits 8 bytes below the slot's high address.
+				i32 len_off = fast_backend_slot_offset(emitter->plan, slot) - 8;
+				gb_fprintf(emitter->file, "\tstr %s, [x29, #-%d]\n", fast_backend_arm64_work_reg(), len_off);
+			} else if (slot.is_scalar) {
+				char const *src = fast_backend_arm64_param_reg(abi_index);
+				if (src == nullptr) return false;
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
 				fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), slot.type);
 				fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
 			} else {
+				char const *src = fast_backend_arm64_param_reg(abi_index);
+				if (src == nullptr) return false;
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_tmp_reg(), src);
 				if (!fast_backend_emit_address_of_storage_entity(emitter, param)) {
 					return false;
@@ -10936,10 +11113,11 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 				fast_backend_emit_copy_bytes_between_addresses(emitter, slot.size);
 			}
 		}
+		abi_index += abi_args;
 	}
 
 	if (emitter->plan->has_context_slot) {
-		i32 param_index = param_offset + cast(i32)emitter->plan->params.count;
+		i32 param_index = abi_index;
 		if (build_context.metrics.arch == TargetArch_amd64) {
 			auto *src = fast_backend_x64_param_reg(emitter->plan->type, param_index);
 			if (src == nullptr) {
@@ -11232,7 +11410,17 @@ gb_internal bool fast_backend_write_object_assembly(FastGenerator *gen, Array<Fa
 
 	for (auto const &plan : procedures) {
 		FastLeafProcPlan *proc_plan = const_cast<FastLeafProcPlan *>(&plan);
-		i32 total_param_count = cast(i32)proc_plan->params.count + (proc_plan->has_context_slot ? 1 : 0) + (proc_plan->return_by_pointer ? 1 : 0);
+		i32 total_param_count = 0;
+		for_array(i, proc_plan->params) {
+			Entity *p = proc_plan->params[i];
+			if (p == nullptr || p->kind != Entity_Variable) {
+				error(plan.entity->token, "Fast backend: invalid procedure parameter");
+				return false;
+			}
+			total_param_count += fast_backend_abi_arg_count(p->type);
+		}
+		total_param_count += (proc_plan->has_context_slot ? 1 : 0);
+		total_param_count += (proc_plan->return_by_pointer ? 1 : 0);
 		if (total_param_count > fast_backend_param_limit(proc_plan)) {
 			error(plan.entity->token, "Fast backend does not yet support this many parameters");
 			return false;
