@@ -372,7 +372,8 @@ gb_internal bool fast_backend_supported_calling_convention(ProcCallingConvention
 	case ProcCC_PreserveNone:
 	case ProcCC_PreserveMost:
 	case ProcCC_PreserveAll:
-		return build_context.metrics.arch == TargetArch_arm64 &&
+		return (build_context.metrics.arch == TargetArch_arm64 ||
+		        build_context.metrics.arch == TargetArch_amd64) &&
 		       build_context.metrics.os == TargetOs_darwin;
 	}
 	return false;
@@ -4256,6 +4257,25 @@ gb_internal bool fast_backend_arm64_calling_convention_preserves_scratch(TypePro
 
 gb_internal i32 fast_backend_arm64_preserved_scratch_save_bytes(TypeProc *pt) {
 	return fast_backend_arm64_calling_convention_preserves_scratch(pt) ? 32 : 0;
+}
+
+gb_internal bool fast_backend_x64_calling_convention_preserves_scratch(TypeProc *pt) {
+	if (pt == nullptr ||
+	    build_context.metrics.arch != TargetArch_amd64 ||
+	    build_context.metrics.os != TargetOs_darwin) {
+		return false;
+	}
+
+	switch (pt->calling_convention) {
+	case ProcCC_PreserveMost:
+	case ProcCC_PreserveAll:
+		return true;
+	}
+	return false;
+}
+
+gb_internal i32 fast_backend_x64_preserved_scratch_save_bytes(TypeProc *pt) {
+	return fast_backend_x64_calling_convention_preserves_scratch(pt) ? 56 : 0;
 }
 
 gb_internal bool fast_backend_x64_uses_sysv_register_calling_sequence(TypeProc *pt) {
@@ -12225,13 +12245,27 @@ gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
 	i32 slot_bytes = emitter->plan->local_stack_size;
-	i32 extra_save_bytes = build_context.metrics.arch == TargetArch_arm64 ? fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type) : 0;
+	i32 extra_save_bytes = 0;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		extra_save_bytes = fast_backend_x64_preserved_scratch_save_bytes(emitter->plan->type);
+	} else {
+		extra_save_bytes = fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type);
+	}
 	i32 frame_size = align_formula(spill_bytes + slot_bytes + extra_save_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\tpush rbp\n");
 		gb_fprintf(emitter->file, "\tmov rbp, rsp\n");
 		if (frame_size > 0) {
 			gb_fprintf(emitter->file, "\tsub rsp, %d\n", frame_size);
+		}
+		if (extra_save_bytes != 0) {
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+0], rdi\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+8], rsi\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+16], rdx\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+24], rcx\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+32], r8\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+40], r9\n");
+			gb_fprintf(emitter->file, "\tmov QWORD PTR [rsp+48], r10\n");
 		}
 	} else {
 		gb_fprintf(emitter->file, "\tstp x29, x30, [sp, #-16]!\n");
@@ -12450,9 +12484,23 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
 	i32 slot_bytes = emitter->plan->local_stack_size;
-	i32 extra_save_bytes = build_context.metrics.arch == TargetArch_arm64 ? fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type) : 0;
+	i32 extra_save_bytes = 0;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		extra_save_bytes = fast_backend_x64_preserved_scratch_save_bytes(emitter->plan->type);
+	} else {
+		extra_save_bytes = fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type);
+	}
 	i32 frame_size = align_formula(spill_bytes + slot_bytes + extra_save_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
+		if (extra_save_bytes != 0) {
+			gb_fprintf(emitter->file, "\tmov rdi, QWORD PTR [rsp+0]\n");
+			gb_fprintf(emitter->file, "\tmov rsi, QWORD PTR [rsp+8]\n");
+			gb_fprintf(emitter->file, "\tmov rdx, QWORD PTR [rsp+16]\n");
+			gb_fprintf(emitter->file, "\tmov rcx, QWORD PTR [rsp+24]\n");
+			gb_fprintf(emitter->file, "\tmov r8, QWORD PTR [rsp+32]\n");
+			gb_fprintf(emitter->file, "\tmov r9, QWORD PTR [rsp+40]\n");
+			gb_fprintf(emitter->file, "\tmov r10, QWORD PTR [rsp+48]\n");
+		}
 		if (frame_size > 0) {
 			gb_fprintf(emitter->file, "\tadd rsp, %d\n", frame_size);
 		}
@@ -12515,6 +12563,10 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;
+	if (build_context.metrics.arch == TargetArch_amd64 &&
+	    fast_backend_x64_preserved_scratch_save_bytes(plan->type) > 0) {
+		emitter.use_frame = true;
+	}
 	if (build_context.metrics.arch == TargetArch_amd64 &&
 	    fast_backend_x64_sysv_stack_arg_count(plan->type, plan->return_by_pointer, plan->has_context_slot) > 0) {
 		emitter.use_frame = true;
