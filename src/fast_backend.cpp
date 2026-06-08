@@ -112,6 +112,34 @@ struct FastBackendErrorState {
 	isize error_value_count;
 };
 
+enum FastArm64ArgStorageKind {
+	FastArm64ArgStorage_Register,
+	FastArm64ArgStorage_Stack,
+};
+
+enum FastArm64AggregateReturnKind {
+	FastArm64AggregateReturn_None,
+	FastArm64AggregateReturn_Integer,
+	FastArm64AggregateReturn_Float,
+};
+
+struct FastArm64ArgAssignment {
+	FastArm64ArgStorageKind storage;
+	i32 index;
+};
+
+struct FastArm64ArgState {
+	i32 next_reg;
+	i32 next_stack;
+	bool stack_only;
+};
+
+struct FastArm64AggregateReturnClass {
+	FastArm64AggregateReturnKind kind;
+	i32 slot_count;
+	i32 float_bit_size;
+};
+
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out);
 gb_internal i32 fast_backend_slot_offset(FastLeafProcPlan *plan, FastLocalSlot const &slot);
 gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce);
@@ -124,6 +152,7 @@ gb_internal bool fast_backend_find_expr_slot(FastLeafProcPlan *plan, Ast *expr, 
 gb_internal bool fast_backend_add_expr_slot(FastLeafProcPlan *plan, Ast *expr, Type *type, FastLocalSlot *out);
 gb_internal FastScalarType fast_backend_context_scalar_type(void);
 gb_internal i32 fast_backend_abi_arg_count(Type *t);
+gb_internal FastArm64AggregateReturnClass fast_backend_arm64_classify_aggregate_return(Type *type);
 gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt);
 gb_internal bool fast_backend_expr_scalar_type(Ast *expr, Type *expected_type, FastScalarType *out);
 gb_internal bool fast_backend_can_emit_address_expr(FastLeafProcPlan *plan, Ast *expr, Type **type_, FastScalarType *scalar_type_, bool *is_scalar_);
@@ -203,6 +232,8 @@ gb_internal bool fast_backend_emit_pack_variadic_slice_arg(FastLeafProcEmitter *
 gb_internal void fast_backend_emit_arm64_load_from_address(gbFile *file, char const *addr, char const *dst, FastScalarType type);
 gb_internal void fast_backend_emit_arm64_store_to_address(gbFile *file, char const *addr, char const *src, FastScalarType type);
 gb_internal void fast_backend_emit_arm64_add_offset(gbFile *file, char const *dst, char const *base, i32 offset);
+gb_internal void fast_backend_emit_arm64_store_direct_aggregate_return_to_address(gbFile *file, char const *dst, FastArm64AggregateReturnClass result_class, i32 size);
+gb_internal void fast_backend_emit_arm64_load_direct_aggregate_return_from_address(gbFile *file, char const *src, FastArm64AggregateReturnClass result_class, i32 size);
 gb_internal void fast_backend_make_label_name(char *buffer, isize buffer_size, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
 gb_internal void fast_backend_emit_jump_to_label(gbFile *file, FastLeafProcPlan *plan, i32 label_index);
@@ -1582,7 +1613,7 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 			if (!fast_backend_type_is_supported_aggregate(result_entity->type)) {
 				return false;
 			}
-			return_by_pointer = true;
+			return_by_pointer = fast_backend_arm64_classify_aggregate_return(result_entity->type).kind == FastArm64AggregateReturn_None;
 		}
 		has_result = true;
 	}
@@ -1624,7 +1655,8 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 	}
 	total_param_count += (pt->calling_convention == ProcCC_Odin ? 1 : 0);
 	total_param_count += (return_by_pointer ? 1 : 0);
-	if (total_param_count > fast_backend_param_limit_from_proc_type(pt)) {
+	if (build_context.metrics.arch != TargetArch_arm64 &&
+	    total_param_count > fast_backend_param_limit_from_proc_type(pt)) {
 		return false;
 	}
 	if (pt->calling_convention == ProcCC_Odin && !plan->has_context_slot) {
@@ -1701,8 +1733,8 @@ gb_internal bool fast_backend_can_emit_aggregate_call_expr(FastLeafProcPlan *pla
 	gb_unused(scalar_result_type);
 
 	return has_result &&
-	       return_by_pointer &&
 	       result_type != nullptr &&
+	       (return_by_pointer || fast_backend_arm64_classify_aggregate_return(result_type).kind != FastArm64AggregateReturn_None) &&
 	       are_types_identical(default_type(result_type), default_type(expected_type)) &&
 	       fast_backend_can_emit_call_expr(plan, &expr->CallExpr, false);
 }
@@ -1722,7 +1754,12 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 	gb_unused(scalar_result_type);
 	gb_unused(has_result);
 
-	i32 leading_slots = return_by_pointer ? 1 : 0;
+	i32 leading_slots = 0;
+	if (return_by_pointer) {
+		leading_slots = 1;
+	} else if (fast_backend_arm64_classify_aggregate_return(result_type).kind != FastArm64AggregateReturn_None) {
+		leading_slots = 1;
+	}
 	i32 abi_offset = leading_slots;
 	if (have_call_info && pt != nullptr && pt->params != nullptr && pt->params->kind == Type_Tuple) {
 		for (i32 i = 0; i < pt->param_count; i++) {
@@ -3479,7 +3516,9 @@ gb_internal bool fast_backend_plan_return_stmt(FastGenerator *gen, FastLeafProcP
 
 	Ast *result = rs->results[0];
 	Type *result_type = reduce_tuple_to_single_type(plan->type->results);
-	if (!plan->return_by_pointer) {
+	bool return_direct_aggregate = !plan->return_by_pointer &&
+	                               fast_backend_arm64_classify_aggregate_return(result_type).kind != FastArm64AggregateReturn_None;
+	if (!plan->return_by_pointer && !return_direct_aggregate) {
 		if (!fast_backend_can_emit_leaf_expr(plan, result, result_type)) {
 			error(result, "Fast backend does not yet support this return expression");
 			return false;
@@ -3938,12 +3977,14 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 				error(result_entity->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array result types");
 				return false;
 			}
-			if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
-				return false;
-			}
-			plan->return_by_pointer = true;
 			plan->result_value_type = result_entity->type;
-			plan->result_ptr_slot = plan->slots[plan->slots.count-1];
+			if (fast_backend_arm64_classify_aggregate_return(result_entity->type).kind == FastArm64AggregateReturn_None) {
+				if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
+					return false;
+				}
+				plan->return_by_pointer = true;
+				plan->result_ptr_slot = plan->slots[plan->slots.count-1];
+			}
 		}
 		plan->has_result = true;
 	}
@@ -3955,6 +3996,16 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	plan->has_calls = fast_backend_stmt_has_call(plan->body);
 	if (plan->has_defer && plan->has_result && !plan->return_by_pointer) {
 		plan->spill_depth = gb_max(plan->spill_depth, 1);
+	}
+	if (plan->result_value_type != nullptr && !plan->return_by_pointer) {
+		FastArm64AggregateReturnClass result_class = fast_backend_arm64_classify_aggregate_return(plan->result_value_type);
+		if (result_class.kind != FastArm64AggregateReturn_None) {
+			// Direct aggregate returns keep a stack temp address live while
+			// nested aggregate store helpers use the normal spill stack.
+			// Be conservative here so those helper spills never overlap the
+			// procedure's local slots.
+			plan->spill_depth = gb_max(plan->spill_depth, 8);
+		}
 	}
 	return true;
 }
@@ -4211,6 +4262,170 @@ gb_internal i32 fast_backend_param_limit_from_proc_type(TypeProc *pt) {
 
 gb_internal i32 fast_backend_param_limit(FastLeafProcPlan *plan) {
 	return fast_backend_param_limit_from_proc_type(plan->type);
+}
+
+gb_internal bool fast_backend_arm64_classify_hfa(Type *type, FastArm64AggregateReturnClass *out) {
+	type = default_type(type);
+	if (type == nullptr || out == nullptr) {
+		return false;
+	}
+
+	FastScalarType scalar = {};
+	if (fast_backend_classify_scalar_type(type, &scalar)) {
+		if (scalar.kind != FastScalar_Float || (scalar.bit_size != 32 && scalar.bit_size != 64)) {
+			return false;
+		}
+		if (out->slot_count == 0) {
+			out->kind = FastArm64AggregateReturn_Float;
+			out->float_bit_size = cast(i32)scalar.bit_size;
+		}
+		if (out->kind != FastArm64AggregateReturn_Float ||
+		    out->float_bit_size != scalar.bit_size ||
+		    out->slot_count >= 4) {
+			return false;
+		}
+		out->slot_count += 1;
+		return true;
+	}
+
+	Type *base = base_type(type);
+	if (base == nullptr) {
+		return false;
+	}
+
+	switch (base->kind) {
+	case Type_Array:
+		if (base->Array.count <= 0 || base->Array.count > 4) {
+			return false;
+		}
+		for (i64 i = 0; i < base->Array.count; i++) {
+			if (!fast_backend_arm64_classify_hfa(base->Array.elem, out)) {
+				return false;
+			}
+		}
+		return true;
+
+	case Type_Matrix: {
+		i64 count = base->Matrix.row_count * base->Matrix.column_count;
+		if (count <= 0 || count > 4) {
+			return false;
+		}
+		for (i64 i = 0; i < count; i++) {
+			if (!fast_backend_arm64_classify_hfa(base->Matrix.elem, out)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	case Type_Struct:
+		if (base->Struct.fields.count == 0) {
+			return false;
+		}
+		for_array(i, base->Struct.fields) {
+			Entity *field = base->Struct.fields[i];
+			if (field == nullptr || field->kind != Entity_Variable) {
+				return false;
+			}
+			if (!fast_backend_arm64_classify_hfa(field->type, out)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	return false;
+}
+
+gb_internal FastArm64AggregateReturnClass fast_backend_arm64_classify_aggregate_return(Type *type) {
+	FastArm64AggregateReturnClass result = {};
+	if (build_context.metrics.arch != TargetArch_arm64 || type == nullptr || !fast_backend_type_is_supported_aggregate(type)) {
+		return result;
+	}
+
+	type = default_type(type);
+	if (type == nullptr) {
+		return result;
+	}
+
+	i64 size = type_size_of(type);
+	if (size <= 0 || size > 16) {
+		return result;
+	}
+
+	FastArm64AggregateReturnClass hfa = {};
+	if (fast_backend_arm64_classify_hfa(type, &hfa) && hfa.slot_count > 0) {
+		return hfa;
+	}
+
+	result.kind = FastArm64AggregateReturn_Integer;
+	result.slot_count = cast(i32)align_formula(size, 8)/8;
+	return result;
+}
+
+gb_internal void fast_backend_arm64_assign_arg_slots(FastArm64ArgState *state, i32 abi_args, FastArm64ArgAssignment *slots) {
+	GB_ASSERT(state != nullptr);
+	GB_ASSERT(abi_args == 1 || abi_args == 2);
+	GB_ASSERT(slots != nullptr);
+
+	if (abi_args == 1) {
+		if (!state->stack_only && state->next_reg < 8) {
+			slots[0] = {FastArm64ArgStorage_Register, state->next_reg};
+			state->next_reg += 1;
+		} else {
+			state->stack_only = true;
+			slots[0] = {FastArm64ArgStorage_Stack, state->next_stack};
+			state->next_stack += 1;
+		}
+		return;
+	}
+
+	if (!state->stack_only) {
+		if (state->next_reg <= 6) {
+			slots[0] = {FastArm64ArgStorage_Register, state->next_reg + 0};
+			slots[1] = {FastArm64ArgStorage_Register, state->next_reg + 1};
+			state->next_reg += 2;
+			return;
+		}
+		if (state->next_reg == 7) {
+			slots[0] = {FastArm64ArgStorage_Register, 7};
+			slots[1] = {FastArm64ArgStorage_Stack, state->next_stack};
+			state->next_reg = 8;
+			state->next_stack += 1;
+			state->stack_only = true;
+			return;
+		}
+	}
+
+	state->stack_only = true;
+	slots[0] = {FastArm64ArgStorage_Stack, state->next_stack + 0};
+	slots[1] = {FastArm64ArgStorage_Stack, state->next_stack + 1};
+	state->next_stack += 2;
+}
+
+gb_internal i32 fast_backend_arm64_stack_arg_count(TypeProc *pt, bool return_by_pointer, bool has_context_arg) {
+	if (pt == nullptr) {
+		return 0;
+	}
+
+	FastArm64ArgState state = {};
+	if (return_by_pointer) {
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&state, 1, slots);
+	}
+	for (i32 i = 0; i < pt->param_count; i++) {
+		Entity *param = pt->params->Tuple.variables[i];
+		if (param == nullptr || param->kind != Entity_Variable) {
+			return 0;
+		}
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&state, fast_backend_abi_arg_count(param->type), slots);
+	}
+	if (has_context_arg) {
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&state, 1, slots);
+	}
+	return state.next_stack;
 }
 
 gb_internal bool fast_backend_find_slot(FastLeafProcPlan *plan, Entity *entity, FastLocalSlot *out) {
@@ -5008,6 +5223,41 @@ gb_internal void fast_backend_emit_arm64_add_offset(gbFile *file, char const *ds
 	gb_fprintf(file, "\t%s %s, %s, %s\n", offset > 0 ? "add" : "sub", dst, base, fast_backend_arm64_div_tmp_reg());
 }
 
+gb_internal void fast_backend_emit_arm64_store_call_stack_arg(gbFile *file, i32 stack_index, char const *src) {
+	fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), "sp", 8*stack_index);
+	gb_fprintf(file, "\tstr %s, [%s]\n", src, fast_backend_arm64_addr_tmp_reg());
+}
+
+gb_internal void fast_backend_emit_arm64_store_u64_to_frame_offset(gbFile *file, i32 offset, char const *src) {
+	if (offset <= 255) {
+		gb_fprintf(file, "\tstr %s, [x29, #-%d]\n", src, offset);
+		return;
+	}
+	fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), "x29", -offset);
+	gb_fprintf(file, "\tstr %s, [%s]\n", src, fast_backend_arm64_addr_tmp_reg());
+}
+
+gb_internal void fast_backend_emit_arm64_load_incoming_stack_arg(gbFile *file, i32 stack_index, char const *dst) {
+	fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), "x29", 16 + 8*stack_index);
+	gb_fprintf(file, "\tldr %s, [%s]\n", dst, fast_backend_arm64_addr_tmp_reg());
+}
+
+gb_internal bool fast_backend_emit_arm64_load_assigned_arg(gbFile *file, FastArm64ArgAssignment assignment, char const *dst) {
+	if (assignment.storage == FastArm64ArgStorage_Register) {
+		char const *src = fast_backend_arm64_param_reg(assignment.index);
+		if (src == nullptr) {
+			return false;
+		}
+		if (src != dst) {
+			gb_fprintf(file, "\tmov %s, %s\n", dst, src);
+		}
+		return true;
+	}
+
+	fast_backend_emit_arm64_load_incoming_stack_arg(file, assignment.index, dst);
+	return true;
+}
+
 gb_internal void fast_backend_emit_add_imm_to_work_reg(FastLeafProcEmitter *emitter, i64 offset) {
 	if (offset == 0) {
 		return;
@@ -5277,6 +5527,97 @@ gb_internal void fast_backend_emit_arm64_move_fp_bits_to_scalar(gbFile *file, ch
 		gb_fprintf(file, "\tfmov w%s, %s\n", dst+1, fp_reg);
 	} else {
 		gb_fprintf(file, "\tfmov %s, %s\n", dst, fp_reg);
+	}
+}
+
+gb_internal char const *fast_backend_arm64_float_return_reg(i32 index, i32 bit_size) {
+	static char const *float_regs_32[] = {"s0", "s1", "s2", "s3"};
+	static char const *float_regs_64[] = {"d0", "d1", "d2", "d3"};
+	char const **regs = bit_size == 32 ? float_regs_32 : float_regs_64;
+	return index < 4 ? regs[index] : nullptr;
+}
+
+gb_internal void fast_backend_emit_arm64_store_direct_aggregate_return_to_address(gbFile *file, char const *dst, FastArm64AggregateReturnClass result_class, i32 size) {
+	GB_ASSERT(file != nullptr);
+	GB_ASSERT(dst != nullptr);
+	GB_ASSERT(size > 0);
+
+	if (result_class.kind == FastArm64AggregateReturn_Float) {
+		FastScalarType type = {FastScalar_Float, result_class.float_bit_size};
+		for (i32 i = 0; i < result_class.slot_count; i++) {
+			char const *fp_reg = fast_backend_arm64_float_return_reg(i, result_class.float_bit_size);
+			GB_ASSERT(fp_reg != nullptr);
+			fast_backend_emit_arm64_move_fp_bits_to_scalar(file, fast_backend_arm64_work_reg(), fp_reg, type);
+			fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), dst, i * fast_backend_scalar_byte_size(type));
+			fast_backend_emit_arm64_store_to_address(file, fast_backend_arm64_addr_tmp_reg(), fast_backend_arm64_work_reg(), type);
+		}
+		return;
+	}
+
+	i32 remaining = size;
+	i32 offset = 0;
+	for (i32 i = 0; i < result_class.slot_count && remaining > 0; i++) {
+		char const *src = fast_backend_arm64_param_reg(i);
+		i32 word_bytes = gb_min(remaining, 8);
+		i32 chunk_offset = 0;
+		gb_fprintf(file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
+		while (chunk_offset < word_bytes) {
+			i32 chunk_remaining = word_bytes - chunk_offset;
+			i32 chunk = chunk_remaining >= 8 ? 8 : chunk_remaining >= 4 ? 4 : chunk_remaining >= 2 ? 2 : 1;
+			FastScalarType type = {FastScalar_Unsigned, 8 * chunk};
+			fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), dst, offset + chunk_offset);
+			fast_backend_emit_arm64_store_to_address(file, fast_backend_arm64_addr_tmp_reg(), fast_backend_arm64_work_reg(), type);
+			chunk_offset += chunk;
+			if (chunk_offset < word_bytes) {
+				gb_fprintf(file, "\tlsr %s, %s, #%d\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), 8 * chunk);
+			}
+		}
+		offset += word_bytes;
+		remaining -= word_bytes;
+	}
+}
+
+gb_internal void fast_backend_emit_arm64_load_direct_aggregate_return_from_address(gbFile *file, char const *src, FastArm64AggregateReturnClass result_class, i32 size) {
+	GB_ASSERT(file != nullptr);
+	GB_ASSERT(src != nullptr);
+	GB_ASSERT(size > 0);
+
+	if (result_class.kind == FastArm64AggregateReturn_Float) {
+		FastScalarType type = {FastScalar_Float, result_class.float_bit_size};
+		for (i32 i = 0; i < result_class.slot_count; i++) {
+			char const *fp_reg = fast_backend_arm64_float_return_reg(i, result_class.float_bit_size);
+			GB_ASSERT(fp_reg != nullptr);
+			fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), src, i * fast_backend_scalar_byte_size(type));
+			fast_backend_emit_arm64_load_from_address(file, fast_backend_arm64_addr_tmp_reg(), fast_backend_arm64_work_reg(), type);
+			fast_backend_emit_arm64_move_scalar_bits_to_fp(file, fp_reg, fast_backend_arm64_work_reg(), type);
+		}
+		return;
+	}
+
+	i32 remaining = size;
+	i32 offset = 0;
+	for (i32 i = 0; i < result_class.slot_count && remaining > 0; i++) {
+		char const *dst = fast_backend_arm64_param_reg(i);
+		i32 word_bytes = gb_min(remaining, 8);
+		i32 chunk_offset = 0;
+		i32 shift = 0;
+		gb_fprintf(file, "\tmov %s, xzr\n", dst);
+		while (chunk_offset < word_bytes) {
+			i32 chunk_remaining = word_bytes - chunk_offset;
+			i32 chunk = chunk_remaining >= 8 ? 8 : chunk_remaining >= 4 ? 4 : chunk_remaining >= 2 ? 2 : 1;
+			FastScalarType type = {FastScalar_Unsigned, 8 * chunk};
+			fast_backend_emit_arm64_add_offset(file, fast_backend_arm64_addr_tmp_reg(), src, offset + chunk_offset);
+			fast_backend_emit_arm64_load_from_address(file, fast_backend_arm64_addr_tmp_reg(), fast_backend_arm64_work_reg(), type);
+			if (shift == 0) {
+				gb_fprintf(file, "\tmov %s, %s\n", dst, fast_backend_arm64_work_reg());
+			} else {
+				gb_fprintf(file, "\torr %s, %s, %s, lsl #%d\n", dst, dst, fast_backend_arm64_work_reg(), shift);
+			}
+			chunk_offset += chunk;
+			shift += 8 * chunk;
+		}
+		offset += word_bytes;
+		remaining -= word_bytes;
 	}
 }
 
@@ -6314,12 +6655,20 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 	if (!fast_backend_get_call_info(ce, &pt, &proc_entity, &result_type, &scalar_result_type, &has_result, &return_by_pointer)) {
 		return false;
 	}
-	if (return_by_pointer != has_explicit_result_address) {
+	FastArm64AggregateReturnClass direct_result_class = fast_backend_arm64_classify_aggregate_return(result_type);
+	bool direct_aggregate_result = direct_result_class.kind != FastArm64AggregateReturn_None;
+	if (has_explicit_result_address) {
+		if (!return_by_pointer && !direct_aggregate_result) {
+			return false;
+		}
+	} else if (return_by_pointer || direct_aggregate_result) {
 		return false;
 	}
 
 	i32 temp_bytes = 0;
 	if (return_by_pointer) {
+		fast_backend_emit_push_work_reg(emitter);
+	} else if (direct_aggregate_result) {
 		fast_backend_emit_push_work_reg(emitter);
 	}
 
@@ -6412,6 +6761,41 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 	if (return_by_pointer) {
 		total_arg_count += 1;
 	}
+	Array<FastArm64ArgAssignment> arm64_arg_slots = {};
+	i32 arm64_stack_arg_bytes = 0;
+	if (build_context.metrics.arch == TargetArch_arm64) {
+		arm64_arg_slots = array_make<FastArm64ArgAssignment>(temporary_allocator(), 0, total_arg_count);
+
+		FastArm64ArgState arm64_arg_state = {};
+		if (return_by_pointer) {
+			FastArm64ArgAssignment slots[2] = {};
+			fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+			array_add(&arm64_arg_slots, slots[0]);
+		}
+		for (i32 i = 0; i < pt->param_count; i++) {
+			Entity *p = pt->params->Tuple.variables[i];
+			if (p == nullptr || p->kind != Entity_Variable) {
+				return false;
+			}
+			i32 abi_args = fast_backend_abi_arg_count(p->type);
+			FastArm64ArgAssignment slots[2] = {};
+			fast_backend_arm64_assign_arg_slots(&arm64_arg_state, abi_args, slots);
+			for (i32 j = 0; j < abi_args; j++) {
+				array_add(&arm64_arg_slots, slots[j]);
+			}
+		}
+		if (pt->calling_convention == ProcCC_Odin) {
+			FastArm64ArgAssignment slots[2] = {};
+			fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+			array_add(&arm64_arg_slots, slots[0]);
+		}
+
+		GB_ASSERT(cast(i32)arm64_arg_slots.count == total_arg_count);
+		arm64_stack_arg_bytes = align_formula(8 * arm64_arg_state.next_stack, 16);
+		if (arm64_stack_arg_bytes != 0) {
+			fast_backend_emit_stack_adjust(emitter, arm64_stack_arg_bytes, true);
+		}
+	}
 	for (i32 i = total_arg_count-1; i >= 0; i--) {
 		fast_backend_emit_pop_tmp_reg(emitter);
 		if (build_context.metrics.arch == TargetArch_amd64) {
@@ -6421,11 +6805,16 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 			}
 			gb_fprintf(emitter->file, "\tmov %s, %s\n", dst->r64, fast_backend_x64_tmp_reg()->r64);
 		} else {
-			char const *dst = fast_backend_arm64_param_reg(i);
-			if (dst == nullptr) {
-				return false;
+			FastArm64ArgAssignment assignment = arm64_arg_slots[i];
+			if (assignment.storage == FastArm64ArgStorage_Stack) {
+				fast_backend_emit_arm64_store_call_stack_arg(emitter->file, assignment.index, fast_backend_arm64_tmp_reg());
+			} else {
+				char const *dst = fast_backend_arm64_param_reg(assignment.index);
+				if (dst == nullptr) {
+					return false;
+				}
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", dst, fast_backend_arm64_tmp_reg());
 			}
-			gb_fprintf(emitter->file, "\tmov %s, %s\n", dst, fast_backend_arm64_tmp_reg());
 		}
 	}
 
@@ -6445,9 +6834,15 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		}
 	} else {
 		gb_fprintf(emitter->file, "\tbl \"%.*s\"\n", LIT(symbol));
-		if (has_result && !return_by_pointer) {
+		if (direct_aggregate_result) {
+			fast_backend_emit_pop_tmp_reg(emitter);
+			fast_backend_emit_arm64_store_direct_aggregate_return_to_address(emitter->file, fast_backend_arm64_tmp_reg(), direct_result_class, cast(i32)type_size_of(result_type));
+		} else if (has_result && !return_by_pointer) {
 			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_return_reg());
 			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), scalar_result_type);
+		}
+		if (arm64_stack_arg_bytes != 0) {
+			fast_backend_emit_stack_adjust(emitter, arm64_stack_arg_bytes, false);
 		}
 	}
 
@@ -9904,7 +10299,10 @@ gb_internal bool fast_backend_emit_defer_stmt(FastLeafProcEmitter *emitter, AstD
 }
 
 gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, AstReturnStmt *rs) {
-	if (!emitter->plan->return_by_pointer) {
+	FastArm64AggregateReturnClass direct_result_class = fast_backend_arm64_classify_aggregate_return(emitter->plan->result_value_type);
+	bool return_direct_aggregate = !emitter->plan->return_by_pointer &&
+	                               direct_result_class.kind != FastArm64AggregateReturn_None;
+	if (!emitter->plan->return_by_pointer && !return_direct_aggregate) {
 		bool preserve_result = rs->results.count != 0 && emitter->deferred_stmts.count != 0;
 		isize deferred_count = emitter->deferred_stmts.count;
 		if (rs->results.count != 0) {
@@ -9937,64 +10335,23 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		return true;
 	}
 
+	i32 direct_result_temp_bytes = 0;
+	i32 direct_result_addr_depth = 0;
 	if (rs->results.count != 0) {
 		Ast *result = rs->results[0];
-		if (build_context.metrics.arch == TargetArch_amd64) {
+		if (return_direct_aggregate) {
+			if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(emitter->plan->result_value_type), cast(i32)type_align_of(emitter->plan->result_value_type), &direct_result_temp_bytes)) {
+				return false;
+			}
+			fast_backend_emit_push_work_reg(emitter);
+			direct_result_addr_depth = emitter->current_spill_depth;
+		} else if (build_context.metrics.arch == TargetArch_amd64) {
 			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_x64_work_reg());
 		} else {
 			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
 		}
-		if (fast_backend_expr_is_zero_aggregate_value(emitter->plan->result_value_type, result)) {
-			fast_backend_emit_zero_bytes_at_work_address(emitter, cast(i32)type_size_of(emitter->plan->result_value_type));
-		} else if (is_type_any(default_type(emitter->plan->result_value_type)) &&
-		           fast_backend_emit_store_any_expr_to_work_address(emitter, result)) {
-			// Stored by helper above.
-		} else if (is_type_union(default_type(emitter->plan->result_value_type)) &&
-		           fast_backend_emit_store_union_expr_to_work_address(emitter, emitter->plan->result_value_type, result)) {
-			// Stored by helper above.
-		} else if (fast_backend_can_emit_aggregate_call_expr(emitter->plan, result, emitter->plan->result_value_type)) {
-			if (!fast_backend_emit_call_expr_to_address(emitter, &unparen_expr(result)->CallExpr)) {
-				return false;
-			}
-		} else if (fast_backend_can_emit_array_binary_expr(emitter->plan, result, emitter->plan->result_value_type)) {
-			if (!fast_backend_emit_store_array_binary_expr_to_work_address(emitter, emitter->plan->result_value_type, result)) {
-				return false;
-			}
-		} else if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, result, emitter->plan->result_value_type)) {
-			if (!fast_backend_emit_store_scalar_compound_lit_to_result_pointer(emitter, emitter->plan->result_value_type, &unparen_expr(result)->CompoundLit)) {
-				return false;
-			}
-		} else if (fast_backend_can_emit_slice_compound_lit_expr(emitter->plan, result, emitter->plan->result_value_type)) {
-			if (!fast_backend_emit_store_slice_compound_lit_to_work_address(emitter, emitter->plan->result_value_type, result)) {
-				return false;
-			}
-		} else if (unparen_expr(result)->kind == Ast_SliceExpr && fast_backend_can_emit_slice_expr(emitter->plan, &unparen_expr(result)->SliceExpr, emitter->plan->result_value_type)) {
-			if (!fast_backend_emit_store_slice_expr_to_address(emitter, emitter->plan->result_value_type, &unparen_expr(result)->SliceExpr)) {
-				return false;
-			}
-		} else {
-			Type *src_type = nullptr;
-			bool src_is_scalar = false;
-			if (fast_backend_can_emit_address_expr(emitter->plan, result, &src_type, nullptr, &src_is_scalar) &&
-			    !src_is_scalar &&
-			    src_type != nullptr &&
-			    are_types_identical(default_type(src_type), default_type(emitter->plan->result_value_type))) {
-				fast_backend_emit_push_work_reg(emitter);
-				if (!fast_backend_emit_address_expr(emitter, result, nullptr)) {
-					return false;
-				}
-				fast_backend_emit_pop_tmp_reg(emitter);
-				if (build_context.metrics.arch == TargetArch_amd64) {
-					gb_fprintf(emitter->file, "\txchg %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_tmp_reg()->r64);
-				} else {
-					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_addr_tmp_reg(), fast_backend_arm64_work_reg());
-					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_tmp_reg());
-					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_tmp_reg(), fast_backend_arm64_addr_tmp_reg());
-				}
-				fast_backend_emit_copy_bytes_between_addresses(emitter, cast(i32)type_size_of(emitter->plan->result_value_type));
-			} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, emitter->plan->result_value_type, result)) {
-				return false;
-			}
+		if (!fast_backend_emit_store_value_to_work_address(emitter, emitter->plan->result_value_type, result)) {
+			return false;
 		}
 	}
 
@@ -10003,6 +10360,12 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		return false;
 	}
 	emitter->deferred_stmts.count = deferred_count;
+	if (return_direct_aggregate) {
+		GB_ASSERT(direct_result_addr_depth > 0);
+		fast_backend_emit_load_tmp_from_spill_depth(emitter, direct_result_addr_depth);
+		fast_backend_emit_arm64_load_direct_aggregate_return_from_address(emitter->file, fast_backend_arm64_tmp_reg(), direct_result_class, cast(i32)type_size_of(emitter->plan->result_value_type));
+		fast_backend_emit_stack_adjust(emitter, direct_result_temp_bytes, false);
+	}
 	fast_backend_emit_jump_to_label(emitter->file, emitter->plan, emitter->epilogue_label_index);
 	return true;
 }
@@ -11680,38 +12043,29 @@ gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
 }
 
 gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
-	i32 param_offset = emitter->plan->return_by_pointer ? 1 : 0;
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		i32 param_offset = emitter->plan->return_by_pointer ? 1 : 0;
 
-	if (emitter->plan->return_by_pointer) {
-		if (build_context.metrics.arch == TargetArch_amd64) {
+		if (emitter->plan->return_by_pointer) {
 			auto *src = fast_backend_x64_param_reg(emitter->plan->type, 0);
 			if (src == nullptr) {
 				return false;
 			}
 			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src->r64);
 			fast_backend_emit_x64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_x64_work_reg());
-		} else {
-			char const *src = fast_backend_arm64_param_reg(0);
-			if (src == nullptr) {
+		}
+
+		i32 abi_index = param_offset;
+		for_array(i, emitter->plan->params) {
+			Entity *param = emitter->plan->params[i];
+			FastLocalSlot slot = {};
+			if (!fast_backend_find_slot(emitter->plan, param, &slot)) {
 				return false;
 			}
-			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
-			fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
-		}
-	}
 
-	i32 abi_index = param_offset;
-	for_array(i, emitter->plan->params) {
-		Entity *param = emitter->plan->params[i];
-		FastLocalSlot slot = {};
-		if (!fast_backend_find_slot(emitter->plan, param, &slot)) {
-			return false;
-		}
+			i32 abi_args = fast_backend_abi_arg_count(param->type);
+			bool is_split_aggregate = (abi_args == 2);
 
-		i32 abi_args = fast_backend_abi_arg_count(param->type);
-		bool is_split_aggregate = (abi_args == 2);
-
-		if (build_context.metrics.arch == TargetArch_amd64) {
 			if (is_split_aggregate) {
 				// data in xN, len in xN+1. Build {data, len} in slot.
 				auto *src0 = fast_backend_x64_param_reg(emitter->plan->type, abi_index);
@@ -11742,55 +12096,79 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 				}
 				fast_backend_emit_copy_bytes_between_addresses(emitter, slot.size);
 			}
-		} else {
-			if (is_split_aggregate) {
-				char const *src0 = fast_backend_arm64_param_reg(abi_index);
-				if (src0 == nullptr) return false;
-				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src0);
-				fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
-				char const *src1 = fast_backend_arm64_param_reg(abi_index + 1);
-				if (src1 == nullptr) return false;
-				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src1);
-				// See comment in the x64 branch above; the len field
-				// sits 8 bytes below the slot's high address.
-				i32 len_off = fast_backend_slot_offset(emitter->plan, slot) - 8;
-				gb_fprintf(emitter->file, "\tstr %s, [x29, #-%d]\n", fast_backend_arm64_work_reg(), len_off);
-			} else if (slot.is_scalar) {
-				char const *src = fast_backend_arm64_param_reg(abi_index);
-				if (src == nullptr) return false;
-				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
-				fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), slot.type);
-				fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
-			} else {
-				char const *src = fast_backend_arm64_param_reg(abi_index);
-				if (src == nullptr) return false;
-				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_tmp_reg(), src);
-				if (!fast_backend_emit_address_of_storage_entity(emitter, param)) {
-					return false;
-				}
-				fast_backend_emit_copy_bytes_between_addresses(emitter, slot.size);
-			}
+			abi_index += abi_args;
 		}
-		abi_index += abi_args;
-	}
 
-	if (emitter->plan->has_context_slot) {
-		i32 param_index = abi_index;
-		if (build_context.metrics.arch == TargetArch_amd64) {
+		if (emitter->plan->has_context_slot) {
+			i32 param_index = abi_index;
 			auto *src = fast_backend_x64_param_reg(emitter->plan->type, param_index);
 			if (src == nullptr) {
 				return false;
 			}
 			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, src->r64);
 			fast_backend_emit_x64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->context_slot, fast_backend_x64_work_reg());
-		} else {
-			char const *src = fast_backend_arm64_param_reg(param_index);
-			if (src == nullptr) {
+		}
+		return true;
+	}
+
+	FastArm64ArgState arm64_arg_state = {};
+	if (emitter->plan->return_by_pointer) {
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+		if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_work_reg())) {
+			return false;
+		}
+		fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
+	}
+
+	for_array(i, emitter->plan->params) {
+		Entity *param = emitter->plan->params[i];
+		FastLocalSlot slot = {};
+		if (!fast_backend_find_slot(emitter->plan, param, &slot)) {
+			return false;
+		}
+
+		i32 abi_args = fast_backend_abi_arg_count(param->type);
+		bool is_split_aggregate = (abi_args == 2);
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&arm64_arg_state, abi_args, slots);
+
+		if (is_split_aggregate) {
+			if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_work_reg())) {
 				return false;
 			}
-			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), src);
-			fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->context_slot, fast_backend_arm64_work_reg());
+			fast_backend_emit_arm64_store_u64_to_frame_offset(emitter->file, fast_backend_slot_offset(emitter->plan, slot), fast_backend_arm64_work_reg());
+			if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[1], fast_backend_arm64_work_reg())) {
+				return false;
+			}
+			// See comment in the x64 branch above; the len field
+			// sits 8 bytes below the slot's high address.
+			i32 len_off = fast_backend_slot_offset(emitter->plan, slot) - 8;
+			fast_backend_emit_arm64_store_u64_to_frame_offset(emitter->file, len_off, fast_backend_arm64_work_reg());
+		} else if (slot.is_scalar) {
+			if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_work_reg())) {
+				return false;
+			}
+			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), slot.type);
+			fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, slot, fast_backend_arm64_work_reg());
+		} else {
+			if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_tmp_reg())) {
+				return false;
+			}
+			if (!fast_backend_emit_address_of_storage_entity(emitter, param)) {
+				return false;
+			}
+			fast_backend_emit_copy_bytes_between_addresses(emitter, slot.size);
 		}
+	}
+
+	if (emitter->plan->has_context_slot) {
+		FastArm64ArgAssignment slots[2] = {};
+		fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+		if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_work_reg())) {
+			return false;
+		}
+		fast_backend_emit_arm64_store_reg_to_slot(emitter->file, emitter->plan, emitter->plan->context_slot, fast_backend_arm64_work_reg());
 	}
 	return true;
 }
@@ -11867,7 +12245,8 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;
-	if (build_context.metrics.arch == TargetArch_arm64 && plan->has_calls) {
+	if (build_context.metrics.arch == TargetArch_arm64 &&
+	    (plan->has_calls || fast_backend_arm64_stack_arg_count(plan->type, plan->return_by_pointer, plan->has_context_slot) > 0)) {
 		emitter.use_frame = true;
 	}
 
@@ -12079,7 +12458,8 @@ gb_internal bool fast_backend_write_object_assembly(FastGenerator *gen, Array<Fa
 		}
 		total_param_count += (proc_plan->has_context_slot ? 1 : 0);
 		total_param_count += (proc_plan->return_by_pointer ? 1 : 0);
-		if (total_param_count > fast_backend_param_limit(proc_plan)) {
+		if (build_context.metrics.arch != TargetArch_arm64 &&
+		    total_param_count > fast_backend_param_limit(proc_plan)) {
 			error(plan.entity->token, "Fast backend does not yet support this many parameters");
 			return false;
 		}
