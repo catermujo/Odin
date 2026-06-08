@@ -3716,10 +3716,6 @@ gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPl
 		error(rs->label, "Fast backend expected an identifier range label");
 		return false;
 	}
-	if (rs->reverse) {
-		error(rs->token, "Fast backend does not yet support #reverse range statements");
-		return false;
-	}
 	if (rs->init != nullptr && !fast_backend_plan_stmt(gen, plan, rs->init)) {
 		return false;
 	}
@@ -10649,40 +10645,92 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 		return false;
 	}
 
+	// `#reverse` is only valid for collection iteration (the compiler
+	// rejects it for binary range exprs like `0..<n`). For collections
+	// we walk the index down from `len-1` to 0 instead of from 0 to
+	// `len-1`.
+	//
+	// String/string16 reverse is not yet supported (their decode
+	// helpers are forward-only); handled in the string branch above.
+
+	// Override the top-of-function init for reverse: start idx at
+	// `len` so the first `idx -= 1` in the loop header lands on the
+	// last valid element. The shared `initial_idx = -1` was set before
+	// we knew whether we'd be iterating in reverse.
+	if (rs->reverse) {
+		if (expr_type->kind == Type_Array || expr_type->kind == Type_EnumeratedArray) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)elem_count);
+			} else {
+				fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)elem_count);
+			}
+		} else {
+			if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+				return false;
+			}
+			fast_backend_emit_add_imm_to_work_reg(emitter, build_context.int_size);
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+			}
+		}
+		fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+	}
+
 	fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
-		gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+		if (rs->reverse) {
+			gb_fprintf(emitter->file, "\tsub %s, 1\n", fast_backend_x64_work_reg()->r64);
+		} else {
+			gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+		}
 		fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
 	} else {
 		fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
-		gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+		if (rs->reverse) {
+			gb_fprintf(emitter->file, "\tsub %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+		} else {
+			gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+		}
 		fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
 	}
 	fast_backend_emit_store_work_to_slot(emitter, idx_slot);
 	fast_backend_emit_push_work_reg(emitter);
 
-	if (expr_type->kind == Type_Array || expr_type->kind == Type_EnumeratedArray) {
+	if (rs->reverse) {
+		// Compare against 0: jump to body if `idx >= 0`, else done.
 		if (build_context.metrics.arch == TargetArch_amd64) {
-			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)elem_count);
-			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+			fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), 0);
 		} else {
-			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)elem_count);
-			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), len_type);
+			fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), 0);
 		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_jump_if_compare(emitter, Token_GtEq, idx_type, body_label, done_label);
 	} else {
-		if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
-			return false;
-		}
-		fast_backend_emit_add_imm_to_work_reg(emitter, build_context.int_size);
-		if (build_context.metrics.arch == TargetArch_amd64) {
-			fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+		if (expr_type->kind == Type_Array || expr_type->kind == Type_EnumeratedArray) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_imm(emitter->file, fast_backend_x64_work_reg(), cast(u64)elem_count);
+				fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), len_type);
+			} else {
+				fast_backend_emit_arm64_load_imm(emitter->file, fast_backend_arm64_work_reg(), cast(u64)elem_count);
+				fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), len_type);
+			}
 		} else {
-			fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+			if (!fast_backend_emit_address_expr(emitter, expr, nullptr)) {
+				return false;
+			}
+			fast_backend_emit_add_imm_to_work_reg(emitter, build_context.int_size);
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), len_type);
+			} else {
+				fast_backend_emit_arm64_load_from_address(emitter->file, fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg(), len_type);
+			}
 		}
+		fast_backend_emit_pop_tmp_reg(emitter);
+		fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, body_label, done_label);
 	}
-	fast_backend_emit_pop_tmp_reg(emitter);
-	fast_backend_emit_jump_if_compare(emitter, Token_Lt, idx_type, body_label, done_label);
 
 	fast_backend_emit_label(emitter->file, emitter->plan, body_label);
 	if (val1_entity != nullptr) {
