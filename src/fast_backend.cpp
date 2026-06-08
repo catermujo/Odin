@@ -1720,6 +1720,7 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 	gb_unused(has_result);
 
 	i32 leading_slots = return_by_pointer ? 1 : 0;
+	i32 abi_offset = leading_slots;
 	if (have_call_info && pt != nullptr && pt->params != nullptr && pt->params->kind == Type_Tuple) {
 		for (i32 i = 0; i < pt->param_count; i++) {
 			Entity *param = pt->params->Tuple.variables[i];
@@ -1745,7 +1746,13 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 			} else {
 				arg_depth = fast_backend_call_arg_expr_spill_depth(nullptr, arg, param->type);
 			}
-			depth = gb_max(depth, leading_slots + i + arg_depth);
+			// abi_offset is the running ABI arg index for the call site,
+			// matching what emit_call_expr_internal uses to assign
+			// registers. The spill-depth needs to be at least the
+			// ABI index, since emit_call pushes one spill per ABI
+			// register-arg slot.
+			depth = gb_max(depth, abi_offset + arg_depth);
+			abi_offset += fast_backend_abi_arg_count(param->type);
 		}
 	} else {
 		for_array(i, ce->args) {
@@ -1755,7 +1762,13 @@ gb_internal i32 fast_backend_call_expr_spill_depth(AstCallExpr *ce) {
 
 	i32 total_arg_count = leading_slots;
 	if (have_call_info && pt != nullptr) {
-		total_arg_count += pt->param_count;
+		for (i32 i = 0; i < pt->param_count; i++) {
+			Entity *p = pt->params->Tuple.variables[i];
+			if (p == nullptr || p->kind != Entity_Variable) {
+				continue;
+			}
+			total_arg_count += fast_backend_abi_arg_count(p->type);
+		}
 	} else {
 		total_arg_count += cast(i32)ce->args.count;
 	}
@@ -6000,7 +6013,18 @@ gb_internal bool fast_backend_emit_materialize_aggregate_arg_pointer(FastLeafPro
 	    !src_is_scalar &&
 	    src_type != nullptr &&
 	    are_types_identical(default_type(src_type), default_type(param_type))) {
-		return fast_backend_emit_address_expr(emitter, arg, nullptr);
+		if (!fast_backend_emit_address_expr(emitter, arg, nullptr)) {
+			return false;
+		}
+		// Push the slot address so the caller's
+		// `push_slice_components_from_spill` can pop it. The other
+		// paths in this function (CallExpr / store helpers) all push
+		// the address they materialize; this path is the same.
+		if (is_type_string(param_type) || is_type_string16(param_type) ||
+		    is_type_slice(param_type) || is_type_dynamic_array(param_type)) {
+			fast_backend_emit_push_work_reg(emitter);
+		}
+		return true;
 	}
 
 	param_type = default_type(param_type);
