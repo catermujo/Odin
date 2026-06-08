@@ -354,6 +354,11 @@ gb_internal bool fast_backend_supported_calling_convention(ProcCallingConvention
 	case ProcCC_SysV:
 	case ProcCC_Win64:
 		return true;
+	case ProcCC_PreserveNone:
+	case ProcCC_PreserveMost:
+	case ProcCC_PreserveAll:
+		return build_context.metrics.arch == TargetArch_arm64 &&
+		       build_context.metrics.os == TargetOs_darwin;
 	}
 	return false;
 }
@@ -4198,15 +4203,42 @@ gb_internal FastX64RegNames const *fast_backend_x64_scratch_reg(void) {
 
 gb_internal ProcCallingConvention fast_backend_effective_calling_convention(TypeProc *pt) {
 	ProcCallingConvention cc = pt->calling_convention;
-	if (cc == ProcCC_CDecl) {
+	switch (cc) {
+	case ProcCC_CDecl:
+	case ProcCC_PreserveNone:
+	case ProcCC_PreserveMost:
+	case ProcCC_PreserveAll:
 		if (build_context.metrics.arch == TargetArch_amd64) {
 			if (build_context.metrics.os == TargetOs_windows || build_context.metrics.abi == TargetABI_Win64) {
 				return ProcCC_Win64;
 			}
 			return ProcCC_SysV;
 		}
+		if (build_context.metrics.arch == TargetArch_arm64) {
+			return ProcCC_CDecl;
+		}
+		break;
 	}
 	return cc;
+}
+
+gb_internal bool fast_backend_arm64_calling_convention_preserves_scratch(TypeProc *pt) {
+	if (pt == nullptr ||
+	    build_context.metrics.arch != TargetArch_arm64 ||
+	    build_context.metrics.os != TargetOs_darwin) {
+		return false;
+	}
+
+	switch (pt->calling_convention) {
+	case ProcCC_PreserveMost:
+	case ProcCC_PreserveAll:
+		return true;
+	}
+	return false;
+}
+
+gb_internal i32 fast_backend_arm64_preserved_scratch_save_bytes(TypeProc *pt) {
+	return fast_backend_arm64_calling_convention_preserves_scratch(pt) ? 32 : 0;
 }
 
 gb_internal FastX64RegNames const *fast_backend_x64_param_reg(TypeProc *pt, i32 index) {
@@ -12026,7 +12058,8 @@ gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
 	i32 slot_bytes = emitter->plan->local_stack_size;
-	i32 frame_size = align_formula(spill_bytes + slot_bytes, 16);
+	i32 extra_save_bytes = build_context.metrics.arch == TargetArch_arm64 ? fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type) : 0;
+	i32 frame_size = align_formula(spill_bytes + slot_bytes + extra_save_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		gb_fprintf(emitter->file, "\tpush rbp\n");
 		gb_fprintf(emitter->file, "\tmov rbp, rsp\n");
@@ -12038,6 +12071,10 @@ gb_internal void fast_backend_emit_leaf_prologue(FastLeafProcEmitter *emitter) {
 		gb_fprintf(emitter->file, "\tmov x29, sp\n");
 		if (frame_size > 0) {
 			gb_fprintf(emitter->file, "\tsub sp, sp, #%d\n", frame_size);
+		}
+		if (extra_save_bytes != 0) {
+			gb_fprintf(emitter->file, "\tstp x9, x10, [sp, #0]\n");
+			gb_fprintf(emitter->file, "\tstp x11, x12, [sp, #16]\n");
 		}
 	}
 }
@@ -12185,7 +12222,8 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 
 	i32 spill_bytes = 8 * emitter->plan->spill_depth;
 	i32 slot_bytes = emitter->plan->local_stack_size;
-	i32 frame_size = align_formula(spill_bytes + slot_bytes, 16);
+	i32 extra_save_bytes = build_context.metrics.arch == TargetArch_arm64 ? fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type) : 0;
+	i32 frame_size = align_formula(spill_bytes + slot_bytes + extra_save_bytes, 16);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		if (frame_size > 0) {
 			gb_fprintf(emitter->file, "\tadd rsp, %d\n", frame_size);
@@ -12193,6 +12231,10 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 		gb_fprintf(emitter->file, "\tpop rbp\n");
 		gb_fprintf(emitter->file, "\tret\n");
 	} else {
+		if (extra_save_bytes != 0) {
+			gb_fprintf(emitter->file, "\tldp x9, x10, [sp, #0]\n");
+			gb_fprintf(emitter->file, "\tldp x11, x12, [sp, #16]\n");
+		}
 		if (frame_size > 0) {
 			gb_fprintf(emitter->file, "\tadd sp, sp, #%d\n", frame_size);
 		}
@@ -12246,7 +12288,9 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;
 	if (build_context.metrics.arch == TargetArch_arm64 &&
-	    (plan->has_calls || fast_backend_arm64_stack_arg_count(plan->type, plan->return_by_pointer, plan->has_context_slot) > 0)) {
+	    (plan->has_calls ||
+	     fast_backend_arm64_stack_arg_count(plan->type, plan->return_by_pointer, plan->has_context_slot) > 0 ||
+	     fast_backend_arm64_preserved_scratch_save_bytes(plan->type) > 0)) {
 		emitter.use_frame = true;
 	}
 
