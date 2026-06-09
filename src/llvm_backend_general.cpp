@@ -2939,6 +2939,29 @@ gb_internal void lb_ensure_abi_function_type(lbModule *m, lbProcedure *p) {
 	GB_ASSERT(p->abi_function_type != nullptr);
 }
 
+// Invalidate the cached LLVM function type for a single `Type*` (Type_Proc)
+// so the next lookup regenerates it from the (possibly mutated) proc type.
+// This is needed when a non-LLVM backend (e.g. the fast-backend) chooses an
+// ABI for the proc and mutates `pt->Proc.return_by_pointer` after the cache
+// may have already been populated. The fast-backend is the only known caller.
+//
+// Only the function-type caches (function_type_map, func_raw_types) need to
+// be cleared: for a `Type_Proc`, the general `m->types` cache holds the bare
+// `*i8` pointer type, which is invariant under return_by_pointer.
+gb_internal void lb_invalidate_function_type_cache_for(lbModule *m, Type *type) {
+	if (m == nullptr || type == nullptr) {
+		return;
+	}
+	Type *bt = base_type(type);
+	if (bt == nullptr || bt->kind != Type_Proc) {
+		return;
+	}
+	mutex_lock(&m->func_raw_types_mutex);
+	map_remove(&m->function_type_map, (u64)(uintptr)bt);
+	map_remove(&m->func_raw_types,      (u64)(uintptr)bt);
+	mutex_unlock(&m->func_raw_types_mutex);
+}
+
 gb_internal void lb_add_entity(lbModule *m, Entity *e, lbValue val) {
 	if (e != nullptr) {
 		rw_mutex_lock(&m->values_mutex);

@@ -9,6 +9,13 @@ struct FastGenerator : LinkerData {
 	Checker *checker;
 	Array<FastLiteralBlob> literal_blobs;
 	Array<Entity *> emitted_entities;
+	// Type* (a Type_Proc) for every fast-emitted proc whose ABI the planner
+	// changed (currently: any proc whose result is a non-scalar aggregate,
+	// which the planner forces to return_by_pointer). The LLVM function-type
+	// cache is keyed on Type* and may already be populated by the time the
+	// planner mutates `pt->Proc.return_by_pointer`; the driver invalidates
+	// the cache for these procs after creating the extern lbModule.
+	Array<Type *> procs_needing_abi_cache_invalidation;
 };
 
 enum FastScalarKind {
@@ -101,6 +108,12 @@ struct FastLeafProcEmitter {
 	Array<FastDeferredStmt> deferred_stmts;
 	Array<FastScopeState> scope_stack;
 	i32 current_spill_depth;
+	// extra_scratch_bytes tracks bytes allocated by `fast_backend_emit_alloc_stack_temp`
+	// for materialize-into-real-stack-temp paths (e.g. SelectorExpr base is a non-addressable
+	// struct returned by a call). These bytes live BELOW the prologue frame and are restored
+	// in the epilogue before the preserved-scratch reload. See `fast_backend_emit_address_expr`
+	// Ast_SelectorExpr / Ast_IndexExpr materialize branches.
+	i32 extra_scratch_bytes;
 	i32 epilogue_label_index;
 	i32 next_label_index;
 	bool use_frame;
@@ -259,6 +272,7 @@ gb_internal bool fast_backend_emit_compare_scalar_at_offset(FastLeafProcEmitter 
 gb_internal bool fast_backend_emit_compare_aggregate_at_offset(FastLeafProcEmitter *emitter, i32 lhs_depth, i32 rhs_depth, i32 offset, Type *type, i32 mismatch_label);
 gb_internal i32 fast_backend_alloc_label(FastLeafProcEmitter *emitter);
 gb_internal void fast_backend_emit_address_of_spill_depth(FastLeafProcEmitter *emitter, i32 depth);
+gb_internal bool fast_backend_emit_alloc_stack_temp(FastLeafProcEmitter *emitter, i32 size, i32 align, i32 *alloc_bytes_);
 gb_internal void fast_backend_emit_push_work_reg(FastLeafProcEmitter *emitter);
 gb_internal void fast_backend_emit_pop_tmp_reg(FastLeafProcEmitter *emitter);
 gb_internal bool fast_backend_emit_leaf_direct_array_index_expr(FastLeafProcEmitter *emitter, Ast *expr);
@@ -358,6 +372,7 @@ gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	gen->checker = c;
 	gen->literal_blobs = array_make<FastLiteralBlob>(heap_allocator(), 0, 8);
 	gen->emitted_entities = array_make<Entity *>(heap_allocator(), 0, c->info.definitions.count);
+	gen->procs_needing_abi_cache_invalidation = array_make<Type *>(heap_allocator(), 0, c->info.definitions.count);
 	return true;
 }
 
@@ -1646,7 +1661,15 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 			if (!fast_backend_type_is_supported_aggregate(result_entity->type)) {
 				return false;
 			}
-			return_by_pointer = fast_backend_arm64_classify_aggregate_return(result_entity->type).kind == FastArm64AggregateReturn_None;
+			// The planner is the single source of truth for the proc's ABI:
+			// it forces `return_by_pointer = true` for every proc with a
+			// non-scalar aggregate result so the proc and the caller agree.
+			// (Without this, the arm64 classifier would mark a 16-byte
+			// struct as a direct-aggregate return-in-registers, the proc
+			// body would write through x0, and the caller's `x0,x1`-based
+			// consumption would clobber it.)
+			return_by_pointer = pt->return_by_pointer ||
+				fast_backend_arm64_classify_aggregate_return(result_entity->type).kind == FastArm64AggregateReturn_None;
 		}
 		has_result = true;
 	}
@@ -4025,13 +4048,35 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 				return false;
 			}
 			plan->result_value_type = result_entity->type;
-			if (fast_backend_arm64_classify_aggregate_return(result_entity->type).kind == FastArm64AggregateReturn_None) {
-				if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
-					return false;
-				}
-				plan->return_by_pointer = true;
-				plan->result_ptr_slot = plan->slots[plan->slots.count-1];
+			// Always use return_by_pointer for aggregate returns. This is the
+			// safe ABI choice: the proc writes the return value to a caller-
+			// provided result pointer (passed as a hidden first arg), so the
+			// LLVM-emitted caller — and any other caller — does not need to
+			// materialise the return into a stack slot that some later
+			// operation (e.g. a variadic-arg setup) might clobber. The proc
+			// type is updated below so the LLVM function type generation
+			// (which is based on the proc type) agrees with this emit.
+			//
+			// This holds whether the aggregate fits in registers (a "direct
+			// aggregate" in AAPCS64 terms, e.g. `struct {x, y: int}` which
+			// is 16 bytes) or only in memory. The direct-aggregate case is
+			// the one that broke: the LLVM-emitted caller materialised
+			// `Pair` into a stack slot, then the variadic-arg setup used that
+			// same slot as a scratch register and stomped `.y`. Forcing
+			// return_by_pointer makes the caller pass a hidden first arg
+			// and the proc writes through that, sidestepping the conflict.
+			if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
+				return false;
 			}
+			plan->return_by_pointer = true;
+			plan->result_ptr_slot = plan->slots[plan->slots.count-1];
+			pt->return_by_pointer = true;
+			// The LLVM function-type cache may already hold the direct-
+			// aggregate function type for this proc. The driver invalidates
+			// it once the extern lbModule is created. `type` is the
+			// `Type*` (Type_Proc) the cache is keyed on; do NOT pass `pt`
+			// (a `TypeProc*` with a different memory layout).
+			array_add(&gen->procs_needing_abi_cache_invalidation, type);
 		}
 		plan->has_result = true;
 	}
@@ -4044,16 +4089,10 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	if (plan->has_defer && plan->has_result && !plan->return_by_pointer) {
 		plan->spill_depth = gb_max(plan->spill_depth, 1);
 	}
-	if (plan->result_value_type != nullptr && !plan->return_by_pointer) {
-		FastArm64AggregateReturnClass result_class = fast_backend_arm64_classify_aggregate_return(plan->result_value_type);
-		if (result_class.kind != FastArm64AggregateReturn_None) {
-			// Direct aggregate returns keep a stack temp address live while
-			// nested aggregate store helpers use the normal spill stack.
-			// Be conservative here so those helper spills never overlap the
-			// procedure's local slots.
-			plan->spill_depth = gb_max(plan->spill_depth, 8);
-		}
-	}
+	// Note: the old "spill_depth bump for direct aggregate returns" block
+	// is no longer needed — we now always use return_by_pointer for
+	// aggregate returns (see the planning above), so the stack-temp
+	// collision the bump was working around cannot occur.
 	return true;
 }
 
@@ -6134,13 +6173,19 @@ gb_internal bool fast_backend_emit_leaf_direct_struct_selector_expr(FastLeafProc
 	gb_unused(container_type);
 	gb_unused(base_is_pointer);
 
-	i32 spill_base = emitter->current_spill_depth;
-	defer (emitter->current_spill_depth = spill_base);
-
-	i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-	emitter->current_spill_depth += temp_slots;
-	i32 temp_depth = emitter->current_spill_depth;
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	// Materialize the non-addressable base (call / compound-literal) into a
+	// REAL stack temp (`sub sp` below the frame) rather than a spill slot.
+	// Using a spill slot would defer-restore the depth so a future push/pop
+	// in the same expression could clobber the .y of the materialized
+	// aggregate (see llvm_vararg_clobber e case). The real temp lives below
+	// the frame in a region the spill region never writes to; we restore the
+	// bytes in the epilogue via `extra_scratch_bytes`. Sibling of the fix in
+	// `fast_backend_emit_address_expr` Ast_SelectorExpr branch.
+	i32 alloc_bytes = 0;
+	if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+		return false;
+	}
+	emitter->extra_scratch_bytes += alloc_bytes;
 	if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
 		if (!fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, base_value_type, &unparen_expr(expr->SelectorExpr.expr)->CompoundLit)) {
 			return false;
@@ -6155,7 +6200,14 @@ gb_internal bool fast_backend_emit_leaf_direct_struct_selector_expr(FastLeafProc
 		return false;
 	}
 
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	// The store may have clobbered work reg; re-derive the temp address from
+	// sp. sp is unchanged across the store helpers (no sub/add pair in them)
+	// and the alloc_stack_temp region is not used by callees.
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+	}
 	fast_backend_emit_add_imm_to_work_reg(emitter, cast(i32)offset);
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		fast_backend_emit_x64_load_from_address(emitter->file, fast_backend_x64_work_reg(), fast_backend_x64_work_reg(), scalar_type);
@@ -6186,13 +6238,16 @@ gb_internal bool fast_backend_emit_leaf_direct_array_index_expr(FastLeafProcEmit
 	gb_unused(base_is_pointer);
 	gb_unused(base_uses_data_pointer);
 
-	i32 spill_base = emitter->current_spill_depth;
-	defer (emitter->current_spill_depth = spill_base);
-
-	i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-	emitter->current_spill_depth += temp_slots;
-	i32 temp_depth = emitter->current_spill_depth;
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	// Real stack temp (not a spill slot). Sibling fix to the struct-selector
+	// case above and the Ast_IndexExpr materialise path in
+	// `fast_backend_emit_address_expr`. The push/pop below for the index
+	// expression operates on a slot above the materialised data; using a
+	// real temp makes the layout independent of spill-region activity.
+	i32 alloc_bytes = 0;
+	if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+		return false;
+	}
+	emitter->extra_scratch_bytes += alloc_bytes;
 	if (fast_backend_can_emit_array_binary_expr(emitter->plan, expr->IndexExpr.expr, base_value_type)) {
 		if (!fast_backend_emit_store_array_binary_expr_to_work_address(emitter, base_value_type, expr->IndexExpr.expr)) {
 			return false;
@@ -6211,7 +6266,12 @@ gb_internal bool fast_backend_emit_leaf_direct_array_index_expr(FastLeafProcEmit
 		return false;
 	}
 
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	// Re-derive work reg from sp (the store helpers clobbered it).
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+	}
 	fast_backend_emit_push_work_reg(emitter);
 	if (!fast_backend_emit_leaf_expr(emitter, expr->IndexExpr.index)) {
 		return false;
@@ -6250,13 +6310,15 @@ gb_internal bool fast_backend_emit_leaf_direct_slice_index_expr(FastLeafProcEmit
 	gb_unused(base_is_pointer);
 	gb_unused(base_uses_data_pointer);
 
-	i32 spill_base = emitter->current_spill_depth;
-	defer (emitter->current_spill_depth = spill_base);
-
-	i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-	emitter->current_spill_depth += temp_slots;
-	i32 temp_depth = emitter->current_spill_depth;
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+	// Real stack temp. Sibling fix to struct-selector and array-index above.
+	// The push/pop below for the index expression operates on a slot above
+	// the materialised data; using a real temp makes the layout independent
+	// of spill-region activity.
+	i32 alloc_bytes = 0;
+	if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+		return false;
+	}
+	emitter->extra_scratch_bytes += alloc_bytes;
 	if (base_expr->kind == Ast_SliceExpr) {
 		if (!fast_backend_emit_store_slice_expr_to_address(emitter, base_value_type, &base_expr->SliceExpr)) {
 			return false;
@@ -6274,7 +6336,13 @@ gb_internal bool fast_backend_emit_leaf_direct_slice_index_expr(FastLeafProcEmit
 	} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->IndexExpr.expr)) {
 		return false;
 	}
-	fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+
+	// Re-derive work reg from sp (the store helpers clobbered it).
+	if (build_context.metrics.arch == TargetArch_amd64) {
+		gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+	} else {
+		gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+	}
 
 	FastScalarType data_pointer_type = fast_backend_context_scalar_type();
 	if (build_context.metrics.arch == TargetArch_amd64) {
@@ -6434,12 +6502,18 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 		           base_type(default_type(type_of_expr(expr->SelectorExpr.expr)))->kind == Type_Struct &&
 		           !fast_backend_can_emit_address_expr(emitter->plan, expr->SelectorExpr.expr, nullptr, nullptr, nullptr)) {
 			Type *base_value_type = default_type(type_of_expr(expr->SelectorExpr.expr));
-			i32 spill_base = emitter->current_spill_depth;
-			defer (emitter->current_spill_depth = spill_base);
-			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-			emitter->current_spill_depth += temp_slots;
-			i32 temp_depth = emitter->current_spill_depth;
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			// Materialize the call/compound-literal into a REAL stack temp
+			// (alloc_stack_temp sub sp) rather than a spill slot. The spill-slot
+			// version deferred-restored the depth so the caller's push/pop in
+			// `fast_backend_emit_store_any_expr_to_work_address` would clobber
+			// the .y of the materialized struct (see llvm_vararg_clobber e case).
+			// The real stack temp is below the frame and untouched by the
+			// spill region; we restore the bytes in the epilogue.
+			i32 alloc_bytes = 0;
+			if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+				return false;
+			}
+			emitter->extra_scratch_bytes += alloc_bytes;
 			if (fast_backend_can_emit_scalar_compound_lit_expr(emitter->plan, expr->SelectorExpr.expr, base_value_type)) {
 				if (!fast_backend_emit_store_scalar_compound_lit_to_work_address(emitter, base_value_type, &unparen_expr(expr->SelectorExpr.expr)->CompoundLit)) {
 					return false;
@@ -6453,7 +6527,15 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->SelectorExpr.expr)) {
 				return false;
 			}
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			// The call may have clobbered work reg; re-derive the temp address
+			// from sp (which is unchanged across the call: stack-arg sub/add in
+			// call_expr_internal is balanced, and the alloc_stack_temp region
+			// is not used by the callee).
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+			} else {
+				gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+			}
 		} else if (!fast_backend_emit_address_expr(emitter, expr->SelectorExpr.expr, nullptr)) {
 			return false;
 		}
@@ -6480,10 +6562,14 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 		            base_type(default_type(type_of_expr(expr->IndexExpr.expr)))->kind == Type_Matrix) &&
 		           !fast_backend_can_emit_address_expr(emitter->plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
-			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-			emitter->current_spill_depth += temp_slots;
-			i32 temp_depth = emitter->current_spill_depth;
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			// Same rationale as the SelectorExpr branch above: real stack temp
+			// (not a spill slot) so the materialize survives the caller's
+			// push/pop in the any-store path.
+			i32 alloc_bytes = 0;
+			if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+				return false;
+			}
+			emitter->extra_scratch_bytes += alloc_bytes;
 			if (fast_backend_can_emit_array_binary_expr(emitter->plan, expr->IndexExpr.expr, base_value_type)) {
 				if (!fast_backend_emit_store_array_binary_expr_to_work_address(emitter, base_value_type, expr->IndexExpr.expr)) {
 					return false;
@@ -6501,17 +6587,22 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->IndexExpr.expr)) {
 				return false;
 			}
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+			} else {
+				gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+			}
 		} else if (base_uses_data_pointer && !fast_backend_can_emit_address_expr(emitter->plan, expr->IndexExpr.expr, nullptr, nullptr, nullptr)) {
 			Ast *base_expr = unparen_expr(expr->IndexExpr.expr);
 			Type *base_value_type = default_type(type_of_expr(expr->IndexExpr.expr));
 			if (base_expr == nullptr || base_value_type == nullptr) {
 				return false;
 			}
-			i32 temp_slots = align_formula(cast(i32)type_size_of(base_value_type), 8)/8;
-			emitter->current_spill_depth += temp_slots;
-			i32 temp_depth = emitter->current_spill_depth;
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			i32 alloc_bytes = 0;
+			if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(base_value_type), cast(i32)type_align_of(base_value_type), &alloc_bytes)) {
+				return false;
+			}
+			emitter->extra_scratch_bytes += alloc_bytes;
 			if (base_expr->kind == Ast_SliceExpr) {
 				if (!fast_backend_emit_store_slice_expr_to_address(emitter, base_value_type, &base_expr->SliceExpr)) {
 					return false;
@@ -6529,7 +6620,11 @@ gb_internal bool fast_backend_emit_address_expr(FastLeafProcEmitter *emitter, As
 			} else if (!fast_backend_emit_store_constant_aggregate_to_address(emitter, base_value_type, expr->IndexExpr.expr)) {
 				return false;
 			}
-			fast_backend_emit_address_of_spill_depth(emitter, temp_depth);
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				gb_fprintf(emitter->file, "\tmov %s, rsp\n", fast_backend_x64_work_reg()->r64);
+			} else {
+				gb_fprintf(emitter->file, "\tmov %s, sp\n", fast_backend_arm64_work_reg());
+			}
 		} else if (!fast_backend_emit_address_expr(emitter, expr->IndexExpr.expr, nullptr)) {
 			return false;
 		}
@@ -6573,6 +6668,27 @@ gb_internal void fast_backend_emit_stack_adjust(FastLeafProcEmitter *emitter, i3
 	}
 }
 
+// Rule for materialising a non-addressable aggregate (call result, slice
+// expr, compound-literal, etc.) into a temp that must survive across a
+// push/pop in the same expression:
+//   USE THIS HELPER (`fast_backend_emit_alloc_stack_temp`).
+//   It allocates a real `sub sp` region BELOW the prologue frame. The bytes
+//   are tracked in `emitter->extra_scratch_bytes` and restored in the
+//   epilogue. Within a single expression sp only goes down (new
+//   materializes) or up (epilogue), and nothing in the spill region writes
+//   to the materialise area, so the data persists until consumed.
+//   After any store helper call you MUST re-derive work_reg from sp
+//   (`mov work, rsp` / `mov work, sp`) since the helper clobbered it.
+//
+// ANTI-PATTERN to avoid:
+//   Bumping `current_spill_depth` by `temp_slots`, claiming a spill slot,
+//   and `defer`-restoring the depth. The slot lives in the spill region,
+//   and the next `push` in the same expression will write to that slot —
+//   clobbering the materialised aggregate's tail fields (the .y case in
+//   `llvm_vararg_clobber`). The mask that hides this in some leaf-direct
+//   paths today is "the load happens immediately", but any future change
+//   that adds emit between the store and the load will expose the bug.
+//   Don't use the spill-slot bump for materialise — use this helper.
 gb_internal bool fast_backend_emit_alloc_stack_temp(FastLeafProcEmitter *emitter, i32 size, i32 align, i32 *alloc_bytes_) {
 	if (size <= 0 || align <= 0) {
 		return false;
@@ -6845,7 +6961,11 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		return false;
 	}
 	FastArm64AggregateReturnClass direct_result_class = fast_backend_arm64_classify_aggregate_return(result_type);
-	bool direct_aggregate_result = direct_result_class.kind != FastArm64AggregateReturn_None;
+	// When the planner forces return_by_pointer the callee writes through x0,
+	// so the call site must NOT also treat the result as a register-returned
+	// direct aggregate (that path would pop a stray spill slot and re-store
+	// the now-junk return registers into the sret buffer).
+	bool direct_aggregate_result = !return_by_pointer && direct_result_class.kind != FastArm64AggregateReturn_None;
 	if (has_explicit_result_address) {
 		if (!return_by_pointer && !direct_aggregate_result) {
 			return false;
@@ -12574,6 +12694,17 @@ gb_internal void fast_backend_emit_leaf_epilogue(FastLeafProcEmitter *emitter) {
 		extra_save_bytes = fast_backend_arm64_preserved_scratch_save_bytes(emitter->plan->type);
 	}
 	i32 frame_size = align_formula(spill_bytes + slot_bytes + extra_save_bytes, 16);
+	// Restore the materialize scratch bytes BEFORE the preserved-scratch reload
+	// and the frame teardown: the materialize temps live below the prologue
+	// frame and use `sub sp` directly, so sp is at (rbp - frame_size - scratch)
+	// at this point. The reload is sp-relative and needs the prologue-level sp.
+	if (emitter->extra_scratch_bytes != 0) {
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			gb_fprintf(emitter->file, "\tadd rsp, %d\n", emitter->extra_scratch_bytes);
+		} else {
+			gb_fprintf(emitter->file, "\tadd sp, sp, #%d\n", emitter->extra_scratch_bytes);
+		}
+	}
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		if (extra_save_bytes != 0) {
 			gb_fprintf(emitter->file, "\tmov rdi, QWORD PTR [rsp+0]\n");
@@ -12643,6 +12774,7 @@ gb_internal bool fast_backend_emit_leaf_procedure(gbFile *file, FastLeafProcPlan
 	emitter.deferred_stmts = array_make<FastDeferredStmt>(heap_allocator(), 0, 4);
 	emitter.scope_stack = array_make<FastScopeState>(heap_allocator(), 0, 4);
 	emitter.current_spill_depth = 0;
+	emitter.extra_scratch_bytes = 0;
 	emitter.epilogue_label_index = 0;
 	emitter.next_label_index = 1;
 	emitter.use_frame = plan->spill_depth > 0 || plan->local_stack_size > 0;

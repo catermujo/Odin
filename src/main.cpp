@@ -2647,6 +2647,14 @@ gb_internal bool fast_generate_code_with_llvm_support(FastGenerator *fast_gen, C
 	extern_module->checker = checker;
 	lb_init_module(extern_module, false);
 
+	// The fast-backend may have changed the ABI of a proc (e.g. forced
+	// return_by_pointer for an aggregate-returning proc) after the LLVM
+	// function-type cache could have been populated. Invalidate the cache
+	// for those procs so the next lookup sees the mutated proc type.
+	for (Type *pt : fast_gen->procs_needing_abi_cache_invalidation) {
+		lb_invalidate_function_type_cache_for(extern_module, pt);
+	}
+
 	auto hidden_entities = array_make<FastLLVMEntityState>(heap_allocator(), 0, fast_gen->emitted_entities.count);
 	fast_backend_hide_emitted_entities_from_llvm(fast_gen, extern_module, &hidden_entities);
 	defer (fast_backend_restore_hidden_entities(&hidden_entities));
