@@ -2818,7 +2818,11 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 
 	FastScalarType result_type = {};
 	Type *want_type = expected_type ? expected_type : reduce_tuple_to_single_type(type_of_expr(cast(Ast *)ce));
-	if (!fast_backend_classify_scalar_type(want_type, &result_type)) {
+	// Void-returning builtins (cpu_relax, prefetch_*, trap, ...) are
+	// side-effecting hints; the per-builtin checks below already gate
+	// their argument shape, so don't reject them up here just because
+	// they have no scalar return.
+	if (want_type != nullptr && !fast_backend_classify_scalar_type(want_type, &result_type)) {
 		return false;
 	}
 
@@ -2907,10 +2911,12 @@ gb_internal bool fast_backend_can_emit_builtin_call_expr(FastLeafProcPlan *plan,
 	if (id == BuiltinProc_cpu_relax) {
 		return ce->args.count == 0;
 	}
-	// prefetch: one rawptr arg, optional locality (constant int)
+	// prefetch: (address, locality 0..=3). Locality must be a
+	// constant int (the type-checker already enforces this).
 	if (id == BuiltinProc_prefetch_read_instruction || id == BuiltinProc_prefetch_read_data ||
 	    id == BuiltinProc_prefetch_write_instruction || id == BuiltinProc_prefetch_write_data) {
-		return ce->args.count >= 1 && fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
+		if (ce->args.count != 2) return false;
+		return fast_backend_can_emit_leaf_expr(plan, ce->args[0], type_of_expr(ce->args[0]));
 	}
 	// Overflow intrinsics: two-arg integer, returns (T, bool)
 	if (id == BuiltinProc_overflow_add || id == BuiltinProc_overflow_sub || id == BuiltinProc_overflow_mul) {
@@ -3766,12 +3772,18 @@ gb_internal bool fast_backend_plan_expr_stmt(FastGenerator *gen, FastLeafProcPla
 		error(es->expr ? es->expr : cast(Ast *)es, "Fast backend currently only supports call expression statements");
 		return false;
 	}
-	if (!fast_backend_can_emit_call_expr(plan, &es->expr->CallExpr, true) &&
+	// Builtin calls (cpu_relax, prefetch_*, trap, ...) don't go
+	// through the regular call-info path (no proc entity), so check
+	// them up front before falling through to it.
+	bool is_builtin_call = (es->expr->CallExpr.proc != nullptr &&
+	                        fast_backend_builtin_proc_id(es->expr->CallExpr.proc) != BuiltinProc_Invalid);
+	if (!is_builtin_call &&
+	    !fast_backend_can_emit_call_expr(plan, &es->expr->CallExpr, true) &&
 	    !fast_backend_can_emit_noop_delete_call_expr(plan, &es->expr->CallExpr)) {
 		error(es->expr, "Fast backend does not yet support this call expression");
 		return false;
 	}
-	if (fast_backend_can_emit_noop_delete_call_expr(plan, &es->expr->CallExpr)) {
+	if (!is_builtin_call && fast_backend_can_emit_noop_delete_call_expr(plan, &es->expr->CallExpr)) {
 		return true;
 	}
 	plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(es->expr));
@@ -7587,11 +7599,65 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 		}
 		return true;
 	}
-	// prefetch: no-op for now (architecture-specific, locality ignored)
+	// prefetch: (address, locality 0..=3). Emit the right hint per
+	// arch: `prfm <prfop>, [Xn]` on arm64, `prefetch{tn,w,nta}` on
+	// x64. The x64 instruction-stream variants have no direct x86
+	// hint, so they're a no-op there (the data-stream hint would
+	// pollute the data cache with no benefit).
 	if (id == BuiltinProc_prefetch_read_instruction || id == BuiltinProc_prefetch_read_data ||
 	    id == BuiltinProc_prefetch_write_instruction || id == BuiltinProc_prefetch_write_data) {
-		if (ce->args.count >= 1 && !fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
-		// TODO: Implement actual prefetch hints (prfm on ARM64, prefetcht0/1/2 on x64)
+		if (ce->args.count != 2) return false;
+		if (!fast_backend_emit_leaf_expr(emitter, ce->args[0])) return false;
+		TypeAndValue locality_tav = type_and_value_of_expr(ce->args[1]);
+		if (locality_tav.mode != Addressing_Constant) return false;
+		i64 locality = exact_value_to_i64(locality_tav.value);
+		if (locality < 0 || locality > 3) return false;
+
+		bool is_write = (id == BuiltinProc_prefetch_write_instruction ||
+		                 id == BuiltinProc_prefetch_write_data);
+		bool is_instr = (id == BuiltinProc_prefetch_read_instruction ||
+		                 id == BuiltinProc_prefetch_write_instruction);
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			if (is_instr) {
+				// x86 has no instruction-stream prefetch.
+				return true;
+			}
+			char const *mnemonic = nullptr;
+			if (is_write) {
+				// x64 has only an L1 write hint (`prefetchw`).
+				mnemonic = "prefetchw";
+			} else {
+				switch (locality) {
+				case 0: mnemonic = "prefetcht0"; break;
+				case 1: mnemonic = "prefetcht1"; break;
+				case 2: mnemonic = "prefetcht2"; break;
+				case 3: mnemonic = "prefetchnta"; break;
+				}
+			}
+			gb_fprintf(emitter->file, "\t%s [%s]\n", mnemonic, fast_backend_x64_work_reg()->r64);
+		} else {
+			// arm64 PLD/PST/PLI. PLI only has L1 variants.
+			char const *mnemonic = nullptr;
+			if (is_instr) {
+				mnemonic = (locality >= 3) ? "plil1strm" : "plil1keep";
+			} else if (is_write) {
+				switch (locality) {
+				case 0: mnemonic = "pstl1keep"; break;
+				case 1: mnemonic = "pstl2keep"; break;
+				case 2: mnemonic = "pstl3keep"; break;
+				case 3: mnemonic = "pstl1strm"; break;
+				}
+			} else {
+				switch (locality) {
+				case 0: mnemonic = "pldl1keep"; break;
+				case 1: mnemonic = "pldl2keep"; break;
+				case 2: mnemonic = "pldl3keep"; break;
+				case 3: mnemonic = "pldl1strm"; break;
+				}
+			}
+			gb_fprintf(emitter->file, "\tprfm %s, [%s]\n", mnemonic, fast_backend_arm64_work_reg());
+		}
 		return true;
 	}
 	// Overflow intrinsics: add/sub/mul with overflow flag, returns (T, bool)
@@ -12205,6 +12271,11 @@ gb_internal bool fast_backend_emit_expr_stmt(FastLeafProcEmitter *emitter, AstEx
 	}
 	if (fast_backend_can_emit_noop_delete_call_expr(emitter->plan, &es->expr->CallExpr)) {
 		return true;
+	}
+	// Builtin calls (cpu_relax, prefetch_*, trap, ...) don't have a
+	// proc entity, so the regular call-emit path can't handle them.
+	if (fast_backend_builtin_proc_id(es->expr->CallExpr.proc) != BuiltinProc_Invalid) {
+		return fast_backend_emit_builtin_call_expr(emitter, &es->expr->CallExpr);
 	}
 	return fast_backend_emit_call_expr(emitter, &es->expr->CallExpr);
 }
