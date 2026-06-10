@@ -410,6 +410,7 @@ enum : int {
 
 gb_internal bool is_type_comparable(Type *t);
 gb_internal bool is_type_simple_compare(Type *t);
+gb_internal bool is_type_trivially_copyable(Type *t);
 gb_internal Type *type_deref(Type *t, bool allow_multi_pointer=false);
 gb_internal Type *base_type(Type *t);
 gb_internal Type *alloc_type_multi_pointer(Type *elem);
@@ -3019,6 +3020,133 @@ gb_internal bool is_type_nearly_simple_compare(Type *t) {
 	case Type_Map:
 		return false;
 
+	}
+
+	return false;
+}
+
+// A pointer-shaped primitive: a type whose value is (or holds) a raw address.
+// Pointers themselves are trivially copyable, but a struct/union/array that
+// *contains* a pointer-typed field is not — the user rule is "a struct
+// containing pointers is not [POD]", and we extend that to any aggregate.
+gb_internal bool is_pointer_typed_primitive(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+	case Type_Proc:           // function pointer (bare proc)
+		return true;
+	case Type_Basic:
+		return (t->Basic.flags & BasicFlag_Pointer) != 0; // rawptr, uintptr
+	}
+	return false;
+}
+
+// NOTE: A type is "trivially copyable" if memcpy() of a value of this type
+// yields a fully usable copy. Pointers themselves qualify — ^T, rawptr,
+// uintptr, bare procs are all just addresses, fine to copy. But an aggregate
+// that contains a pointer field is NOT trivially copyable: the copy's pointer
+// still aliases the original's pointee, so the copy is lifetime-tied to
+// something else (string data, slice data, dynarray data, map internals,
+// closure env, ...). Bare pointer values are explicit about this; aggregate
+// pointer fields are easy to miss.
+//
+// Trivially copyable: numerics, bool, rune, rawptr, uintptr, typeid, ^T,
+// [^]T, ^#soa[N]T, bare procs, enums, bit sets, bit fields, arrays /
+// enumerated arrays / simd vectors / matrices / fixed-capacity dynamic arrays
+// of trivially copyable element, structs (incl. soa structs and raw unions)
+// where every field is trivially copyable AND no field is a pointer-typed
+// primitive, unions where every variant is trivially copyable AND no variant
+// is a pointer-typed primitive, procs, generic T.
+//
+// NOT trivially copyable: string/cstring/string16/cstring16, []T, [dynamic]T,
+// map[K]V, any.
+gb_internal bool is_type_trivially_copyable(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Basic:
+		// numerics, bool, rune, rawptr, uintptr, typeid
+		if (t->Basic.flags & (BasicFlag_Numeric | BasicFlag_Boolean | BasicFlag_Rune | BasicFlag_Pointer)) {
+			return true;
+		}
+		return t->Basic.kind == Basic_typeid;
+
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+		return true;
+
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *e = t->Array.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_FixedCapacityDynamicArray: {
+		Type *e = t->FixedCapacityDynamicArray.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_SimdVector: {
+		Type *e = t->SimdVector.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_Matrix: {
+		Type *e = t->Matrix.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_BitSet:
+	case Type_Enum:
+	case Type_BitField:
+		return true;
+
+	case Type_Proc:
+		return true;
+
+	case Type_Struct:
+		for_array(i, t->Struct.fields) {
+			Entity *f = t->Struct.fields[i];
+			if (!is_type_trivially_copyable(f->type)) return false;
+			if (is_pointer_typed_primitive(f->type))  return false;
+		}
+		return true;
+
+	case Type_Union:
+		for_array(i, t->Union.variants) {
+			Type *v = t->Union.variants[i];
+			if (!is_type_trivially_copyable(v)) return false;
+			if (is_pointer_typed_primitive(v))  return false;
+		}
+		return true;
+
+	case Type_Generic:
+		// Unbound type parameter — assume trivially copyable.
+		return true;
+
+	case Type_Tuple:
+		for_array(i, t->Tuple.variables) {
+			Type *vt = t->Tuple.variables[i]->type;
+			if (!is_type_trivially_copyable(vt)) return false;
+			if (is_pointer_typed_primitive(vt))  return false;
+		}
+		return true;
 	}
 
 	return false;
