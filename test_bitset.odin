@@ -1,62 +1,77 @@
-// Test: BitSet as cdecl proc arg/return
+// Test: BitSet type support
 //
-// BitSet is a built-in aggregate type in Odin. The fast-backend
-// currently has no `case Type_BitSet:` in
-// `fast_backend_type_is_supported_aggregate`, so procs that take
-// or return a BitSet fall back to LLVM at the proc level. This
-// test exercises the round-trip and prints the LLVM-emitted
-// prologues for `mk_bits` and `echo` to document the current
-// state.
-//
-// The cdecl callee here uses `transmute(Bits)u8(...)` rather than
-// a BitSet compound literal `{0, 2, 4, 6}`, because the
-// scalar-compound-literal emit path has no Type_BitSet case —
-// that's a separate (and broader) follow-on: it would need to
-// OR `(1<<i)` for each bit index rather than store at field
-// offsets. Same for indexing, assignment, and the BitSet ABI
-// paths in the call site / sret emit.
+// BitSet is a built-in Type_BitSet in Odin. Fast-backend has
+// `case Type_BitSet:` in fast_backend_type_is_supported_aggregate,
+// so procs that take/return a BitSet can be fast-emitted.
 //
 // BitSet layout matches its `underlying` integer: a small BitSet
-// (8 bits with a u8 backing) is laid out as a single u8; a
-// larger one (128 bits) is `[16]u8`. So treating it as an
-// integer-shaped sequence in the aggregate paths should "just
-// work" once the type is added to the supported set.
+// (e.g. 8 bits with a u8 backing) is laid out as a single u8.
+//
+// This is the simplest possible test: a cdecl proc that takes
+// and returns a BitSet unchanged. If the proc is fast-emitted
+// and the value round-trips, basic support works.
 package test_bitset
 
-import "core:fmt"
+import "base:intrinsics"
 
-Bits :: bit_set[0..<8; u8]   // 1 byte, underlying = u8
+Bits :: bit_set[0..<8; u8]
 
-mk_bits :: proc "c" () -> Bits {
-	return transmute(Bits)u8(0x55) // 0101_0101 — bits 0, 2, 4, 6 set
+identity :: proc "c" (b: Bits) -> Bits {
+	// More complex body: do some work before returning,
+	// to make sure the return path is correct (not just
+	// "arg register == return register" coincidence).
+	c := b
+	c |= c
+	return c
 }
 
-echo :: proc "c" (b: Bits) -> int {
-	x: u8 = (transmute(u8)b)
-	n: int = 0
-	if x & 0x01 != 0 { n += 0 }
-	if x & 0x02 != 0 { n += 1 }
-	if x & 0x04 != 0 { n += 2 }
-	if x & 0x08 != 0 { n += 3 }
-	if x & 0x10 != 0 { n += 4 }
-	if x & 0x20 != 0 { n += 5 }
-	if x & 0x40 != 0 { n += 6 }
-	if x & 0x80 != 0 { n += 7 }
-	return n
+mk_set :: proc "c" () -> Bits {
+	// Compound lit with bit indices — these are bits to set.
+	return Bits{0, 2, 4, 6}
 }
 
-g_b:  Bits
-g_n:  int
+or_set :: proc "c" (a, b: Bits) -> Bits {
+	return a | b
+}
+
+test_index :: proc "c" (b: Bits, i: int) -> bool {
+	return i in b
+}
+
+g_in:  Bits
+g_out: Bits
 
 do_test :: proc() {
-	g_b = mk_bits()
-	g_n = echo(g_b)
+	g_in  = transmute(Bits)u8(0xA5) // bits 0, 2, 5, 7 set → 1010_0101
+	g_out = identity(g_in)
+
+	// Test compound lit (Bits{0, 2, 4, 6} = bits 0,2,4,6 set = 0x55)
+	lit := mk_set()
+	if (transmute(u8)lit) != 0x55 {
+		intrinsics.trap()
+	}
+
+	// Test OR (0xA5 | 0x55 = 0xF5)
+	or_val := or_set(transmute(Bits)u8(0xA5), transmute(Bits)u8(0x55))
+	if (transmute(u8)or_val) != 0xF5 {
+		intrinsics.trap()
+	}
+
+	// Test `in` (indexing): bits 0, 2, 5, 7 are set in 0xA5
+	if !test_index(transmute(Bits)u8(0xA5), 0) { intrinsics.trap() }
+	if !test_index(transmute(Bits)u8(0xA5), 2) { intrinsics.trap() }
+	if !test_index(transmute(Bits)u8(0xA5), 5) { intrinsics.trap() }
+	if !test_index(transmute(Bits)u8(0xA5), 7) { intrinsics.trap() }
+	if  test_index(transmute(Bits)u8(0xA5), 1) { intrinsics.trap() }
+	if  test_index(transmute(Bits)u8(0xA5), 3) { intrinsics.trap() }
 }
 
 main :: proc() {
 	do_test()
-	fmt.println("g_n =", g_n) // expect 0+2+4+6 = 12
-	if g_n != 12 {
-		fmt.println("FAIL")
+	x: u8 = (transmute(u8)g_in)
+	y: u8 = (transmute(u8)g_out)
+	// Expected: 0xA5 (bits 0, 2, 5, 7 set)
+	if x != 0xA5 || y != 0xA5 {
+		intrinsics.trap()
 	}
 }
