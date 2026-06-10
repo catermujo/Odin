@@ -1618,10 +1618,22 @@ gb_internal bool fast_backend_get_call_info(AstCallExpr *ce, TypeProc **proc_typ
 		}
 		proc_entity = proc_entity->ProcGroup.entities[0];
 	}
-	if (proc_entity == nullptr || proc_entity->kind != Entity_Procedure) {
+	bool is_indirect_call = (proc_entity == nullptr);
+	if (is_indirect_call) {
+		// Indirect call through a proc-typed expression (e.g. a global
+		// or local proc value, a method-bound value, or a function
+		// pointer). The type of the callee expression must be a proc
+		// type; we don't have a known Procedure entity, but the
+		// emit side loads the function pointer at the call site
+		// and emits `blr` instead of `bl <symbol>`.
+		Type *callee_type = base_type(type_of_expr(ce->proc));
+		if (callee_type == nullptr || callee_type->kind != Type_Proc) {
+			return false;
+		}
+	} else if (proc_entity->kind != Entity_Procedure) {
 		return false;
 	}
-	if (proc_entity->Procedure.is_objc_impl_or_import) {
+	if (proc_entity != nullptr && proc_entity->Procedure.is_objc_impl_or_import) {
 		return false;
 	}
 
@@ -1699,6 +1711,15 @@ gb_internal bool fast_backend_can_emit_call_expr(FastLeafProcPlan *plan, AstCall
 	bool return_by_pointer = false;
 	if (!fast_backend_get_call_info(ce, &pt, &proc_entity, &result_type, &scalar_result_type, &has_result, &return_by_pointer)) {
 		return false;
+	}
+	// For indirect calls (proc value callee), the callee expression
+	// must be a leaf — the call site materializes it into a register
+	// and emits `blr` rather than `bl <symbol>`.
+	if (proc_entity == nullptr) {
+		Type *callee_type = type_of_expr(ce->proc);
+		if (callee_type == nullptr || !fast_backend_can_emit_leaf_expr(plan, ce->proc, callee_type)) {
+			return false;
+		}
 	}
 	gb_unused(proc_entity);
 	gb_unused(result_type);
@@ -7025,6 +7046,7 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 	if (!fast_backend_get_call_info(ce, &pt, &proc_entity, &result_type, &scalar_result_type, &has_result, &return_by_pointer)) {
 		return false;
 	}
+	bool is_indirect_call = (proc_entity == nullptr);
 	FastArm64AggregateReturnClass direct_result_class = fast_backend_arm64_classify_aggregate_return(result_type);
 	// When the planner forces return_by_pointer the callee writes through x0,
 	// so the call site must NOT also treat the result as a register-returned
@@ -7043,6 +7065,20 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 	if (return_by_pointer) {
 		fast_backend_emit_push_work_reg(emitter);
 	} else if (direct_aggregate_result) {
+		fast_backend_emit_push_work_reg(emitter);
+	}
+
+	// For an indirect call, materialize the function pointer into
+	// work_reg and push it FIRST (so it ends up at the bottom of the
+	// spill stack). The arg pushes then go on top, and the function
+	// pointer is popped LAST — into a tmp reg — and used as the
+	// target of `blr` / `call r64`. Doing it this way keeps the
+	// function pointer safe across the arg materialization, which
+	// otherwise might clobber the work reg.
+	if (is_indirect_call) {
+		if (!fast_backend_emit_leaf_expr(emitter, ce->proc)) {
+			return false;
+		}
 		fast_backend_emit_push_work_reg(emitter);
 	}
 
@@ -7244,12 +7280,23 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		}
 	}
 
-	String symbol = fast_backend_mangle_asm_name(fast_backend_get_entity_name(proc_entity));
+	if (is_indirect_call) {
+		// Pop the function pointer we pushed at the top. The arg
+		// pops already emptied everything above it; this pop gets
+		// the original callee value into tmp_reg.
+		fast_backend_emit_pop_tmp_reg(emitter);
+	}
+
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		if (x64_cc == ProcCC_Win64) {
 			gb_fprintf(emitter->file, "\tsub rsp, 32\n");
 		}
-		gb_fprintf(emitter->file, "\tcall \"%.*s\"\n", LIT(symbol));
+		if (is_indirect_call) {
+			gb_fprintf(emitter->file, "\tcall %s\n", fast_backend_x64_tmp_reg()->r64);
+		} else {
+			String symbol = fast_backend_mangle_asm_name(fast_backend_get_entity_name(proc_entity));
+			gb_fprintf(emitter->file, "\tcall \"%.*s\"\n", LIT(symbol));
+		}
 		if (x64_cc == ProcCC_Win64) {
 			gb_fprintf(emitter->file, "\tadd rsp, 32\n");
 		}
@@ -7261,7 +7308,12 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), scalar_result_type);
 		}
 	} else {
-		gb_fprintf(emitter->file, "\tbl \"%.*s\"\n", LIT(symbol));
+		if (is_indirect_call) {
+			gb_fprintf(emitter->file, "\tblr %s\n", fast_backend_arm64_tmp_reg());
+		} else {
+			String symbol = fast_backend_mangle_asm_name(fast_backend_get_entity_name(proc_entity));
+			gb_fprintf(emitter->file, "\tbl \"%.*s\"\n", LIT(symbol));
+		}
 		if (direct_aggregate_result) {
 			fast_backend_emit_pop_tmp_reg(emitter);
 			fast_backend_emit_arm64_store_direct_aggregate_return_to_address(emitter->file, fast_backend_arm64_tmp_reg(), direct_result_class, cast(i32)type_size_of(result_type));
