@@ -403,8 +403,7 @@ gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *o
 	}
 
 	if (is_type_boolean(bt)) {
-		out->kind = FastScalar_Bool;
-		out->bit_size = 1;
+		if (out) { out->kind = FastScalar_Bool; out->bit_size = 1; }
 		return true;
 	}
 
@@ -414,30 +413,34 @@ gb_internal bool fast_backend_classify_scalar_type(Type *type, FastScalarType *o
 
 	if (bt->kind == Type_Basic &&
 	    (bt->Basic.kind == Basic_cstring || bt->Basic.kind == Basic_cstring16 || bt->Basic.kind == Basic_rawptr)) {
-		out->kind = FastScalar_Pointer;
-		out->bit_size = 8*build_context.metrics.ptr_size;
+		if (out) { out->kind = FastScalar_Pointer; out->bit_size = 8*build_context.metrics.ptr_size; }
 		return true;
 	}
 	if (is_type_typeid(bt)) {
-		out->kind = FastScalar_Unsigned;
-		out->bit_size = 64;
+		if (out) { out->kind = FastScalar_Unsigned; out->bit_size = 64; }
 		return true;
 	}
 
 	if (is_type_integer(bt)) {
-		out->kind = is_type_unsigned(bt) ? FastScalar_Unsigned : FastScalar_Signed;
-		out->bit_size = 8*type_size_of(bt);
-		return out->bit_size > 0 && out->bit_size <= 64;
+		if (out) {
+			out->kind = is_type_unsigned(bt) ? FastScalar_Unsigned : FastScalar_Signed;
+			out->bit_size = 8*type_size_of(bt);
+		}
+		return out == nullptr || (out->bit_size > 0 && out->bit_size <= 64);
 	}
 	if (is_type_float(bt)) {
-		out->kind = FastScalar_Float;
-		out->bit_size = 8*type_size_of(bt);
-		return out->bit_size == 32 || out->bit_size == 64;
+		if (out) {
+			out->kind = FastScalar_Float;
+			out->bit_size = 8*type_size_of(bt);
+		}
+		return out == nullptr || (out->bit_size == 32 || out->bit_size == 64);
 	}
 
 	if (is_type_pointer(type) || bt->kind == Type_MultiPointer) {
-		out->kind = FastScalar_Pointer;
-		out->bit_size = 8*build_context.metrics.ptr_size;
+		if (out) {
+			out->kind = FastScalar_Pointer;
+			out->bit_size = 8*build_context.metrics.ptr_size;
+		}
 		return true;
 	}
 
@@ -3643,9 +3646,47 @@ gb_internal bool fast_backend_plan_return_stmt(FastGenerator *gen, FastLeafProcP
 		return true;
 	}
 
-	if (rs->results.count != 1) {
+	if (rs->results.count != 1 && plan->type->result_count == 1) {
 		error(rs->token, "Fast backend currently only supports a single return value");
 		return false;
+	}
+
+	if (plan->type->result_count > 1) {
+		// Multi-return: each result is stored to the sret buffer at
+		// the cumulative offset of that result. Verify each result
+		// expression is emit-able, and accumulate the spill depth.
+		GB_ASSERT(plan->type->results != nullptr && plan->type->results->kind == Type_Tuple);
+		i32 cumulative_offset = 0;
+		for (i32 i = 0; i < rs->results.count; i++) {
+			Ast *result = rs->results[i];
+			Entity *result_entity = plan->type->results->Tuple.variables[i];
+			Type *result_type = result_entity != nullptr ? result_entity->type : nullptr;
+			if (result_type == nullptr) {
+				return false;
+			}
+			if (fast_backend_classify_scalar_type(result_type, nullptr)) {
+				if (!fast_backend_can_emit_leaf_expr(plan, result, result_type)) {
+					error(result, "Fast backend does not yet support this return expression");
+					return false;
+				}
+				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(result));
+			} else {
+				if (!fast_backend_can_emit_aggregate_expr(plan, result, result_type) &&
+				    !fast_backend_can_emit_aggregate_call_expr(plan, result, result_type) &&
+				    !fast_backend_can_emit_scalar_compound_lit_expr(plan, result, result_type)) {
+					error(result, "Fast backend does not yet support this return expression");
+					return false;
+				}
+				if (fast_backend_can_emit_aggregate_call_expr(plan, result, result_type)) {
+					plan->spill_depth = gb_max(plan->spill_depth, fast_backend_call_expr_spill_depth(&unparen_expr(result)->CallExpr));
+				} else if (fast_backend_can_emit_scalar_compound_lit_expr(plan, result, result_type)) {
+					plan->spill_depth = gb_max(plan->spill_depth, fast_backend_scalar_compound_lit_spill_depth(result, result_type));
+				}
+			}
+			cumulative_offset += cast(i32)type_size_of(result_type);
+		}
+		plan->spill_depth = gb_max(plan->spill_depth, cumulative_offset + 1);
+		return true;
 	}
 
 	Ast *result = rs->results[0];
@@ -4139,8 +4180,40 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	}
 
 	if (pt->result_count > 1) {
-		error(e->token, "Fast backend currently only supports procedures with at most one result");
-		return false;
+		// Multi-result (tuple return) — treat the whole tuple as an
+		// aggregate that's returned via sret. Each result i is stored
+		// to result_ptr + offset_i in the proc body and read back
+		// from the same offset at the call site. This matches what
+		// the LLVM backend does for the same shape, and AAPCS64
+		// passes the sret pointer in x8 to any aggregate-returning
+		// cdecl proc.
+		GB_ASSERT(pt->results != nullptr && pt->results->kind == Type_Tuple);
+		bool all_supported = true;
+		for_array(i, pt->results->Tuple.variables) {
+			Entity *result_entity = pt->results->Tuple.variables[i];
+			if (result_entity == nullptr || result_entity->kind != Entity_Variable) {
+				all_supported = false;
+				break;
+			}
+			if (!fast_backend_classify_scalar_type(result_entity->type, nullptr) &&
+			    !fast_backend_type_is_supported_aggregate(result_entity->type)) {
+				error(result_entity->token, "Fast backend currently only supports scalar, pointer-like, array, struct, string, slice, dynamic array, and fixed-capacity dynamic array result types");
+				all_supported = false;
+				break;
+			}
+		}
+		if (!all_supported) {
+			return false;
+		}
+		if (!fast_backend_add_slot(plan, nullptr, t_rawptr)) {
+			return false;
+		}
+		plan->return_by_pointer = true;
+		plan->result_ptr_slot = plan->slots[plan->slots.count-1];
+		pt->return_by_pointer = true;
+		plan->result_value_type = nullptr; // multi-result, no single value type
+		plan->has_result = true;
+		array_add(&gen->procs_needing_abi_cache_invalidation, type);
 	}
 	if (pt->result_count == 1) {
 		GB_ASSERT(pt->results != nullptr && pt->results->kind == Type_Tuple);
@@ -10885,20 +10958,50 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 	i32 direct_result_temp_bytes = 0;
 	i32 direct_result_addr_depth = 0;
 	if (rs->results.count != 0) {
-		Ast *result = rs->results[0];
-		if (return_direct_aggregate) {
-			if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(emitter->plan->result_value_type), cast(i32)type_align_of(emitter->plan->result_value_type), &direct_result_temp_bytes)) {
+		if (emitter->plan->type->result_count > 1) {
+			// Multi-return: load the sret address once, then for each
+			// result i, store the value at sret + offset_i (the sum
+			// of the sizes of the preceding results). Each iteration
+			// reloads the sret address from the slot (it's a fixed
+			// offset in the local frame, so reloading is cheap) so
+			// the per-result store doesn't need to coordinate with
+			// the spill region.
+			GB_ASSERT(emitter->plan->type->results != nullptr && emitter->plan->type->results->kind == Type_Tuple);
+			i32 cumulative_offset = 0;
+			for (i32 i = 0; i < rs->results.count; i++) {
+				Ast *result = rs->results[i];
+				Entity *result_entity = emitter->plan->type->results->Tuple.variables[i];
+				Type *result_type = result_entity != nullptr ? result_entity->type : nullptr;
+				if (result_type == nullptr) {
+					return false;
+				}
+				// Reload sret address into work_reg
+				if (build_context.metrics.arch == TargetArch_amd64) {
+					fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_x64_work_reg());
+				} else {
+					fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
+				}
+				if (!fast_backend_emit_store_value_to_work_address_offset(emitter, cumulative_offset, result_type, result)) {
+					return false;
+				}
+				cumulative_offset += cast(i32)type_size_of(result_type);
+			}
+		} else {
+			Ast *result = rs->results[0];
+			if (return_direct_aggregate) {
+				if (!fast_backend_emit_alloc_stack_temp(emitter, cast(i32)type_size_of(emitter->plan->result_value_type), cast(i32)type_align_of(emitter->plan->result_value_type), &direct_result_temp_bytes)) {
+					return false;
+				}
+				fast_backend_emit_push_work_reg(emitter);
+				direct_result_addr_depth = emitter->current_spill_depth;
+			} else if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_x64_work_reg());
+			} else {
+				fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
+			}
+			if (!fast_backend_emit_store_value_to_work_address(emitter, emitter->plan->result_value_type, result)) {
 				return false;
 			}
-			fast_backend_emit_push_work_reg(emitter);
-			direct_result_addr_depth = emitter->current_spill_depth;
-		} else if (build_context.metrics.arch == TargetArch_amd64) {
-			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_x64_work_reg());
-		} else {
-			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, emitter->plan->result_ptr_slot, fast_backend_arm64_work_reg());
-		}
-		if (!fast_backend_emit_store_value_to_work_address(emitter, emitter->plan->result_value_type, result)) {
-			return false;
 		}
 	}
 

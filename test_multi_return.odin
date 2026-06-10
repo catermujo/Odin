@@ -1,16 +1,16 @@
 // Test: multiple return values
 //
-// Fast-backend currently rejects procs with more than one result
-// (see `error(e->token, "Fast backend currently only supports
-// procedures with at most one result")` in
-// fast_backend_plan_leaf_proc). This test exercises multi-return
-// procs and documents the current state.
+// Fast-backend now supports procs with more than one result
+// (`(int, int)`). The proc writes each result to the sret
+// buffer at the cumulative offset of that result (a at +0,
+// b at +8). The proc body is fast-emitted; the call site
+// (tuple-decompose assignment `a, b = call()`) still falls
+// back to LLVM, so we test via a LLVM-emitted caller and check
+// the fast-emitted callee.
 package test_multi_return
 
 import "core:fmt"
 
-// Two-int tuple return. AAPCS64: a 16-byte aggregate returned in
-// x0:x1 (or via sret, depending on planner choice).
 mk_pair :: proc "c" (a, b: int) -> (int, int) {
 	return a, b
 }
