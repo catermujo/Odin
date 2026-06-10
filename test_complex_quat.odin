@@ -2,23 +2,18 @@
 //
 // Complex (complex32, complex64, complex128) and Quaternion
 // (quaternion64, quaternion128, quaternion256) are `Type_Basic`
-// with `BasicFlag_Complex` / `BasicFlag_Quaternion` flags. They
-// are scalar-shaped (handled by `fast_backend_classify_scalar_type`)
-// but the question is whether the cdecl call path / sret path
-// / field-access paths handle them.
+// with `BasicFlag_Complex` / `BasicFlag_Quaternion`. They are
+// scalar-shaped (handled by `fast_backend_classify_scalar_type`)
+// but cdecl procs with these as return types still fall back to
+// LLVM — the call setup / sret / flag-based type paths need cases.
+// Constructors are complex(re, im) and quaternion(real, imag,
+// jmag, kmag) (named-args only for quaternion).
 //
-// The constructor functions are `complex64(re, im)` and
-// `quaternion(x, y, z, w)`. Compound literals like `{re=3, im=4}`
-// are NOT allowed on complex types — see
-// `Illegal compound literal, complex64 cannot be used as a
-// compound literal with fields`.
-//
-// This test verifies the round-trip works. Currently expected
-// to fall back to LLVM because the field-access and cdecl
-// aggregate paths don't have cases for these flag-based types.
+// This test verifies the LLVM-fallback round-trip works and
+// documents the current state.
 package test_complex_quat
 
-import "core:fmt"
+import "base:intrinsics"
 
 Cmplx :: complex64
 Quat  :: quaternion128
@@ -41,17 +36,10 @@ do_test :: proc() {
 
 main :: proc() {
 	do_test()
-	fmt.println("re =", real(g_c)) // expect 3
-	fmt.println("im =", imag(g_c)) // expect 4
-	fmt.println("x =", g_q.x)       // expect 1
-	fmt.println("y =", g_q.y)       // expect 2
-	fmt.println("z =", g_q.z)       // expect 3
-	fmt.println("w =", g_q.w)       // expect 4
-
 	if real(g_c) != 3 || imag(g_c) != 4 {
-		fmt.println("FAIL: cmplx")
+		intrinsics.trap()
 	}
 	if g_q.x != 1 || g_q.y != 2 || g_q.z != 3 || g_q.w != 4 {
-		fmt.println("FAIL: quat")
+		intrinsics.trap()
 	}
 }

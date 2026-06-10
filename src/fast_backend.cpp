@@ -510,7 +510,21 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	}
 
 	case Type_Basic:
-		return is_type_string(type) || is_type_string16(type) || is_type_any(type);
+		// String and string16 are 2-field aggregates (data, len) — the
+		// standard string-shape path. `any` is also a 2-field aggregate
+		// (rawptr, typeid).
+		//
+		// Complex and Quaternion are 2- or 4-field HFA aggregates of
+		// floats (complex64 = 2×f32, complex128 = 2×f64, quaternion128
+		// = 4×f32, etc.). AAPCS64 returns them in v0..vN as an HFA,
+		// but the fast-backend's direct-aggregate return path only
+		// handles x0..xN (general regs), so we use sret: the proc
+		// body writes each field to the result buffer at the right
+		// offset, and the call site reads from the buffer. That's
+		// correct (not optimal — we lose the HFA optimization) but
+		// it round-trips the values.
+		return is_type_string(type) || is_type_string16(type) || is_type_any(type) ||
+		       is_type_complex(type) || is_type_quaternion(type);
 	}
 
 	return false;
