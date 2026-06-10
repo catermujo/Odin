@@ -2639,6 +2639,23 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 
 	i32 depth = 0;
 	ast_node(cl, CompoundLit, expr);
+	// Each per-field store goes through:
+	//   fast_backend_emit_store_value_to_work_address_offset: 1 push (base_depth)
+	//     fast_backend_emit_store_value_to_work_address:        1 push (dst_depth_inner)
+	//       emit leaf:                                          leaf's own pushes
+	//       1 push (after leaf, for the pop_tmp)
+	//       1 pop
+	//       1 load (no depth change)
+	//       1 pop
+	//     1 load (no depth change)
+	//   1 load (no depth change)
+	// So peak pushes for a field = 3 + leaf_depth, on top of the outer
+	// dst_depth_outer push. The outer call adds 1.
+	// The previous `1 + supported_value_expr_spill_depth` was missing 2
+	// (the base_depth push and the post-leaf push), causing pushes to
+	// overflow the spill region into the slot region and clobber param
+	// slots (see llvm_vararg_clobber e case analysis, mk2/mk3 reads).
+	i32 const per_field_overhead = 3;
 	switch (base->kind) {
 	case Type_Struct:
 		for_array(i, cl->elems) {
@@ -2657,7 +2674,7 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 					value_type = field->type;
 				}
 			}
-			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, value_type));
+			depth = gb_max(depth, per_field_overhead + fast_backend_supported_value_expr_spill_depth(value, value_type));
 		}
 		break;
 	case Type_Array:
@@ -2668,7 +2685,7 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 				value = elem->FieldValue.value;
 			}
 			Type *elem_type = base->kind == Type_Array ? base->Array.elem : base->EnumeratedArray.elem;
-			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, elem_type));
+			depth = gb_max(depth, per_field_overhead + fast_backend_supported_value_expr_spill_depth(value, elem_type));
 		}
 		break;
 	case Type_Matrix:
@@ -2685,7 +2702,7 @@ gb_internal i32 fast_backend_scalar_compound_lit_spill_depth(Ast *expr, Type *ex
 			    are_types_identical(expr_type, vector_type)) {
 				value_type = vector_type;
 			}
-			depth = gb_max(depth, 1 + fast_backend_supported_value_expr_spill_depth(value, value_type));
+			depth = gb_max(depth, per_field_overhead + fast_backend_supported_value_expr_spill_depth(value, value_type));
 		}
 		break;
 	}
