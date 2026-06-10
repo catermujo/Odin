@@ -498,6 +498,14 @@ gb_internal bool fast_backend_type_is_supported_aggregate(Type *type) {
 	case Type_Slice:
 		return fast_backend_type_is_supported_value(type->Slice.elem, nullptr, nullptr);
 
+	case Type_SimdVector: {
+		// SIMD vector — on arm64, an HFA-eligible SIMD vector
+		// (1-4 f32, 1-2 f64) is returned in v0..vN and passed
+		// in v0..vN. Other vectors fall back via the planner.
+		Type *elem = type->SimdVector.elem;
+		return elem != nullptr && fast_backend_type_is_supported_value(elem, nullptr, nullptr);
+	}
+
 	case Type_Basic:
 		return is_type_string(type) || is_type_string16(type) || is_type_any(type);
 	}
@@ -2566,6 +2574,25 @@ gb_internal bool fast_backend_can_emit_scalar_compound_lit_expr(FastLeafProcPlan
 			}
 			if (!fast_backend_can_emit_value_expr(plan, elem, value_type) &&
 			    !fast_backend_can_emit_aggregate_call_expr(plan, elem, value_type)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	case Type_SimdVector: {
+		// Compound-literal syntax for SIMD vectors is just the N
+		// lane values in order. No FieldValue, no range.
+		Type *elem_type = base->SimdVector.elem;
+		if (cl->elems.count != base->SimdVector.count) {
+			return false;
+		}
+		if (cl->elems.count == 0) {
+			return true;
+		}
+		for (i64 i = 0; i < cl->elems.count; i++) {
+			if (!fast_backend_can_emit_value_expr(plan, cl->elems[i], elem_type) &&
+			    !fast_backend_can_emit_aggregate_call_expr(plan, cl->elems[i], elem_type)) {
 				return false;
 			}
 		}
@@ -9718,8 +9745,9 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 
 	case Type_Matrix: {
 		Type *elem_type = base->Matrix.elem;
-		Type *vector_type = fast_backend_matrix_vector_type(base);
+		i64 elem_count = base->Matrix.row_count * base->Matrix.column_count;
 		i32 elem_size = cast(i32)type_size_of(elem_type);
+		Type *vector_type = fast_backend_matrix_vector_type(base);
 		if (cl->elems.count == 0) {
 			return true;
 		}
@@ -9749,55 +9777,40 @@ gb_internal bool fast_backend_emit_store_scalar_compound_lit_to_work_address(Fas
 			}
 			return true;
 		}
+		if (cl->elems.count > elem_count) {
+			return false;
+		}
 		for_array(i, cl->elems) {
+			Type *value_type = elem_type;
 			Type *expr_type = default_type(type_of_expr(cl->elems[i]));
 			if (vector_type != nullptr &&
 			    expr_type != nullptr &&
 			    are_types_identical(expr_type, vector_type)) {
-				i32 offset = cast(i32)fast_backend_matrix_vector_offset(base, i);
-				if (offset < 0 || !fast_backend_emit_store_value_to_work_address_offset(emitter, offset, vector_type, cl->elems[i])) {
-					return false;
-				}
-				continue;
+				value_type = vector_type;
 			}
-			i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, i) * elem_size);
-			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, cl->elems[i])) {
+			i32 offset = cast(i32)(matrix_row_major_index_to_offset(base, cast(i32)i) * elem_size);
+			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, value_type, cl->elems[i])) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	case Type_Struct: {
-		type_set_offsets(base);
+	case Type_SimdVector: {
+		// SIMD vector laid out as N contiguous elem-sized lanes.
+		// Emit the compound literal element by element. FieldValue
+		// syntax is not allowed on SIMD vectors.
+		Type *elem_type = base->SimdVector.elem;
+		i32 elem_size  = cast(i32)type_size_of(elem_type);
+		if (cl->elems.count != base->SimdVector.count) {
+			return false;
+		}
 		if (cl->elems.count == 0) {
 			return true;
 		}
-		if (cl->elems[0]->kind == Ast_FieldValue) {
-			for (Ast *elem : cl->elems) {
-				ast_node(fv, FieldValue, elem);
-				Entity *field = entity_of_node(fv->field);
-				if (field == nullptr || field->kind != Entity_Variable) {
-					return false;
-				}
-				Type *field_type = nullptr;
-				i32 offset = cast(i32)type_offset_of(base, field->Variable.field_index, &field_type);
-				if (offset < 0 || field_type == nullptr) {
-					return false;
-				}
-				if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, field_type, fv->value)) {
-					return false;
-				}
-			}
-			return true;
-		}
-		for_array(i, cl->elems) {
-			Type *field_type = nullptr;
-			i32 offset = cast(i32)type_offset_of(base, i, &field_type);
-			if (offset < 0 || field_type == nullptr) {
-				return false;
-			}
-			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, field_type, cl->elems[i])) {
+		for (i64 i = 0; i < cl->elems.count; i++) {
+			i32 offset = cast(i32)(i * elem_size);
+			if (!fast_backend_emit_store_value_to_work_address_offset(emitter, offset, elem_type, cl->elems[i])) {
 				return false;
 			}
 		}
