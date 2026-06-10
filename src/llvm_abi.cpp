@@ -1990,6 +1990,22 @@ gb_internal LB_ABI_INFO(lb_get_abi_info) {
 		array_add(&ft->args, env_param);
 	}
 
+	// Force return-by-pointer (sret) for aggregate returns when the proc
+	// type's `return_by_pointer` flag is set. The non-LLVM backends (e.g.
+	// the fast-backend) flip this flag in their planner to force a single
+	// ABI for the proc — the proc writes the aggregate to a caller-provided
+	// pointer (the hidden first arg), so LLVM-emitted callers do not need
+	// to materialise the return into a stack slot. Without this override
+	// the per-ABI `compute_return_type` follows the platform C calling
+	// convention (e.g. AAPCS64 returns composites ≤ 16 bytes in x0/x1)
+	// which leaves the fast-emitted body and the LLVM-emitted caller
+	// disagreeing on how the result is delivered.
+	if (bt != nullptr && bt->kind == Type_Proc && bt->Proc.return_by_pointer && return_is_defined) {
+		LLVMTypeRef sret_type = return_type;
+		LLVMAttributeRef attr = lb_create_enum_attribute_with_type(m->ctx, "sret", sret_type);
+		ft->ret = lb_arg_type_indirect(sret_type, attr);
+	}
+
 	if (calling_convention == ProcCC_Odin) {
 		// append the `context` pointer
 		lbArgType context_param = lb_arg_type_direct(LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0));

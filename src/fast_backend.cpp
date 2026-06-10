@@ -4460,7 +4460,7 @@ gb_internal char const *fast_backend_arm64_addr_tmp_reg(void) {
 }
 
 gb_internal char const *fast_backend_arm64_param_reg(i32 index) {
-	static char const *regs[] = {"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+	static char const *regs[] = {"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8"};
 	return index < cast(i32)gb_count_of(regs) ? regs[index] : nullptr;
 }
 
@@ -4582,10 +4582,19 @@ gb_internal FastArm64AggregateReturnClass fast_backend_arm64_classify_aggregate_
 	return result;
 }
 
-gb_internal void fast_backend_arm64_assign_arg_slots(FastArm64ArgState *state, i32 abi_args, FastArm64ArgAssignment *slots) {
+gb_internal void fast_backend_arm64_assign_arg_slots(FastArm64ArgState *state, i32 abi_args, FastArm64ArgAssignment *slots, bool is_sret = false) {
 	GB_ASSERT(state != nullptr);
 	GB_ASSERT(abi_args == 1 || abi_args == 2);
 	GB_ASSERT(slots != nullptr);
+
+	// AAPCS64: the sret (return-by-pointer) result pointer is passed in x8,
+	// not in x0. x8 is the indirect result location register and is reserved
+	// for this purpose. Subsequent normal params start at x0.
+	if (is_sret) {
+		GB_ASSERT(abi_args == 1);
+		slots[0] = {FastArm64ArgStorage_Register, 8};
+		return;
+	}
 
 	if (abi_args == 1) {
 		if (!state->stack_only && state->next_reg < 8) {
@@ -4630,7 +4639,7 @@ gb_internal i32 fast_backend_arm64_stack_arg_count(TypeProc *pt, bool return_by_
 	FastArm64ArgState state = {};
 	if (return_by_pointer) {
 		FastArm64ArgAssignment slots[2] = {};
-		fast_backend_arm64_assign_arg_slots(&state, 1, slots);
+		fast_backend_arm64_assign_arg_slots(&state, 1, slots, /*is_sret=*/true);
 	}
 	for (i32 i = 0; i < pt->param_count; i++) {
 		Entity *param = pt->params->Tuple.variables[i];
@@ -7134,7 +7143,7 @@ gb_internal bool fast_backend_emit_call_expr_internal(FastLeafProcEmitter *emitt
 		FastArm64ArgState arm64_arg_state = {};
 		if (return_by_pointer) {
 			FastArm64ArgAssignment slots[2] = {};
-			fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+			fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots, /*is_sret=*/true);
 			array_add(&arm64_arg_slots, slots[0]);
 		}
 		for (i32 i = 0; i < pt->param_count; i++) {
@@ -12633,7 +12642,7 @@ gb_internal bool fast_backend_emit_param_spills(FastLeafProcEmitter *emitter) {
 	FastArm64ArgState arm64_arg_state = {};
 	if (emitter->plan->return_by_pointer) {
 		FastArm64ArgAssignment slots[2] = {};
-		fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots);
+		fast_backend_arm64_assign_arg_slots(&arm64_arg_state, 1, slots, /*is_sret=*/true);
 		if (!fast_backend_emit_arm64_load_assigned_arg(emitter->file, slots[0], fast_backend_arm64_work_reg())) {
 			return false;
 		}
