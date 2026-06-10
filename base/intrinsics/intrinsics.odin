@@ -164,6 +164,7 @@ type_is_comparable            :: proc($T: typeid) -> bool ---
 type_is_simple_compare        :: proc($T: typeid) -> bool --- // easily compared using memcmp (== and !=)
 type_is_nearly_simple_compare :: proc($T: typeid) -> bool --- // easily compared using memcmp (including floats)
 type_is_dereferenceable       :: proc($T: typeid) -> bool ---
+type_is_trivially_copyable    :: proc($T: typeid) -> bool --- // contains no managed/GC-tracked pointers; memcpy yields a fully usable copy
 type_is_valid_map_key         :: proc($T: typeid) -> bool ---
 type_is_valid_matrix_elements :: proc($T: typeid) -> bool ---
 
