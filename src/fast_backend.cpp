@@ -1427,6 +1427,13 @@ gb_internal bool fast_backend_can_emit_switch_case_expr(FastLeafProcPlan *plan, 
 	if (fast_backend_expr_has_call(expr)) {
 		return false;
 	}
+	// String-typed case: materialize as a string aggregate for the
+	// per-field compare done in the switch emit. Same path as the
+	// aggregate-compare operand (Ident for local vars, CompoundLit /
+	// Constant for string literals, SliceExpr, etc.).
+	if (is_type_string(tag_type) || is_type_string16(tag_type)) {
+		return fast_backend_can_emit_aggregate_compare_operand(plan, expr, tag_type);
+	}
 	return fast_backend_can_emit_leaf_expr(plan, expr, tag_type);
 }
 
@@ -3681,22 +3688,47 @@ gb_internal bool fast_backend_plan_switch_stmt(FastGenerator *gen, FastLeafProcP
 	}
 
 	Type *tag_type = t_bool;
+	bool tag_is_string = false;
 	if (ss->tag != nullptr) {
 		tag_type = reduce_tuple_to_single_type(type_and_value_of_expr(ss->tag).type);
-		FastScalarType scalar_type = {};
-		if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
-			error(ss->tag, "Fast backend currently only supports scalar switch tags");
-			return false;
-		}
-		if (fast_backend_expr_has_call(ss->tag)) {
-			error(ss->tag, "Fast backend switch tags cannot contain calls yet");
-			return false;
-		}
-		if (!fast_backend_can_emit_leaf_expr(plan, ss->tag, tag_type)) {
-			error(ss->tag, "Fast backend does not yet support this switch tag expression");
-			return false;
+		tag_is_string = is_type_string(tag_type) || is_type_string16(tag_type);
+		if (!tag_is_string) {
+			FastScalarType scalar_type = {};
+			if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
+				error(ss->tag, "Fast backend currently only supports scalar switch tags");
+				return false;
+			}
+			if (fast_backend_expr_has_call(ss->tag)) {
+				error(ss->tag, "Fast backend switch tags cannot contain calls yet");
+				return false;
+			}
+			if (!fast_backend_can_emit_leaf_expr(plan, ss->tag, tag_type)) {
+				error(ss->tag, "Fast backend does not yet support this switch tag expression");
+				return false;
+			}
+		} else {
+			// String tag: emit-side materializes tag + case to spill slots
+			// and does a field-by-field byte compare. Tag must be
+			// materializable as a string aggregate (Ident, CompoundLit,
+			// SliceExpr, ...). Calls in the tag are not supported yet.
+			if (fast_backend_expr_has_call(ss->tag)) {
+				error(ss->tag, "Fast backend switch tags cannot contain calls yet");
+				return false;
+			}
+			if (!fast_backend_can_emit_aggregate_compare_operand(plan, ss->tag, tag_type)) {
+				error(ss->tag, "Fast backend does not yet support this switch tag expression");
+				return false;
+			}
 		}
 		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(ss->tag));
+		if (tag_is_string) {
+			// Per-case we materialize both operands to spill slots, then
+			// fast_backend_emit_compare_aggregate_at_offset uses 4 more
+			// scratch slots. Baseline 6 covers the per-case frame plus
+			// a small per-operand margin.
+			plan->spill_depth = gb_max(plan->spill_depth,
+			    6 + fast_backend_aggregate_compare_operand_spill_depth(plan, ss->tag, tag_type));
+		}
 	}
 
 	for (Ast *stmt : ss->body->BlockStmt.stmts) {
@@ -3714,10 +3746,17 @@ gb_internal bool fast_backend_plan_switch_stmt(FastGenerator *gen, FastLeafProcP
 
 			expr = unparen_expr(expr);
 			if (is_ast_range(expr)) {
+				// Ranges on string tags aren't supported (string has no
+				// natural ordering). fast_backend_can_emit_switch_case_expr
+				// already rejected this above.
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.left));
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.right));
 			} else {
 				plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr));
+				if (tag_is_string) {
+					plan->spill_depth = gb_max(plan->spill_depth,
+					    6 + fast_backend_aggregate_compare_operand_spill_depth(plan, expr, tag_type));
+				}
 			}
 		}
 
@@ -12256,11 +12295,13 @@ gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, Ast
 
 	Type *tag_type = t_bool;
 	FastScalarType scalar_type = {};
+	bool tag_is_string = false;
 	if (ss->tag != nullptr) {
 		tag_type = reduce_tuple_to_single_type(type_and_value_of_expr(ss->tag).type);
+		tag_is_string = is_type_string(tag_type) || is_type_string16(tag_type);
 	}
 	i32 switch_scope_count = cast(i32)emitter->scope_stack.count;
-	if (!fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
+	if (!tag_is_string && !fast_backend_expr_scalar_type(nullptr, tag_type, &scalar_type)) {
 		return false;
 	}
 
@@ -12324,6 +12365,54 @@ gb_internal bool fast_backend_emit_switch_stmt(FastLeafProcEmitter *emitter, Ast
 				if (!fast_backend_emit_compare_exprs_branch(emitter, ss->tag, rhs, scalar_type, upper_op, body_label, next_label)) {
 					return false;
 				}
+			} else if (tag_is_string) {
+				// String-typed tag. Materialize tag and case to spill
+				// slots, then do a per-field byte compare.
+				//
+				// The temp allocation done by the materialize is invisible
+				// to the function's epilogue (which only restores the
+				// planned frame size). So the cleanup must run on BOTH
+				// the match and mismatch paths before either of them
+				// leaves this iteration — otherwise the body would return
+				// with sp shifted by `temp_bytes` and pop the wrong
+				// link register.
+				//
+				// The per-field jne's inside the compare need a separate
+				// `mismatch_label` from the outer `next_label` (which is
+				// the start of the next case): if they jumped straight
+				// to `next_label` they would bypass the cleanup.
+				i32 spill_base = emitter->current_spill_depth;
+				i32 temp_bytes = 0;
+				i32 mismatch_label = fast_backend_alloc_label(emitter);
+
+				if (!fast_backend_emit_materialize_aggregate_compare_operand(emitter, ss->tag, tag_type, &temp_bytes)) {
+					return false;
+				}
+				fast_backend_emit_push_work_reg(emitter);
+				i32 tag_depth = emitter->current_spill_depth;
+
+				if (!fast_backend_emit_materialize_aggregate_compare_operand(emitter, expr, tag_type, &temp_bytes)) {
+					return false;
+				}
+				fast_backend_emit_push_work_reg(emitter);
+				i32 case_depth = emitter->current_spill_depth;
+
+				// Per-field jne's jump to mismatch_label.
+				if (!fast_backend_emit_compare_aggregate_at_offset(emitter, tag_depth, case_depth, 0, tag_type, mismatch_label)) {
+					return false;
+				}
+
+				// Match path: clean up the temp, then branch to the
+				// case body.
+				emitter->current_spill_depth = spill_base;
+				fast_backend_emit_stack_adjust(emitter, temp_bytes, false);
+				fast_backend_emit_jump_to_label(emitter->file, emitter->plan, body_label);
+
+				// Mismatch path: clean up the temp, then fall through
+				// to the outer `next_label` (start of the next case).
+				fast_backend_emit_label(emitter->file, emitter->plan, mismatch_label);
+				emitter->current_spill_depth = spill_base;
+				fast_backend_emit_stack_adjust(emitter, temp_bytes, false);
 			} else {
 				if (!fast_backend_emit_compare_exprs_branch(emitter, ss->tag, expr, scalar_type, Token_CmpEq, body_label, next_label)) {
 					return false;
