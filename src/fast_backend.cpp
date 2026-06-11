@@ -9,12 +9,10 @@ struct FastGenerator : LinkerData {
 	Checker *checker;
 	Array<FastLiteralBlob> literal_blobs;
 	Array<Entity *> emitted_entities;
-	// Type* (a Type_Proc) for every fast-emitted proc whose ABI the planner
-	// changed (currently: any proc whose result is a non-scalar aggregate,
-	// which the planner forces to return_by_pointer). The LLVM function-type
-	// cache is keyed on Type* and may already be populated by the time the
-	// planner mutates `pt->Proc.return_by_pointer`; the driver invalidates
-	// the cache for these procs after creating the extern lbModule.
+	// Type* (a Type_Proc) for every fast-emitted proc whose internal ABI the
+	// planner changed by forcing return_by_pointer. Link-visible non-Odin
+	// aggregate-return procs are rejected before this point so the mutation
+	// cannot leak into an exported platform ABI.
 	Array<Type *> procs_needing_abi_cache_invalidation;
 };
 
@@ -916,6 +914,30 @@ gb_internal bool fast_backend_allow_external_symbol(Entity *e) {
 		return true;
 	}
 	return false;
+}
+
+gb_internal bool fast_backend_proc_requires_forced_sret(TypeProc *pt) {
+	if (pt == nullptr || pt->result_count == 0 || pt->results == nullptr || pt->results->kind != Type_Tuple) {
+		return false;
+	}
+	if (pt->result_count > 1) {
+		return true;
+	}
+	Entity *result_entity = pt->results->Tuple.variables[0];
+	if (result_entity == nullptr || result_entity->kind != Entity_Variable) {
+		return false;
+	}
+	return !fast_backend_classify_scalar_type(result_entity->type, nullptr);
+}
+
+gb_internal bool fast_backend_proc_has_link_visible_non_odin_abi(Entity *e, TypeProc *pt) {
+	if (e == nullptr || pt == nullptr) {
+		return false;
+	}
+	if (!fast_backend_allow_external_symbol(e)) {
+		return false;
+	}
+	return pt->calling_convention != ProcCC_Odin;
 }
 
 gb_internal BuiltinProcId fast_backend_builtin_proc_id(Ast *expr) {
@@ -4688,6 +4710,11 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	plan->params = array_make<Entity *>(heap_allocator(), 0, pt->param_count);
 	plan->slots = array_make<FastLocalSlot>(heap_allocator(), 0, pt->param_count);
 	plan->expr_slots = array_make<FastExprSlot>(heap_allocator(), 0, 0);
+
+	if (fast_backend_proc_requires_forced_sret(pt) &&
+	    fast_backend_proc_has_link_visible_non_odin_abi(e, pt)) {
+		return fast_backend_reject(FastFallback_CallingConvention, e->token, str_lit("Fast backend does not yet preserve the external aggregate-return ABI for this procedure"));
+	}
 
 	if (pt->param_count != 0) {
 		GB_ASSERT(pt->params != nullptr && pt->params->kind == Type_Tuple);
