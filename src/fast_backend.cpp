@@ -438,15 +438,21 @@ gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	return true;
 }
 
-gb_internal bool fast_backend_is_local_nested_proc(CheckerInfo *info, Entity *e) {
-	if (info == nullptr) {
-		return false;
+gb_internal Entity *fast_backend_top_parent_proc(Entity *e) {
+	if (e == nullptr) {
+		return nullptr;
 	}
-	e = fast_backend_canonical_top_level_entity(e);
-	if (e == nullptr || e->kind != Entity_Procedure || e->pkg == nullptr || e->pkg != info->init_package) {
-		return false;
+	DeclInfo *parent_decl = e->parent_proc_decl.load(std::memory_order_relaxed);
+	Entity *parent = parent_decl != nullptr ? parent_decl->entity.load(std::memory_order_relaxed) : nullptr;
+	while (parent != nullptr) {
+		DeclInfo *next_decl = parent->parent_proc_decl.load(std::memory_order_relaxed);
+		Entity *next = next_decl != nullptr ? next_decl->entity.load(std::memory_order_relaxed) : nullptr;
+		if (next == nullptr) {
+			return parent;
+		}
+		parent = next;
 	}
-	return e->parent_proc_decl.load(std::memory_order_relaxed) != nullptr;
+	return nullptr;
 }
 
 gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
@@ -4943,8 +4949,7 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 	defer (ptr_set_destroy(&seen_emitted_entities));
 
 	for (Entity *e : gen->info->definitions) {
-		if (!fast_entity_is_local(gen->info, e) &&
-		    !fast_backend_is_local_nested_proc(gen->info, e)) {
+		if (!fast_entity_is_local(gen->info, e)) {
 			continue;
 		}
 
@@ -5028,6 +5033,45 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 			fast_backend_reject(FastFallback_TopLevel, e->token, str_lit("Fast backend does not yet support this top-level declaration"));
 			return fast_backend_emit_fallback_error();
 		}
+	}
+
+	for (Entity *e : gen->info->definitions) {
+		u64 flags = e->flags.load(std::memory_order_relaxed);
+		if (flags & EntityFlag_Disabled) {
+			continue;
+		}
+
+		Entity *codegen_entity = fast_backend_canonical_top_level_entity(e);
+		if (codegen_entity == nullptr || codegen_entity->kind != Entity_Procedure) {
+			continue;
+		}
+		Entity *top_parent = fast_backend_top_parent_proc(codegen_entity);
+		if (top_parent == nullptr || !ptr_set_exists(&seen_emitted_entities, top_parent)) {
+			continue;
+		}
+		if (ptr_set_update(&seen_codegen_entities, codegen_entity)) {
+			continue;
+		}
+		if (codegen_entity->Procedure.is_foreign) {
+			continue;
+		}
+		Type *type = base_type(codegen_entity->type);
+		if (type != nullptr &&
+		    type->kind == Type_Proc &&
+		    type->Proc.is_polymorphic &&
+		    !type->Proc.is_poly_specialized) {
+			continue;
+		}
+
+		FastLeafProcPlan plan = {};
+		fast_backend_clear_fallback_reason();
+		if (!fast_backend_plan_leaf_proc(gen, codegen_entity, &plan)) {
+			return fast_backend_emit_fallback_error();
+		}
+		plan.proc_index = cast(i32)procedures->count;
+		array_add(procedures, plan);
+		fast_backend_record_emitted_entity(gen, &seen_emitted_entities, e);
+		fast_backend_record_emitted_entity(gen, &seen_emitted_entities, codegen_entity);
 	}
 
 	return true;
