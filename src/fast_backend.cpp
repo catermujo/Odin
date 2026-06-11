@@ -985,6 +985,48 @@ gb_internal bool fast_backend_proc_has_link_visible_non_odin_abi(Entity *e, Type
 	return pt->calling_convention != ProcCC_Odin;
 }
 
+gb_internal bool fast_backend_proc_has_hybrid_aggregate_abi_gap(Entity *e, TypeProc *pt) {
+	if (e == nullptr || pt == nullptr) {
+		return false;
+	}
+	if (e->parent_proc_decl.load(std::memory_order_relaxed) != nullptr) {
+		return false;
+	}
+	if (!fast_backend_allow_external_symbol(e) || pt->calling_convention != ProcCC_Odin) {
+		return false;
+	}
+
+	if (pt->results != nullptr && pt->results->kind == Type_Tuple) {
+		for_array(i, pt->results->Tuple.variables) {
+			Entity *result = pt->results->Tuple.variables[i];
+			if (result != nullptr && !fast_backend_classify_scalar_type(result->type, nullptr)) {
+				return true;
+			}
+		}
+	}
+
+	if (pt->params != nullptr && pt->params->kind == Type_Tuple) {
+		for_array(i, pt->params->Tuple.variables) {
+			Entity *param = pt->params->Tuple.variables[i];
+			if (param == nullptr || param->kind != Entity_Variable) {
+				continue;
+			}
+			if (fast_backend_classify_scalar_type(param->type, nullptr)) {
+				continue;
+			}
+			Type *type = default_type(param->type);
+			if (type != nullptr &&
+			    (is_type_string(type) || is_type_string16(type) ||
+			     is_type_slice(type) || is_type_dynamic_array(type))) {
+				continue;
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
 gb_internal BuiltinProcId fast_backend_builtin_proc_id(Ast *expr) {
 	Entity *e = entity_of_node(expr);
 	if (e != nullptr && e->kind == Entity_Builtin && e->Builtin.id && e->Builtin.id != BuiltinProc_DIRECTIVE) {
@@ -4760,6 +4802,9 @@ gb_internal bool fast_backend_plan_leaf_proc(FastGenerator *gen, Entity *e, Fast
 	    fast_backend_proc_has_link_visible_non_odin_abi(e, pt)) {
 		return fast_backend_reject(FastFallback_CallingConvention, e->token, str_lit("Fast backend does not yet preserve the external aggregate-return ABI for this procedure"));
 	}
+	if (fast_backend_proc_has_hybrid_aggregate_abi_gap(e, pt)) {
+		return fast_backend_reject(FastFallback_CallingConvention, e->token, str_lit("Fast backend does not yet preserve the hybrid LLVM aggregate ABI for this procedure"));
+	}
 
 	if (pt->param_count != 0) {
 		GB_ASSERT(pt->params != nullptr && pt->params->kind == Type_Tuple);
@@ -8197,7 +8242,11 @@ push_call_arg_slots:
 			fast_backend_emit_stack_adjust(emitter, x64_stack_arg_bytes, false);
 		}
 		if (has_result && !return_by_pointer) {
-			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_return_reg()->r64);
+			if (scalar_result_type.kind == FastScalar_Float) {
+				fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, fast_backend_x64_work_reg(), "xmm0", scalar_result_type);
+			} else {
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_work_reg()->r64, fast_backend_x64_return_reg()->r64);
+			}
 			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), scalar_result_type);
 		}
 	} else {
@@ -8211,7 +8260,11 @@ push_call_arg_slots:
 			fast_backend_emit_pop_tmp_reg(emitter);
 			fast_backend_emit_arm64_store_direct_aggregate_return_to_address(emitter->file, fast_backend_arm64_tmp_reg(), direct_result_class, cast(i32)type_size_of(result_type));
 		} else if (has_result && !return_by_pointer) {
-			gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_return_reg());
+			if (scalar_result_type.kind == FastScalar_Float) {
+				fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, fast_backend_arm64_work_reg(), scalar_result_type.bit_size == 32 ? "s0" : "d0", scalar_result_type);
+			} else {
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_work_reg(), fast_backend_arm64_return_reg());
+			}
 			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), scalar_result_type);
 		}
 		if (arm64_stack_arg_bytes != 0) {
@@ -12402,11 +12455,19 @@ gb_internal bool fast_backend_emit_return_stmt(FastLeafProcEmitter *emitter, Ast
 		if (rs->results.count != 0) {
 			if (preserve_result) {
 				fast_backend_emit_pop_tmp_reg(emitter);
-				if (build_context.metrics.arch == TargetArch_amd64) {
+				if (emitter->plan->return_type.kind == FastScalar_Float && build_context.metrics.arch == TargetArch_amd64) {
+					fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", fast_backend_x64_tmp_reg(), emitter->plan->return_type);
+				} else if (emitter->plan->return_type.kind == FastScalar_Float) {
+					fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, emitter->plan->return_type.bit_size == 32 ? "s0" : "d0", fast_backend_arm64_tmp_reg(), emitter->plan->return_type);
+				} else if (build_context.metrics.arch == TargetArch_amd64) {
 					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_return_reg()->r64, fast_backend_x64_tmp_reg()->r64);
 				} else {
 					gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_arm64_return_reg(), fast_backend_arm64_tmp_reg());
 				}
+			} else if (emitter->plan->return_type.kind == FastScalar_Float && build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", fast_backend_x64_work_reg(), emitter->plan->return_type);
+			} else if (emitter->plan->return_type.kind == FastScalar_Float) {
+				fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, emitter->plan->return_type.bit_size == 32 ? "s0" : "d0", fast_backend_arm64_work_reg(), emitter->plan->return_type);
 			} else if (build_context.metrics.arch == TargetArch_amd64) {
 				gb_fprintf(emitter->file, "\tmov %s, %s\n", fast_backend_x64_return_reg()->r64, fast_backend_x64_work_reg()->r64);
 			} else {
