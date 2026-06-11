@@ -8292,6 +8292,96 @@ gb_internal bool fast_backend_emit_builtin_call_expr(FastLeafProcEmitter *emitte
 		}
 		return true;
 	}
+	if (id == BuiltinProc_abs) {
+		if (ce->args.count != 1) {
+			return false;
+		}
+		Ast *arg = ce->args[0];
+		Type *arg_type = type_of_expr(arg);
+		FastScalarType st = {};
+		if (arg_type == nullptr || !fast_backend_classify_scalar_type(arg_type, &st)) {
+			return false;
+		}
+		if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+			return false;
+		}
+
+		if (st.kind == FastScalar_Unsigned) {
+			return true;
+		}
+		if (st.kind == FastScalar_Signed) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				auto *work = fast_backend_x64_work_reg();
+				auto *tmp  = fast_backend_x64_tmp_reg();
+				gb_fprintf(emitter->file, "\tmov %s, %s\n", tmp->r64, work->r64);
+				gb_fprintf(emitter->file, "\tsar %s, 63\n", tmp->r64);
+				gb_fprintf(emitter->file, "\txor %s, %s\n", work->r64, tmp->r64);
+				gb_fprintf(emitter->file, "\tsub %s, %s\n", work->r64, tmp->r64);
+				fast_backend_emit_x64_canonicalize(emitter->file, work, st);
+			} else {
+				char const *work = fast_backend_arm64_work_reg();
+				char const *tmp  = fast_backend_arm64_tmp_reg();
+				gb_fprintf(emitter->file, "\tasr %s, %s, #63\n", tmp, work);
+				gb_fprintf(emitter->file, "\teor %s, %s, %s\n", work, work, tmp);
+				gb_fprintf(emitter->file, "\tsub %s, %s, %s\n", work, work, tmp);
+				fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
+			}
+			return true;
+		}
+		if (st.kind != FastScalar_Float || (st.bit_size != 32 && st.bit_size != 64)) {
+			return false;
+		}
+
+		bool little = is_type_endian_little(arg_type) ||
+			(is_type_endian_platform(arg_type) && build_context.endian_kind == TargetEndian_Little);
+		u64 mask = 0;
+		switch (st.bit_size) {
+		case 32: mask = little ? 0x7fffffffULL : 0xffffff7fULL; break;
+		case 64: mask = little ? 0x7fffffffffffffffULL : 0xffffffffffffff7fULL; break;
+		default: return false;
+		}
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			gb_fprintf(emitter->file, "\tand %s, 0x%llx\n", work->r64, cast(unsigned long long)mask);
+			fast_backend_emit_x64_canonicalize(emitter->file, work, st);
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *tmp  = fast_backend_arm64_tmp_reg();
+			fast_backend_emit_arm64_load_imm(emitter->file, tmp, mask);
+			gb_fprintf(emitter->file, "\tand %s, %s, %s\n", work, work, tmp);
+			fast_backend_emit_arm64_canonicalize(emitter->file, work, st);
+		}
+		return true;
+	}
+	if (id == BuiltinProc_sqrt) {
+		if (ce->args.count != 1) {
+			return false;
+		}
+		Ast *arg = ce->args[0];
+		Type *arg_type = type_of_expr(arg);
+		FastScalarType st = {};
+		if (arg_type == nullptr || !fast_backend_classify_scalar_type(arg_type, &st) || st.kind != FastScalar_Float) {
+			return false;
+		}
+		if (!fast_backend_emit_leaf_expr(emitter, arg)) {
+			return false;
+		}
+
+		if (build_context.metrics.arch == TargetArch_amd64) {
+			auto *work = fast_backend_x64_work_reg();
+			fast_backend_emit_x64_move_scalar_bits_to_fp(emitter->file, "xmm0", work, st);
+			gb_fprintf(emitter->file, "\tsqrt%s xmm0, xmm0\n", st.bit_size == 32 ? "ss" : "sd");
+			fast_backend_emit_x64_move_fp_bits_to_scalar(emitter->file, work, "xmm0", st);
+		} else {
+			char const *work = fast_backend_arm64_work_reg();
+			char const *fp = st.bit_size == 32 ? "s0" : "d0";
+			fast_backend_emit_arm64_move_scalar_bits_to_fp(emitter->file, fp, work, st);
+			gb_fprintf(emitter->file, "\tfsqrt %s, %s\n", fp, fp);
+			fast_backend_emit_arm64_move_fp_bits_to_scalar(emitter->file, work, fp, st);
+		}
+		return true;
+	}
 	// Bit intrinsics: single-arg integer scalar
 	if (id == BuiltinProc_count_ones || id == BuiltinProc_count_zeros ||
 	    id == BuiltinProc_count_trailing_zeros || id == BuiltinProc_count_leading_zeros ||
