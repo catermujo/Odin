@@ -4659,21 +4659,39 @@ gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPl
 				return fast_backend_reject(FastFallback_Range, value, str_lit("Fast backend does not yet support this range value"));
 			}
 		}
-	if (!fast_backend_add_expr_slot(plan, rs->expr, t_int, nullptr)) {
-		return false;
-	}
 
 	Ast *expr = unparen_expr(rs->expr);
 	if (expr == nullptr) {
 		return fast_backend_reject(FastFallback_Range, rs->token, str_lit("Fast backend expected a range expression"));
 	}
 
+	Type *expr_type = base_type(type_deref(type_of_expr(expr)));
+	Type *idx_slot_type = t_int;
 	if (is_ast_range(expr)) {
 		Ast *value = fast_backend_strip_range_value(rs->vals[0]);
-		if (value == nullptr || is_blank_ident(value)) {
-			return fast_backend_reject(FastFallback_Range, rs->vals[0], str_lit("Fast backend range intervals require a value variable"));
+		if ((value == nullptr || is_blank_ident(value)) &&
+		    rs->vals.count > 1 &&
+		    rs->vals[1] != nullptr &&
+		    !is_blank_ident(fast_backend_strip_range_value(rs->vals[1]))) {
+			return fast_backend_reject(FastFallback_Range, rs->vals[1], str_lit("Fast backend range intervals without a value cannot bind an index yet"));
 		}
-		Type *iter_type = type_of_expr(value);
+
+		Type *iter_type = value != nullptr && !is_blank_ident(value)
+			? type_of_expr(value)
+			: reduce_tuple_to_single_type(type_of_expr(expr->BinaryExpr.left));
+		if (value == nullptr || is_blank_ident(value)) {
+			idx_slot_type = iter_type;
+		}
+	}
+	if (idx_slot_type == nullptr || !fast_backend_add_expr_slot(plan, rs->expr, idx_slot_type, nullptr)) {
+		return false;
+	}
+
+	if (is_ast_range(expr)) {
+		Ast *value = fast_backend_strip_range_value(rs->vals[0]);
+		Type *iter_type = value != nullptr && !is_blank_ident(value)
+			? type_of_expr(value)
+			: reduce_tuple_to_single_type(type_of_expr(expr->BinaryExpr.left));
 		if (iter_type == nullptr) {
 			iter_type = reduce_tuple_to_single_type(type_of_expr(expr->BinaryExpr.left));
 		}
@@ -4688,7 +4706,6 @@ gb_internal bool fast_backend_plan_range_stmt(FastGenerator *gen, FastLeafProcPl
 		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.left));
 		plan->spill_depth = gb_max(plan->spill_depth, fast_backend_leaf_expr_spill_depth(expr->BinaryExpr.right));
 	} else {
-		Type *expr_type = base_type(type_deref(type_of_expr(expr)));
 		if (expr_type == nullptr) {
 			return fast_backend_reject(FastFallback_Range, rs->expr, str_lit("Fast backend expected an iterable expression"));
 		}
@@ -13584,6 +13601,7 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 	Ast *val1 = rs->vals.count > 1 ? fast_backend_strip_range_value(rs->vals[1]) : nullptr;
 	Entity *val0_entity = (val0 != nullptr && !is_blank_ident(val0)) ? entity_of_node(val0) : nullptr;
 	Entity *val1_entity = (val1 != nullptr && !is_blank_ident(val1)) ? entity_of_node(val1) : nullptr;
+	Type *expr_type = base_type(type_deref(type_of_expr(expr)));
 
 	FastLocalSlot idx_slot = {};
 	if (!fast_backend_find_expr_slot(emitter->plan, rs->expr, &idx_slot)) {
@@ -13633,7 +13651,7 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 	// collection branch. Forward string iteration decodes from `idx`
 	// then increments, while reverse string iteration decodes the rune
 	// ending at `idx` then decrements.
-	Type *init_expr_type = base_type(type_deref(type_of_expr(expr)));
+	Type *init_expr_type = expr_type;
 	if (init_expr_type != nullptr && (is_type_string(init_expr_type) || is_type_string16(init_expr_type))) {
 		if (rs->reverse) {
 			if (!fast_backend_emit_load_range_expr_length(emitter, expr, len_type)) {
@@ -13648,11 +13666,8 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 	}
 
 	if (is_ast_range(expr)) {
-		if (val0_entity == nullptr) {
-			return false;
-		}
-
-		Type *iter_type = type_of_expr(val0);
+		bool interval_uses_idx_as_value = (val0_entity == nullptr);
+		Type *iter_type = interval_uses_idx_as_value ? idx_slot.value_type : type_of_expr(val0);
 		FastScalarType iter_scalar = {};
 		if (iter_type == nullptr || !fast_backend_classify_scalar_type(iter_type, &iter_scalar)) {
 			return false;
@@ -13665,22 +13680,23 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 		default: return false;
 		}
 
-		if (!fast_backend_emit_store_value_to_entity(emitter, val0_entity, expr->BinaryExpr.left)) {
+		if (interval_uses_idx_as_value) {
+			if (!fast_backend_emit_leaf_expr_as_type(emitter, expr->BinaryExpr.left, iter_scalar)) {
+				return false;
+			}
+			fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+		} else if (!fast_backend_emit_store_value_to_entity(emitter, val0_entity, expr->BinaryExpr.left)) {
 			return false;
 		}
 
 		fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
+		FastLocalSlot value_slot = interval_uses_idx_as_value ? idx_slot : FastLocalSlot{};
+		if (!interval_uses_idx_as_value && !fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
+			return false;
+		}
 		if (build_context.metrics.arch == TargetArch_amd64) {
-			FastLocalSlot value_slot = {};
-			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
-				return false;
-			}
 			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_x64_work_reg());
 		} else {
-			FastLocalSlot value_slot = {};
-			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
-				return false;
-			}
 			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_arm64_work_reg());
 		}
 		fast_backend_emit_push_work_reg(emitter);
@@ -13707,37 +13723,33 @@ gb_internal bool fast_backend_emit_range_stmt(FastLeafProcEmitter *emitter, AstR
 
 		fast_backend_emit_label(emitter->file, emitter->plan, post_label);
 		if (build_context.metrics.arch == TargetArch_amd64) {
-			FastLocalSlot value_slot = {};
-			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
-				return false;
-			}
 			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_x64_work_reg());
 			gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
 			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), iter_scalar);
 			fast_backend_emit_store_work_to_slot(emitter, value_slot);
-			fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
-			gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
-			fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
 		} else {
-			FastLocalSlot value_slot = {};
-			if (!fast_backend_find_slot(emitter->plan, val0_entity, &value_slot)) {
-				return false;
-			}
 			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, value_slot, fast_backend_arm64_work_reg());
 			gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
 			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), iter_scalar);
 			fast_backend_emit_store_work_to_slot(emitter, value_slot);
-			fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
-			gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
-			fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
 		}
-		fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+		if (!interval_uses_idx_as_value) {
+			if (build_context.metrics.arch == TargetArch_amd64) {
+				fast_backend_emit_x64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_x64_work_reg());
+				gb_fprintf(emitter->file, "\tadd %s, 1\n", fast_backend_x64_work_reg()->r64);
+				fast_backend_emit_x64_canonicalize(emitter->file, fast_backend_x64_work_reg(), idx_type);
+			} else {
+				fast_backend_emit_arm64_load_slot(emitter->file, emitter->plan, idx_slot, fast_backend_arm64_work_reg());
+				gb_fprintf(emitter->file, "\tadd %s, %s, #1\n", fast_backend_arm64_work_reg(), fast_backend_arm64_work_reg());
+				fast_backend_emit_arm64_canonicalize(emitter->file, fast_backend_arm64_work_reg(), idx_type);
+			}
+			fast_backend_emit_store_work_to_slot(emitter, idx_slot);
+		}
 		fast_backend_emit_jump_to_label(emitter->file, emitter->plan, loop_label);
 		fast_backend_emit_label(emitter->file, emitter->plan, done_label);
 		return fast_backend_emit_leave_scope(emitter, rs->scope);
 	}
 
-	Type *expr_type = base_type(type_deref(type_of_expr(expr)));
 	if (expr_type != nullptr && (is_type_string(expr_type) || is_type_string16(expr_type))) {
 		fast_backend_emit_label(emitter->file, emitter->plan, loop_label);
 		if (build_context.metrics.arch == TargetArch_amd64) {
