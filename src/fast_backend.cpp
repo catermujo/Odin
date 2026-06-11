@@ -438,6 +438,17 @@ gb_internal bool fast_entity_is_local(CheckerInfo *info, Entity *e) {
 	return true;
 }
 
+gb_internal bool fast_backend_is_local_nested_proc(CheckerInfo *info, Entity *e) {
+	if (info == nullptr) {
+		return false;
+	}
+	e = fast_backend_canonical_top_level_entity(e);
+	if (e == nullptr || e->kind != Entity_Procedure || e->pkg == nullptr || e->pkg != info->init_package) {
+		return false;
+	}
+	return e->parent_proc_decl.load(std::memory_order_relaxed) != nullptr;
+}
+
 gb_internal bool fast_init_generator(FastGenerator *gen, Checker *c) {
 	if (global_error_collector.count != 0) {
 		return false;
@@ -832,10 +843,38 @@ gb_internal void fast_backend_debug_log_fallback_reason(char const *entity_kind,
 }
 
 gb_internal String fast_backend_mangle_asm_name(String name) {
-	if (build_context.metrics.os != TargetOs_darwin) {
+	bool needs_escape = false;
+	for (isize i = 0; i < name.len; i++) {
+		u8 c = name.text[i];
+		if (c == '"' || c == '\\') {
+			needs_escape = true;
+			break;
+		}
+	}
+
+	if (build_context.metrics.os != TargetOs_darwin && !needs_escape) {
 		return name;
 	}
-	return concatenate_strings(permanent_allocator(), str_lit("_"), name);
+
+	gbString mangled = gb_string_make_reserve(temporary_allocator(), name.len + 8);
+	if (build_context.metrics.os == TargetOs_darwin) {
+		mangled = gb_string_appendc(mangled, "_");
+	}
+	for (isize i = 0; i < name.len; i++) {
+		u8 c = name.text[i];
+		switch (c) {
+		case '"':
+			mangled = gb_string_append_length(mangled, "\\\"", 2);
+			break;
+		case '\\':
+			mangled = gb_string_append_length(mangled, "\\\\", 2);
+			break;
+		default:
+			mangled = gb_string_append_length(mangled, &c, 1);
+			break;
+		}
+	}
+	return copy_string(permanent_allocator(), make_string(cast(u8 const *)mangled, gb_string_length(mangled)));
 }
 
 gb_internal i32 fast_backend_add_literal_blob(FastGenerator *gen, u8 const *data, i32 size, i32 align) {
@@ -4904,7 +4943,8 @@ gb_internal bool fast_backend_collect_program(FastGenerator *gen, Array<FastGlob
 	defer (ptr_set_destroy(&seen_emitted_entities));
 
 	for (Entity *e : gen->info->definitions) {
-		if (!fast_entity_is_local(gen->info, e)) {
+		if (!fast_entity_is_local(gen->info, e) &&
+		    !fast_backend_is_local_nested_proc(gen->info, e)) {
 			continue;
 		}
 
@@ -7516,13 +7556,7 @@ gb_internal bool fast_backend_emit_materialize_aggregate_arg_pointer(FastLeafPro
 	    is_type_slice(param_type) || is_type_dynamic_array(param_type)) {
 		fast_backend_emit_push_work_reg(emitter);
 	}
-	if (fast_backend_can_emit_array_binary_expr(emitter->plan, arg, param_type)) {
-		return fast_backend_emit_store_array_binary_expr_to_work_address(emitter, param_type, arg);
-	}
-	if (fast_backend_can_emit_slice_compound_lit_expr(emitter->plan, arg, param_type)) {
-		return fast_backend_emit_store_slice_compound_lit_to_work_address(emitter, param_type, arg);
-	}
-	return fast_backend_emit_store_constant_aggregate_to_address(emitter, param_type, arg);
+	return fast_backend_emit_store_value_to_work_address(emitter, param_type, arg);
 }
 
 gb_internal bool fast_backend_emit_pack_variadic_slice_arg(FastLeafProcEmitter *emitter, Type *slice_type, Slice<Ast *> elems, i32 *temp_bytes_) {
