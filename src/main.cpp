@@ -4559,7 +4559,6 @@ int main(int arg_count, char const **arg_ptr) {
 		return 1;
 	}
 	defer (destroy_parser(parser));
-	parser->package_parsed_proc = check_collect_package_entities_worker_proc;
 
 	// TODO(jeroen): Remove the `init_filename` param.
 	// Let's put that on `build_context.build_paths[0]` instead.
