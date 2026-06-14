@@ -5883,6 +5883,7 @@ gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, Tok
 
 	array_init(&f->comments, ast_allocator(f), 0, 0);
 	array_init(&f->imports,  ast_allocator(f), 0, 0);
+	array_init(&f->deferred_build_tags, ast_allocator(f), 0, 0);
 
 	f->curr_proc = nullptr;
 
@@ -5894,6 +5895,7 @@ gb_internal void destroy_ast_file(AstFile *f) {
 	array_free(&f->tokens);
 	array_free(&f->comments);
 	array_free(&f->imports);
+	array_free(&f->deferred_build_tags);
 }
 
 gb_internal bool init_parser(Parser *p) {
@@ -6503,23 +6505,56 @@ gb_internal bool build_require_space_after(String s, String prefix) {
 	return false;
 }
 
-gb_internal bool parse_build_tag(Token token_for_pos, String s) {
+gb_internal BuildTagConditionValue build_tag_condition_and(BuildTagConditionValue lhs, BuildTagConditionValue rhs) {
+	if (lhs == BuildTagCondition_False || rhs == BuildTagCondition_False) {
+		return BuildTagCondition_False;
+	}
+	if (lhs == BuildTagCondition_Unknown || rhs == BuildTagCondition_Unknown) {
+		return BuildTagCondition_Unknown;
+	}
+	return BuildTagCondition_True;
+}
+
+gb_internal BuildTagConditionValue build_tag_condition_or(BuildTagConditionValue lhs, BuildTagConditionValue rhs) {
+	if (lhs == BuildTagCondition_True || rhs == BuildTagCondition_True) {
+		return BuildTagCondition_True;
+	}
+	if (lhs == BuildTagCondition_Unknown || rhs == BuildTagCondition_Unknown) {
+		return BuildTagCondition_Unknown;
+	}
+	return BuildTagCondition_False;
+}
+
+gb_internal BuildTagConditionValue parser_build_tag_define_resolver(void *, Token token_for_pos, String define_name) {
+	char const *key = string_intern_cstring(define_name);
+	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+		map_set(&build_context.used_defined_values, key, true);
+		if (v->kind != ExactValue_Bool) {
+			syntax_error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
+			return BuildTagCondition_False;
+		}
+		return v->value_bool ? BuildTagCondition_True : BuildTagCondition_False;
+	}
+	return BuildTagCondition_Unknown;
+}
+
+gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s, BuildTagDefineResolverProc *resolve_define, void *user_data) {
 	String const prefix = str_lit("build");
 	GB_ASSERT(string_starts_with(s, prefix));
 	if (build_require_space_after(s, prefix)) {
 		syntax_error(token_for_pos, "Expected a space after #+%.*s", LIT(prefix));
-		return true;
+		return BuildTagCondition_False;
 	}
 	s = string_trim_whitespace(substring(s, prefix.len, s.len));
 
 	if (s.len == 0) {
-		return true;
+		return BuildTagCondition_True;
 	}
 
-	bool any_correct = false;
+	BuildTagConditionValue any_correct = BuildTagCondition_False;
 
 	while (s.len > 0) {
-		bool this_kind_correct = true;
+		BuildTagConditionValue this_kind_correct = BuildTagCondition_True;
 
 		bool this_kind_os_seen = false;
 		bool this_kind_arch_seen = false;
@@ -6543,39 +6578,34 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 				continue;
 			}
 			if (p == "ignore") {
-				this_kind_correct = false;
+				this_kind_correct = BuildTagCondition_False;
 				continue;
 			}
 
-			if (p == "bedrock") {
-				this_kind_correct = build_context.bedrock == !is_notted;
-				continue;
-			}
-
-			String const define_prefix = str_lit("define:");
-			if (string_starts_with(p, define_prefix)) {
-				String define_name = substring(p, define_prefix.len, p.len);
-				if (!string_is_valid_identifier(define_name) || define_name == "_") {
-					syntax_error(token_for_pos, "Invalid build define name: '%.*s'. Expected an identifier after 'define:'", LIT(define_name));
-					break;
-				}
-
-				bool define_value = false;
-				char const *key = string_intern_cstring(define_name);
-				if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
-					map_set(&build_context.used_defined_values, key, true);
-					if (v->kind != ExactValue_Bool) {
-						syntax_error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
+				String const define_prefix = str_lit("define:");
+				if (string_starts_with(p, define_prefix)) {
+					String define_name = substring(p, define_prefix.len, p.len);
+					if (!string_is_valid_identifier(define_name) || define_name == "_") {
+						syntax_error(token_for_pos, "Invalid build define name: '%.*s'. Expected an identifier after 'define:'", LIT(define_name));
 						break;
 					}
-					define_value = v->value_bool;
+
+					BuildTagConditionValue define_value = BuildTagCondition_Unknown;
+					if (resolve_define != nullptr) {
+						define_value = resolve_define(user_data, token_for_pos, define_name);
+					}
+					if (is_notted && define_value != BuildTagCondition_Unknown) {
+						define_value = define_value == BuildTagCondition_True ? BuildTagCondition_False : BuildTagCondition_True;
+					}
+					this_kind_correct = build_tag_condition_and(this_kind_correct, define_value);
+					continue;
 				}
-				if (is_notted) {
-					define_value = !define_value;
+
+				if (p == "bedrock") {
+					BuildTagConditionValue bedrock_value = build_context.bedrock == !is_notted ? BuildTagCondition_True : BuildTagCondition_False;
+					this_kind_correct = build_tag_condition_and(this_kind_correct, bedrock_value);
+					continue;
 				}
-				this_kind_correct = this_kind_correct && define_value;
-				continue;
-			}
 
 			Subtarget subtarget     = Subtarget_Invalid;
 			String    subtarget_str = {};
@@ -6615,17 +6645,17 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 
 				GB_ASSERT(arch == TargetArch_Invalid);
 				if (is_notted) {
-					this_kind_correct = this_kind_correct && (os != build_context.metrics.os || !same_subtarget);
+					this_kind_correct = build_tag_condition_and(this_kind_correct, (os != build_context.metrics.os || !same_subtarget) ? BuildTagCondition_True : BuildTagCondition_False);
 				} else {
-					this_kind_correct = this_kind_correct && (os == build_context.metrics.os && same_subtarget);
+					this_kind_correct = build_tag_condition_and(this_kind_correct, (os == build_context.metrics.os && same_subtarget) ? BuildTagCondition_True : BuildTagCondition_False);
 				}
 			} else if (arch != TargetArch_Invalid) {
 				this_kind_arch_seen = true;
 
 				if (is_notted) {
-					this_kind_correct = this_kind_correct && (arch != build_context.metrics.arch);
+					this_kind_correct = build_tag_condition_and(this_kind_correct, (arch != build_context.metrics.arch) ? BuildTagCondition_True : BuildTagCondition_False);
 				} else {
-					this_kind_correct = this_kind_correct && (arch == build_context.metrics.arch);
+					this_kind_correct = build_tag_condition_and(this_kind_correct, (arch == build_context.metrics.arch) ? BuildTagCondition_True : BuildTagCondition_False);
 				}
 			}
 			if (os == TargetOs_Invalid && arch == TargetArch_Invalid) {
@@ -6634,10 +6664,14 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 			}
 		} while (s.len > 0);
 
-		any_correct = any_correct || this_kind_correct;
+		any_correct = build_tag_condition_or(any_correct, this_kind_correct);
 	}
 
 	return any_correct;
+}
+
+gb_internal BuildTagConditionValue parse_build_tag(Token token_for_pos, String s) {
+	return evaluate_build_tag_condition(token_for_pos, s, parser_build_tag_define_resolver, nullptr);
 }
 
 gb_internal String vet_tag_get_token(String s, String *out, bool allow_colon) {
@@ -6899,8 +6933,13 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 			return false;
 		}
 	} else if (string_starts_with(lc, str_lit("build"))) {
-		if (!parse_build_tag(tok, lc)) {
+		BuildTagConditionValue result = parse_build_tag(tok, lc);
+		if (result == BuildTagCondition_False) {
 			return false;
+		}
+		if (result == BuildTagCondition_Unknown) {
+			array_add(&f->deferred_build_tags, lc);
+			f->flags |= AstFile_HasDeferredBuildTags;
 		}
 	} else if (string_starts_with(lc, str_lit("vet"))) {
 		f->vet_flags = parse_vet_tag(tok, lc, ast_file_vet_flags(f));

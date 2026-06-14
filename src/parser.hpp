@@ -96,6 +96,8 @@ enum AstFileFlag : u32 {
 	AstFile_IsLazy    = 1<<4,
 
 	AstFile_NoInstrumentation = 1<<5,
+	AstFile_HasDeferredBuildTags = 1<<6,
+	AstFile_ExcludedByDeferredBuildTags = 1<<7,
 };
 
 enum AstDelayQueueKind {
@@ -153,6 +155,7 @@ struct AstFile {
 	ParseFileError last_error;
 	f64            time_to_tokenize; // seconds
 	f64            time_to_parse;    // seconds
+	Array<String>  deferred_build_tags;
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
 	CommentGroup *line_comment;     // Comment after the semicolon
@@ -939,6 +942,16 @@ gb_internal gb_inline bool is_ast_when_stmt(Ast *node) {
 gb_internal gb_inline gbAllocator ast_allocator(AstFile *f) {
 	return permanent_allocator();
 }
+
+enum BuildTagConditionValue {
+	BuildTagCondition_False,
+	BuildTagCondition_True,
+	BuildTagCondition_Unknown,
+};
+
+typedef BuildTagConditionValue BuildTagDefineResolverProc(void *user_data, Token token_for_pos, String define_name);
+
+gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s, BuildTagDefineResolverProc *resolve_define, void *user_data);
 
 gb_internal Ast *alloc_ast_node(AstFile *f, AstKind kind);
 

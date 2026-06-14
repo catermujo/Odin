@@ -6653,6 +6653,9 @@ struct CollectEntityWorkerData {
 
 gb_global CollectEntityWorkerData *collect_entity_worker_data;
 
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
+
 gb_internal WORKER_TASK_PROC(check_collect_entities_all_worker_proc) {
 	CollectEntityWorkerData *wd = &collect_entity_worker_data[current_thread_index()];
 
@@ -6661,6 +6664,9 @@ gb_internal WORKER_TASK_PROC(check_collect_entities_all_worker_proc) {
 	UntypedExprInfoMap *untyped = &wd->untyped;
 
 	AstFile *f = cast(AstFile *)data;
+	if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+		return 0;
+	}
 	reset_checker_context(ctx, f, untyped);
 
 	check_collect_entities(ctx, f->decls);
@@ -6727,6 +6733,152 @@ gb_internal void check_export_entities(Checker *c) {
 		thread_pool_add_task(check_export_entities_worker_proc, pkg);
 	}
 	thread_pool_wait();
+}
+
+struct DeferredBuildTagResolverData {
+	Checker *checker;
+	AstPackage *pkg;
+	bool missing_is_false;
+};
+
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f) {
+	return (f->flags & AstFile_ExcludedByDeferredBuildTags) != 0;
+}
+
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f) {
+	return (f->flags & AstFile_HasDeferredBuildTags) != 0;
+}
+
+gb_internal BuildTagConditionValue checker_build_tag_define_resolver(void *user_data, Token token_for_pos, String define_name) {
+	auto *data = cast(DeferredBuildTagResolverData *)user_data;
+	char const *key = string_intern_cstring(define_name);
+	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+		map_set(&build_context.used_defined_values, key, true);
+		if (v->kind != ExactValue_Bool) {
+			error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
+			return BuildTagCondition_False;
+		}
+		return v->value_bool ? BuildTagCondition_True : BuildTagCondition_False;
+	}
+
+	Entity *e = scope_lookup_current(data->pkg->scope, string_interner_insert(define_name));
+	if (e == nullptr) {
+		return data->missing_is_false ? BuildTagCondition_False : BuildTagCondition_Unknown;
+	}
+
+	if (e->kind == Entity_Constant && e->decl_info != nullptr && e->state != EntityState_Resolved) {
+		check_single_global_entity(data->checker, e, e->decl_info);
+	}
+
+	if (e->kind != Entity_Constant) {
+		error(token_for_pos, "Build tag define '%.*s' must be a boolean constant", LIT(define_name));
+		return BuildTagCondition_False;
+	}
+	if (e->state != EntityState_Resolved) {
+		return data->missing_is_false ? BuildTagCondition_False : BuildTagCondition_Unknown;
+	}
+	if (e->Constant.value.kind != ExactValue_Bool) {
+		error(token_for_pos, "Build tag define '%.*s' must be a boolean constant", LIT(define_name));
+		return BuildTagCondition_False;
+	}
+
+	return e->Constant.value.value_bool ? BuildTagCondition_True : BuildTagCondition_False;
+}
+
+gb_internal BuildTagConditionValue check_evaluate_deferred_build_tags(Checker *c, AstFile *f, bool missing_is_false) {
+	DeferredBuildTagResolverData data = {};
+	data.checker = c;
+	data.pkg = f->pkg;
+	data.missing_is_false = missing_is_false;
+
+	BuildTagConditionValue result = BuildTagCondition_True;
+	for (String tag : f->deferred_build_tags) {
+		BuildTagConditionValue tag_result = evaluate_build_tag_condition(ast_token(f->pkg_decl), tag, checker_build_tag_define_resolver, &data);
+		if (result == BuildTagCondition_False || tag_result == BuildTagCondition_False) {
+			result = BuildTagCondition_False;
+		} else if (result == BuildTagCondition_Unknown || tag_result == BuildTagCondition_Unknown) {
+			result = BuildTagCondition_Unknown;
+		} else {
+			result = BuildTagCondition_True;
+		}
+		if (result == BuildTagCondition_False) {
+			break;
+		}
+	}
+	return result;
+}
+
+gb_internal bool check_collect_file_decls_from_ast_file(CheckerContext *ctx, AstPackage *pkg, AstFile *f, UntypedExprInfoMap *untyped) {
+	reset_checker_context(ctx, f, untyped);
+	ctx->collect_delayed_decls = true;
+
+	for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_Import]) {
+		check_add_import_decl(ctx, decl);
+	}
+	array_clear(&f->delayed_decls_queues[AstDelayQueue_Import]);
+
+	if (collect_file_decls(ctx, f->decls)) {
+		check_export_entities_in_pkg(ctx, pkg, untyped);
+		return true;
+	}
+
+	add_untyped_expressions(ctx->info, untyped);
+	return false;
+}
+
+gb_internal bool check_collect_deferred_build_tag_files(Checker *c, CheckerContext *ctx, AstPackage *pkg, UntypedExprInfoMap *untyped) {
+	for (;;) {
+		bool progress = false;
+		bool pending = false;
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (!ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+
+			BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, false);
+			if (result == BuildTagCondition_Unknown) {
+				pending = true;
+				continue;
+			}
+
+			f->flags &= ~AstFile_HasDeferredBuildTags;
+			if (result == BuildTagCondition_False) {
+				f->flags |= AstFile_ExcludedByDeferredBuildTags;
+				progress = true;
+				continue;
+			}
+
+			if (check_collect_file_decls_from_ast_file(ctx, pkg, f, untyped)) {
+				return true;
+			}
+			progress = true;
+		}
+
+		if (!pending || !progress) {
+			break;
+		}
+	}
+
+	for_array(i, pkg->files) {
+		AstFile *f = pkg->files[i];
+		if (!ast_file_has_deferred_build_tags(f)) {
+			continue;
+		}
+
+		BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, true);
+		f->flags &= ~AstFile_HasDeferredBuildTags;
+		if (result == BuildTagCondition_False) {
+			f->flags |= AstFile_ExcludedByDeferredBuildTags;
+			continue;
+		}
+		if (check_collect_file_decls_from_ast_file(ctx, pkg, f, untyped)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 gb_internal void check_import_entities(Checker *c) {
@@ -6800,23 +6952,19 @@ gb_internal void check_import_entities(Checker *c) {
 
 		for_array(i, pkg->files) {
 			AstFile *f = pkg->files[i];
-
-			reset_checker_context(&ctx, f, &untyped);
-			ctx.collect_delayed_decls = true;
-
-			// Check import declarations first to simplify things
-			for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_Import]) {
-				check_add_import_decl(&ctx, decl);
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
 			}
-			array_clear(&f->delayed_decls_queues[AstDelayQueue_Import]);
-
-			if (collect_file_decls(&ctx, f->decls)) {
-				check_export_entities_in_pkg(&ctx, pkg, &untyped);
+			if (check_collect_file_decls_from_ast_file(&ctx, pkg, f, &untyped)) {
 				pkg_index = min_pkg_index-1;
 				break;
 			}
-
-			add_untyped_expressions(ctx.info, &untyped);
+		}
+		if (pkg_index < 0) {
+			continue;
+		}
+		if (check_collect_deferred_build_tag_files(c, &ctx, pkg, &untyped)) {
+			pkg_index = min_pkg_index-1;
 		}
 		if (pkg_index < 0) {
 			continue;
@@ -6832,6 +6980,9 @@ gb_internal void check_import_entities(Checker *c) {
 
 		for_array(i, pkg->files) {
 			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			reset_checker_context(&ctx, f, &untyped);
 
 			for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_Import]) {
@@ -6843,6 +6994,9 @@ gb_internal void check_import_entities(Checker *c) {
 
 		for_array(i, pkg->files) {
 			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			reset_checker_context(&ctx, f, &untyped);
 			correct_type_aliases_in_scope(&ctx, pkg->scope);
 		}
