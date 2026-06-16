@@ -1,3 +1,4 @@
+#+no-instrumentation
 package strings
 
 import "base:runtime"

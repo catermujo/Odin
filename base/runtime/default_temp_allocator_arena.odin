@@ -1,3 +1,4 @@
+#+no-instrumentation
 package runtime
 
 import "base:intrinsics"

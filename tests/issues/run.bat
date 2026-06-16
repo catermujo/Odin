@@ -11,6 +11,10 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% run ..\test_issue_soa_contextless_footer.odin -file %COMMON%  || exit /b
+%ODIN% run ..\test_issue_map_no_instrumentation.odin -file %COMMON%  || exit /b
+
+
 %ODIN% check ..\test_issue_build_tag_define_pkg_order -no-entry-point %COMMON_NO_FILE% || exit /b
 %ODIN% check ..\test_issue_deferred_build_tag_imported_constant\entry -no-entry-point %COMMON_NO_FILE% || exit /b
 %ODIN% check ..\test_issue_deferred_build_tag_imported_constant\entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false %COMMON_NO_FILE% || exit /b

@@ -11,6 +11,10 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN run ../test_issue_soa_contextless_footer.odin -file $COMMON
+$ODIN run ../test_issue_map_no_instrumentation.odin -file $COMMON
+
+
 $ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false $COMMON_NO_FILE

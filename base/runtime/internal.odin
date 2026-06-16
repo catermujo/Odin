@@ -1,3 +1,4 @@
+#+no-instrumentation
 #+vet !cast
 package runtime
 
