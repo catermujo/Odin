@@ -10,6 +10,9 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 ..\..\..\odin run ..\test_issue_reference_range_alias.odin %COMMON% -debug || exit /b
 
+..\..\..\odin run ..\test_issue_soa_contextless_footer.odin %COMMON%  || exit /b
+..\..\..\odin run ..\test_issue_map_no_instrumentation.odin %COMMON%  || exit /b
+
 ..\..\..\odin run ..\test_issue_soa_scalar_swizzle_assign.odin %COMMON%  || exit /b
 
 ..\..\..\odin test ..\test_issue_829.odin  %COMMON%   || exit /b

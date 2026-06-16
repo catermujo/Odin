@@ -362,6 +362,7 @@ Inputs:
 - `message`: Message to log when condition is false (a default is provided)
 - `loc`: Location of the caller (default is #caller_location)
 */
+@(no_instrumentation)
 ensure :: proc(condition: bool, message := #caller_expression(condition), loc := #caller_location) {
 	if !condition {
 		@(cold)

@@ -1,3 +1,4 @@
+#+no-instrumentation
 #+build !js
 package math
 

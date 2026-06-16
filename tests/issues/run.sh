@@ -12,6 +12,9 @@ set -x
 
 $ODIN run ../test_issue_reference_range_alias.odin $COMMON -debug
 
+$ODIN run ../test_issue_soa_contextless_footer.odin $COMMON
+$ODIN run ../test_issue_map_no_instrumentation.odin $COMMON
+
 $ODIN run ../test_issue_soa_scalar_swizzle_assign.odin $COMMON
 
 if [[ "$(uname -s)" == Darwin ]]; then
