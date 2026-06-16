@@ -1,3 +1,4 @@
+#+no-instrumentation
 package fmt
 
 import "base:intrinsics"
