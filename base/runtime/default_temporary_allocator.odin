@@ -1,3 +1,4 @@
+#+no-instrumentation
 package runtime
 
 DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE: int : #config(DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE, 4 * Megabyte)

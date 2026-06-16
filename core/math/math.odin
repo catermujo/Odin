@@ -1,3 +1,4 @@
+#+no-instrumentation
 // Typical trignometric and other basic math routines.
 package math
 
