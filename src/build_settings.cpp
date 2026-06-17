@@ -172,6 +172,7 @@ enum Subtarget : u32 {
 	Subtarget_iPhoneSimulator,
 	Subtarget_Android,
 	Subtarget_Playdate,
+	Subtarget_RP2040,
 	
 	Subtarget_COUNT,
 	Subtarget_Invalid,    // NOTE(harold): Must appear after _COUNT as this is not a real subtarget
@@ -183,6 +184,7 @@ gb_global String subtarget_strings[Subtarget_COUNT] = {
 	str_lit("iphonesimulator"),
 	str_lit("android"),
 	str_lit("playdate"),
+	str_lit("rp2040"),
 };
 
 
@@ -885,6 +887,12 @@ gb_global TargetMetrics target_freestanding_arm32 = {
 	4, 4, 8, 16,
 	str_lit("arm-none-eabihf"),
 };
+gb_global TargetMetrics target_freestanding_thumbv6m = {
+	TargetOs_freestanding,
+	TargetArch_arm32,
+	4, 4, 8, 16,
+	str_lit("thumbv6m-none-eabi"),
+};
 gb_global TargetMetrics target_freestanding_riscv64 = {
 	TargetOs_freestanding,
 	TargetArch_riscv64,
@@ -935,12 +943,49 @@ gb_global NamedTargetMetrics named_targets[] = {
 
 	{ str_lit("freestanding_arm64"), &target_freestanding_arm64 },
 	{ str_lit("freestanding_arm32"), &target_freestanding_arm32 },
+	{ str_lit("freestanding_thumbv6m"), &target_freestanding_thumbv6m },
 
 	{ str_lit("freestanding_riscv64"), &target_freestanding_riscv64 },
 };
 
 gb_global NamedTargetMetrics *selected_target_metrics;
 gb_global Subtarget selected_subtarget;
+
+
+gb_internal bool is_target_freestanding_thumbv6m(TargetMetrics const *metrics) {
+	return metrics != nullptr &&
+	       metrics->os == TargetOs_freestanding &&
+	       metrics->arch == TargetArch_arm32 &&
+	       metrics->target_triplet == str_lit("thumbv6m-none-eabi");
+}
+
+gb_internal bool is_subtarget_rp2040(Subtarget subtarget) {
+	return subtarget == Subtarget_RP2040;
+}
+
+gb_internal void report_freestanding_thumbv6m_build_mode_error(BuildContext const *bc) {
+	gb_printf_err("'-target:freestanding_thumbv6m' does not support this build mode/command in Odin v1\n");
+	gb_printf_err("\tSupported Odin outputs:\n");
+	gb_printf_err("\t\texe (generic requires -no-crt and external startup/linker script)\n");
+	gb_printf_err("\t\tobject\n");
+	gb_printf_err("\t\tassembly\n");
+	gb_printf_err("\t\tllvm-ir\n");
+	gb_printf_err("\tUse -subtarget:rp2040 for built-in RP2040 startup/linker defaults\n");
+	gb_printf_err("\tUse an external ARM bare-metal SDK/toolchain to link and flash the final firmware\n");
+	if (bc->command_kind == Command_run || bc->command_kind == Command_test) {
+		gb_printf_err("\tThe '%.*s' command is not supported for this target\n", LIT(bc->command));
+	}
+}
+
+gb_internal void report_freestanding_thumbv6m_exe_requires_no_crt(void) {
+	gb_printf_err("'-target:freestanding_thumbv6m' executable builds currently require -no-crt\n");
+	gb_printf_err("\tUse -subtarget:rp2040 for built-in RP2040 startup/linker defaults\n");
+	gb_printf_err("\tProvide startup objects/linker scripts through foreign imports or -extra-linker-flags\n");
+}
+
+gb_internal void report_rp2040_subtarget_target_error(void) {
+	gb_printf_err("'-subtarget:rp2040' requires '-target:freestanding_thumbv6m'\n");
+}
 
 
 gb_internal TargetOsKind get_target_os_from_string(String str, Subtarget *subtarget_ = nullptr, String *subtarget_str = nullptr) {
@@ -1916,6 +1961,44 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 		}
 	}
 
+	if (is_subtarget_rp2040(subtarget)) {
+		if (!is_target_freestanding_thumbv6m(&bc->metrics)) {
+			report_rp2040_subtarget_target_error();
+			gb_exit(1);
+		}
+		bc->no_crt = true;
+	}
+
+	if (is_target_freestanding_thumbv6m(&bc->metrics)) {
+		if ((build_context.command_kind == Command_run || build_context.command_kind == Command_test) &&
+		    (build_context.command_kind & Command__does_build) != 0) {
+			report_freestanding_thumbv6m_build_mode_error(bc);
+			gb_exit(1);
+		}
+
+		switch (build_context.build_mode) {
+		case BuildMode_Executable:
+			if (!bc->no_crt && (build_context.command_kind & Command__does_build) != 0) {
+				report_freestanding_thumbv6m_exe_requires_no_crt();
+				gb_exit(1);
+			}
+			break;
+		case BuildMode_Object:
+		case BuildMode_Assembly:
+		case BuildMode_LLVM_IR:
+			break;
+
+		default:
+		case BuildMode_DynamicLibrary:
+		case BuildMode_StaticLibrary:
+			if ((build_context.command_kind & Command__does_build) != 0) {
+				report_freestanding_thumbv6m_build_mode_error(bc);
+				gb_exit(1);
+			}
+			break;
+		}
+	}
+
 	if (metrics->os == TargetOs_darwin) {
 		switch (subtarget) {
 			case Subtarget_iPhone:
@@ -2047,6 +2130,12 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 
 		// Disallow on wasm
 		bc->use_separate_modules = false;
+	} else if (is_target_freestanding_thumbv6m(&bc->metrics)) {
+		bc->link_flags = concatenate3_strings(permanent_allocator(),
+			str_lit("--target="), bc->metrics.target_triplet, str_lit(" "));
+		if (bc->linker_choice == Linker_Default) {
+			bc->linker_choice = Linker_lld;
+		}
 	} if(bc->metrics.arch == TargetArch_riscv64 && bc->cross_compiling) {
 		bc->link_flags = str_lit("-target riscv64 ");
 	} else {

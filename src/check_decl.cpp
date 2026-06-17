@@ -1255,7 +1255,7 @@ gb_internal void check_foreign_procedure(CheckerContext *ctx, Entity *e, DeclInf
 			      "\tat %s",
 			      LIT(name), token_pos_to_string(pos));
 		}
-	} else if (name == "main") {
+	} else if (name == "main" && !build_context.no_entry_point) {
 		error(d->proc_lit, "The link name 'main' is reserved for internal use");
 	} else {
 		string_map_set(fp, key, e);
@@ -1829,7 +1829,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 				      "Non unique linking name for procedure '%.*s'\n"
 				      "\tother at %s",
 				      LIT(name), token_pos_to_string(pos));
-			} else if (name == "main") {
+			} else if (name == "main" && !build_context.no_entry_point) {
 				if (d->entity.load()->pkg->kind != Package_Runtime) {
 					error(d->proc_lit, "The link name 'main' is reserved for internal use");
 				}
