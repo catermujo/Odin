@@ -16,6 +16,7 @@
 *.bat
 *.pdb
 *.sh
+!targets/thumbv6m/run.sh
 
 !core/compress/lz4_vector_*.bin
 
