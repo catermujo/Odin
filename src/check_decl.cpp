@@ -1296,7 +1296,7 @@ gb_internal void check_link_name_uses(Checker *c) {
 			continue;
 		}
 		String name = u->name;
-		if (name == "main" && u->kind != LinkNameUse_Variable) {
+		if (name == "main" && u->kind != LinkNameUse_Variable && !build_context.no_entry_point) {
 			if (u->kind == LinkNameUse_ForeignProcedure || u->entity->pkg->kind != Package_Runtime) {
 				error(u->decl->proc_lit, "The link name 'main' is reserved for internal use");
 			}
@@ -1347,6 +1347,7 @@ gb_internal void check_link_name_uses(Checker *c) {
 			}
 			break;
 		}
+
 	}
 }
 

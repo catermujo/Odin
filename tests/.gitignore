@@ -16,6 +16,7 @@
 *.bat
 *.pdb
 *.sh
+!targets/thumbv6m/run.sh
 
 # Ignore documentation-related files.
 /documentation/verify/
