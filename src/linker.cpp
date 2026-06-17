@@ -53,6 +53,222 @@ gb_internal void linker_data_init(LinkerData *ld, CheckerInfo *info, String cons
 
 }
 
+gb_internal bool is_rp2040_executable_build(void) {
+	return selected_subtarget == Subtarget_RP2040 &&
+	       build_context.build_mode == BuildMode_Executable &&
+	       is_target_freestanding_thumbv6m(&build_context.metrics);
+}
+
+gb_internal bool write_temporary_linker_file(String path, char const *contents) {
+	gbFile f = {};
+	char const *path_c = alloc_cstring(temporary_allocator(), path);
+	gbFileError err = gb_file_open_mode(&f, gbFileMode_Write, path_c);
+	if (err != gbFileError_None) {
+		gb_printf_err("Failed to write temporary linker file: %s\n", path_c);
+		return false;
+	}
+	defer (gb_file_close(&f));
+
+	isize len = cast(isize)gb_strlen(contents);
+	if (!gb_file_write(&f, contents, len)) {
+		gb_printf_err("Failed to write temporary linker file: %s\n", path_c);
+		return false;
+	}
+	gb_file_truncate(&f, len);
+	return true;
+}
+
+gb_internal bool append_rp2040_linker_defaults(LinkerData *gen, gbString *extra_linker_flags) {
+	char const *startup_source =
+		".syntax unified\n"
+		".thumb\n"
+		"\n"
+		".section .boot2, \"ax\", %progbits\n"
+		".balign 4\n"
+		".global __boot2_start__\n"
+		"__boot2_start__:\n"
+		".byte 0x00, 0xb5, 0x32, 0x4b, 0x21, 0x20, 0x58, 0x60, 0x98, 0x68, 0x02, 0x21, 0x88, 0x43, 0x98, 0x60\n"
+		".byte 0xd8, 0x60, 0x18, 0x61, 0x58, 0x61, 0x2e, 0x4b, 0x00, 0x21, 0x99, 0x60, 0x02, 0x21, 0x59, 0x61\n"
+		".byte 0x01, 0x21, 0xf0, 0x22, 0x99, 0x50, 0x2b, 0x49, 0x19, 0x60, 0x01, 0x21, 0x99, 0x60, 0x35, 0x20\n"
+		".byte 0x00, 0xf0, 0x44, 0xf8, 0x02, 0x22, 0x90, 0x42, 0x14, 0xd0, 0x06, 0x21, 0x19, 0x66, 0x00, 0xf0\n"
+		".byte 0x34, 0xf8, 0x19, 0x6e, 0x01, 0x21, 0x19, 0x66, 0x00, 0x20, 0x18, 0x66, 0x1a, 0x66, 0x00, 0xf0\n"
+		".byte 0x2c, 0xf8, 0x19, 0x6e, 0x19, 0x6e, 0x19, 0x6e, 0x05, 0x20, 0x00, 0xf0, 0x2f, 0xf8, 0x01, 0x21\n"
+		".byte 0x08, 0x42, 0xf9, 0xd1, 0x00, 0x21, 0x99, 0x60, 0x1b, 0x49, 0x19, 0x60, 0x00, 0x21, 0x59, 0x60\n"
+		".byte 0x1a, 0x49, 0x1b, 0x48, 0x01, 0x60, 0x01, 0x21, 0x99, 0x60, 0xeb, 0x21, 0x19, 0x66, 0xa0, 0x21\n"
+		".byte 0x19, 0x66, 0x00, 0xf0, 0x12, 0xf8, 0x00, 0x21, 0x99, 0x60, 0x16, 0x49, 0x14, 0x48, 0x01, 0x60\n"
+		".byte 0x01, 0x21, 0x99, 0x60, 0x01, 0xbc, 0x00, 0x28, 0x00, 0xd0, 0x00, 0x47, 0x12, 0x48, 0x13, 0x49\n"
+		".byte 0x08, 0x60, 0x03, 0xc8, 0x80, 0xf3, 0x08, 0x88, 0x08, 0x47, 0x03, 0xb5, 0x99, 0x6a, 0x04, 0x20\n"
+		".byte 0x01, 0x42, 0xfb, 0xd0, 0x01, 0x20, 0x01, 0x42, 0xf8, 0xd1, 0x03, 0xbd, 0x02, 0xb5, 0x18, 0x66\n"
+		".byte 0x18, 0x66, 0xff, 0xf7, 0xf2, 0xff, 0x18, 0x6e, 0x18, 0x6e, 0x02, 0xbd, 0x00, 0x00, 0x02, 0x40\n"
+		".byte 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x07, 0x00, 0x00, 0x03, 0x5f, 0x00, 0x21, 0x22, 0x00, 0x00\n"
+		".byte 0xf4, 0x00, 0x00, 0x18, 0x22, 0x20, 0x00, 0xa0, 0x00, 0x01, 0x00, 0x10, 0x08, 0xed, 0x00, 0xe0\n"
+		".byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0xb2, 0x4e, 0x7a\n"
+		".global __boot2_end__\n"
+		"__boot2_end__:\n"
+		"\n"
+		".section .vectors, \"a\", %progbits\n"
+		".word __stack_top\n"
+		".word reset_handler + 1\n"
+		".rept 46\n"
+		".word 0\n"
+		".endr\n"
+		"\n"
+		".text\n"
+		".thumb_func\n"
+		".global reset_handler\n"
+		"reset_handler:\n"
+		"	ldr r0, =__data_start__\n"
+		"	ldr r1, =__data_end__\n"
+		"	ldr r2, =__data_load_start__\n"
+		"1:\n"
+		"	cmp r0, r1\n"
+		"	bcs 2f\n"
+		"	ldr r3, [r2]\n"
+		"	str r3, [r0]\n"
+		"	adds r0, #4\n"
+		"	adds r2, #4\n"
+		"	b 1b\n"
+		"2:\n"
+		"	ldr r0, =__bss_start__\n"
+		"	ldr r1, =__bss_end__\n"
+		"	movs r2, #0\n"
+		"3:\n"
+		"	cmp r0, r1\n"
+		"	bcs 4f\n"
+		"	str r2, [r0]\n"
+		"	adds r0, #4\n"
+		"	b 3b\n"
+		"4:\n"
+		"	ldr r0, =__preinit_array_start\n"
+		"	ldr r1, =__preinit_array_end\n"
+		"5:\n"
+		"	cmp r0, r1\n"
+		"	bcs 6f\n"
+		"	ldr r2, [r0]\n"
+		"	adds r0, #4\n"
+		"	blx r2\n"
+		"	b 5b\n"
+		"6:\n"
+		"	ldr r0, =__init_array_start\n"
+		"	ldr r1, =__init_array_end\n"
+		"7:\n"
+		"	cmp r0, r1\n"
+		"	bcs 8f\n"
+		"	ldr r2, [r0]\n"
+		"	adds r0, #4\n"
+		"	blx r2\n"
+		"	b 7b\n"
+		"8:\n"
+		"	bl main\n"
+		"9:\n"
+		"	b 9b\n";
+
+	char const *linker_script =
+		"__flash_origin = DEFINED(__odin_rp2040_flash_origin) ? __odin_rp2040_flash_origin : 0x10000000;\n"
+		"__flash_length = DEFINED(__odin_rp2040_flash_length) ? __odin_rp2040_flash_length : 0x00200000;\n"
+		"__sram_origin  = DEFINED(__odin_rp2040_sram_origin)  ? __odin_rp2040_sram_origin  : 0x20000000;\n"
+		"__sram_length  = DEFINED(__odin_rp2040_sram_length)  ? __odin_rp2040_sram_length  : 0x00042000;\n"
+		"\n"
+		"MEMORY {\n"
+		"	FLASH(rx)  : ORIGIN = __flash_origin, LENGTH = __flash_length\n"
+		"	SRAM(rwx)  : ORIGIN = __sram_origin,  LENGTH = __sram_length\n"
+		"}\n"
+		"\n"
+		"ENTRY(reset_handler)\n"
+		"\n"
+		"__stack_top = ORIGIN(SRAM) + LENGTH(SRAM);\n"
+		"\n"
+		"SECTIONS {\n"
+		"	.boot2 : {\n"
+		"		KEEP(*(.boot2))\n"
+		"	} > FLASH\n"
+		"\n"
+		"	ASSERT(SIZEOF(.boot2) == 0x100, \"RP2040 boot2 must be exactly 256 bytes\")\n"
+		"\n"
+		"	.vectors : {\n"
+		"		KEEP(*(.vectors))\n"
+		"	} > FLASH\n"
+		"\n"
+		"	.text : {\n"
+		"		*(.text*)\n"
+		"		*(.time_critical*)\n"
+		"		*(.rodata*)\n"
+		"		. = ALIGN(4);\n"
+		"	} > FLASH\n"
+		"\n"
+		"	.preinit_array : {\n"
+		"		__preinit_array_start = .;\n"
+		"		KEEP(*(.preinit_array))\n"
+		"		KEEP(*(SORT_BY_NAME(.preinit_array.*)))\n"
+		"		__preinit_array_end = .;\n"
+		"		. = ALIGN(4);\n"
+		"	} > FLASH\n"
+		"\n"
+		"	.init_array : {\n"
+		"		__init_array_start = .;\n"
+		"		KEEP(*(.init_array))\n"
+		"		KEEP(*(SORT_BY_NAME(.init_array.*)))\n"
+		"		__init_array_end = .;\n"
+		"		. = ALIGN(4);\n"
+		"	} > FLASH\n"
+		"\n"
+		"	.fini_array : {\n"
+		"		__fini_array_start = .;\n"
+		"		KEEP(*(.fini_array))\n"
+		"		KEEP(*(SORT_BY_NAME(.fini_array.*)))\n"
+		"		__fini_array_end = .;\n"
+		"		. = ALIGN(4);\n"
+		"	} > FLASH\n"
+		"\n"
+		"	.data : {\n"
+		"		__data_start__ = .;\n"
+		"		*(.data*)\n"
+		"		. = ALIGN(4);\n"
+		"		__data_end__ = .;\n"
+		"	} > SRAM AT> FLASH\n"
+		"	__data_load_start__ = LOADADDR(.data);\n"
+		"\n"
+		"	.bss (NOLOAD) : {\n"
+		"		__bss_start__ = .;\n"
+		"		*(.bss*)\n"
+		"		*(COMMON)\n"
+		"		. = ALIGN(4);\n"
+		"		__bss_end__ = .;\n"
+		"	} > SRAM\n"
+		"\n"
+		"	/DISCARD/ : {\n"
+		"		*(.comment*)\n"
+		"		*(.note*)\n"
+		"		*(.eh_frame*)\n"
+		"		*(.ARM.exidx*)\n"
+		"		*(.ARM.extab*)\n"
+		"	}\n"
+		"}\n";
+
+	char hash_buf[64] = {};
+	gb_snprintf(hash_buf, gb_size_of(hash_buf), "%p", &hash_buf);
+	String hash = make_string_c(hash_buf);
+
+	String temp_dir = normalize_path(temporary_allocator(), temporary_directory(temporary_allocator()), NIX_SEPARATOR_STRING);
+	String startup_path = concatenate4_strings(permanent_allocator(), temp_dir, str_lit("odin-rp2040-startup-"), hash, str_lit(".S"));
+	String linker_path  = concatenate4_strings(permanent_allocator(), temp_dir, str_lit("odin-rp2040-link-"),    hash, str_lit(".ld"));
+
+	if (!write_temporary_linker_file(startup_path, startup_source)) {
+		return false;
+	}
+	if (!write_temporary_linker_file(linker_path, linker_script)) {
+		return false;
+	}
+
+	array_add(&gen->output_temp_paths, startup_path);
+	array_add(&gen->output_temp_paths, linker_path);
+
+	*extra_linker_flags = gb_string_append_fmt(*extra_linker_flags,
+		" \"%.*s\" -Wl,-T,\"%.*s\" -Wl,--gc-sections ",
+		LIT(startup_path), LIT(linker_path));
+	return true;
+}
+
 gb_internal i32 linker_stage(LinkerData *gen) {
 	i32 result = 0;
 	Timings *timings = &global_timings;
@@ -141,6 +357,10 @@ gb_internal i32 linker_stage(LinkerData *gen) {
 			is_android = true;
 			goto try_cross_linking;
 		default:
+			if (is_target_freestanding_thumbv6m(&build_context.metrics)) {
+				is_cross_linking = true;
+				goto try_cross_linking;
+			}
 			gb_printf_err("Linking for cross compilation for this platform is not yet supported (%.*s %.*s)\n",
 				LIT(target_os_names[build_context.metrics.os]),
 				LIT(target_arch_names[build_context.metrics.arch])
@@ -661,6 +881,16 @@ try_cross_linking:;
 			gbString object_files = gb_string_make(heap_allocator(), "");
 			defer (gb_string_free(object_files));
 
+			gbString extra_linker_flags = gb_string_make(heap_allocator(), "");
+			defer (gb_string_free(extra_linker_flags));
+			if (build_context.extra_linker_flags.len != 0) {
+				extra_linker_flags = gb_string_append_fmt(extra_linker_flags, " %.*s ", LIT(build_context.extra_linker_flags));
+			}
+			if (is_rp2040_executable_build()) {
+				if (!append_rp2040_linker_defaults(gen, &extra_linker_flags)) {
+					return 1;
+				}
+			}
 
 			if (is_android) { // NOTE(bill): glue code needed for Android
 				TIME_SECTION("Android Native App Glue Compile");
@@ -1009,7 +1239,7 @@ try_cross_linking:;
 			link_command_line = gb_string_append_fmt(link_command_line, " %s ", platform_lib_str);
 			link_command_line = gb_string_append_fmt(link_command_line, " %s ", lib_str);
 			link_command_line = gb_string_append_fmt(link_command_line, " %.*s ", LIT(build_context.link_flags));
-			link_command_line = gb_string_append_fmt(link_command_line, " %.*s ", LIT(build_context.extra_linker_flags));
+			link_command_line = gb_string_append_fmt(link_command_line, " %s ", extra_linker_flags);
 			link_command_line = gb_string_append_fmt(link_command_line, " %s ", link_settings);
 
 

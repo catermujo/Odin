@@ -1545,6 +1545,7 @@ gb_internal void init_universal(void) {
 			{"iPhoneSimulator", Subtarget_iPhoneSimulator},
 			{"Android",         Subtarget_Android},
 			{"Playdate",        Subtarget_Playdate},
+			{"RP2040",          Subtarget_RP2040},
 		};
 
 		auto fields = add_global_enum_type(str_lit("Odin_Platform_Subtarget_Type"), values, gb_count_of(values));
