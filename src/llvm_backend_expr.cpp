@@ -4736,7 +4736,7 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	if (tv.value.kind != ExactValue_Invalid) {
 		Type *original_type = lb_build_expr_original_const_type(expr);
 		// NOTE(bill): Short on constant values
-		return lb_const_value(p->module, type, tv.value, original_type, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL);
+		return lb_const_value(p->module, type, tv.value, original_type, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL, expr);
 	} else if (tv.mode == Addressing_Type) {
 		// NOTE(bill, 2023-01-16): is this correct? I hope so at least
 		return lb_typeid(m, tv.type);
@@ -4817,7 +4817,7 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 		TypeAndValue tav = type_and_value_of_expr(expr);
 		GB_ASSERT(tav.mode == Addressing_Constant);
 
-		return lb_const_value(p->module, type, tv.value, tv.type, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL);
+		return lb_const_value(p->module, type, tv.value, tv.type, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL, expr);
 	case_end;
 
 	case_ast_node(se, SelectorCallExpr, expr);
@@ -5160,7 +5160,7 @@ gb_internal lbAddr lb_build_addr_from_entity(lbProcedure *p, Entity *e, Ast *exp
 	}
 	if (e->kind == Entity_Constant) {
 		Type *t = default_type(type_of_expr(expr));
-		lbValue v = lb_const_value(p->module, t, e->Constant.value, e->type, LB_CONST_CONTEXT_DEFAULT_NO_LOCAL);
+		lbValue v = lb_const_value(p->module, t, e->Constant.value, e->type, LB_CONST_CONTEXT_DEFAULT_NO_LOCAL, expr);
 		if (LLVMIsConstant(v.value)) {
 			lbAddr g = lb_add_global_generated_from_procedure(p, t, v);
 			return g;
