@@ -1069,7 +1069,7 @@ gb_internal bool lb_const_value_is_broadcast(Type *elem_type, Type *lit_type) {
 		return true;
 	}
 	// `[8]U = U(Item{...})`, a union element takes the value as one of its variants
-	return type_conversion_is_variant(elem_type, lit_type);
+	return type_conversion_is_variant(lit_type, elem_type);
 }
 
 gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Type *value_type, lbConstContext cc, Ast *value_expr) {
@@ -1259,8 +1259,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 				values[value_count++] = LLVMConstNull(padding_type);
 			}
 
-			res.value = llvm_const_named_struct_internal(m, llvm_type, values, value_count);
-
+			res.value = llvm_const_named_struct_internal(m, lb_type(m, original_type), values, value_count);
 			return res;
 		}
 	}
