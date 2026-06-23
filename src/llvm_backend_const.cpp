@@ -1121,8 +1121,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 				values[value_count++] = LLVMConstNull(padding_type);
 			}
 
-			res.value = llvm_const_named_struct_internal(m, llvm_type, values, value_count);
-
+			res.value = llvm_const_named_struct_internal(m, lb_type(m, original_type), values, value_count);
 			return res;
 		}
 	}
