@@ -5,7 +5,7 @@ import "core:c"
 MINIAUDIO_SHARED :: #config(MINIAUDIO_SHARED, false)
 
 when MINIAUDIO_SHARED {
-	#panic("Shared linking for miniaudio is not supported yet")
+	#panic("Shared linking for miniaudio is not supported yet", #trigger_location, #trigger_location)
 }
 
 when ODIN_PLATFORM_SUBTARGET == .Android {
@@ -16,7 +16,7 @@ when ODIN_PLATFORM_SUBTARGET == .Android {
 	LIB :: "lib/android/" + ANDROID_ABI + "/miniaudio.a"
 
 	when !#exists(LIB) {
-		#panic("Could not find the compiled miniaudio library for Android, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio_android.sh\"` (or `build_miniaudio_android.bat` on Windows) with ODIN_ANDROID_NDK set")
+		#panic("Could not find the compiled miniaudio library for Android, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio_android.sh\"` (or `build_miniaudio_android.bat` on Windows) with ODIN_ANDROID_NDK set", #trigger_location)
 	}
 } else {
 	@(private)
@@ -24,7 +24,7 @@ when ODIN_PLATFORM_SUBTARGET == .Android {
 
 	when !#exists(LIB) {
 		// The Windows and macOS libraries are shipped with the compiler, so a message for them should not be needed.
-		#panic("Could not find the compiled miniaudio library, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh\"`")
+		#panic("Could not find the compiled miniaudio library, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh\"`", #trigger_location)
 	}
 }
 

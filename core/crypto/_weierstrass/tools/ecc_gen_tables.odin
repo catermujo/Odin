@@ -42,7 +42,7 @@ gen_tables :: proc($CURVE: string) {
 
 		g, p: secec.Point_p384r1
 	} else {
-		#panic("weistrass/tools: invalid curve")
+		#panic("weistrass/tools: invalid curve", #trigger_location)
 	}
 
 	secec.pt_generator(&g)

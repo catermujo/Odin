@@ -1084,6 +1084,8 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	proc_info->tags  = tags;
 	proc_info->generated_from_polymorphic = true;
 	proc_info->poly_def_node = poly_def_node;
+	proc_info_copy_trigger_trace(proc_info, old_c);
+	proc_info_prepend_trigger_trace(proc_info, TriggerTrace_Use, ast_token(poly_def_node).pos, base_entity->token.string);
 	proc_info->poly_parent   = global_error_context.instantiations.proc;
 
 	// Before it can be found by another thread which could use it first
@@ -1534,17 +1536,6 @@ gb_internal bool check_is_assignable_to_with_score(CheckerContext *c, Operand *o
 	if (operand->mode == Addressing_Invalid || type == t_invalid) {
 		if (score_) *score_ = 0;
 		return false;
-	}
-
-	// Handle polymorphic procedure used as default parameter
-	if (operand->mode == Addressing_Value && is_type_proc(type) && is_type_proc(operand->type)) {
-		Entity *e = entity_from_expr(operand->expr);
-		if (e != nullptr && e->kind == Entity_Procedure && is_type_polymorphic(e->type) && !is_type_polymorphic(type)) {
-			// Special case: Allow a polymorphic procedure to be used as default value for concrete proc type
-			// during the initial check. It will be properly instantiated when actually used.
-			if (score_) *score_ = assign_score_function(1);
-			return true;
-		}
 	}
 
 	i64 score = check_distance_between_types(c, operand, type, allow_array_programming, allow_unions);
@@ -8322,6 +8313,8 @@ gb_internal bool check_call_arguments_single(CheckerContext *c, Ast *call, Opera
 		Entity *e = data->gen_entity;
 		DeclInfo *decl = data->gen_entity->decl_info;
 		CheckerContext ctx = *c;
+		checker_context_copy_trigger_trace(&ctx, c);
+		checker_context_prepend_trigger_trace(&ctx, TriggerTrace_Use, ast_token(call).pos, e->token.string);
 		ctx.scope = decl->scope;
 		ctx.decl = decl;
 		ctx.proc_name = e->token.string;
@@ -12127,6 +12120,11 @@ gb_internal ExprKind check_basic_directive_expr(CheckerContext *c, Operand *o, A
 		error(node, "#caller_expression may only be used as a default argument parameter");
 		o->type = t_string;
 		o->mode = Addressing_Value;
+	} else if (name == "trigger_location") {
+		init_core_source_code_location(c->checker);
+		error(node, "#trigger_location may only be used as an argument to '#assert' or '#panic'");
+		o->type = t_source_code_location;
+		o->mode = Addressing_Value;
 	} else if (name == "branch_location") {
 		if (!c->in_defer) {
 			error(node, "#branch_location may only be used within a 'defer' statement");
@@ -13441,7 +13439,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 				}
 
 				if (t->kind != Type_Matrix && 0 <= max_type_count && max_type_count <= index) {
-					error(e, "Index %td is out of bounds (>= %lld) for %.*s", index, max_type_count, LIT(context_name));
+					error(e, "Index %lld is out of bounds (>= %lld) for %.*s", cast(long long)index, cast(long long)max_type_count, LIT(context_name));
 				}
 
 				Operand operand = {};
@@ -14976,6 +14974,7 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 			}
 
 			pl->decl = decl;
+			decl_info_copy_trigger_trace(decl, &ctx);
 			check_procedure_later(ctx.checker, ctx.file, empty_token, decl, type, pl->body, pl->tags);
 		}
 		check_close_scope(&ctx);

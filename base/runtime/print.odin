@@ -241,7 +241,7 @@ print_caller_location :: #force_no_inline proc "contextless" (loc: Source_Code_L
 		}
 		print_byte(':')
 	} else {
-		#panic("unhandled ODIN_ERROR_POS_STYLE")
+		#panic("unhandled ODIN_ERROR_POS_STYLE", #trigger_location)
 	}
 }
 print_typeid :: #force_no_inline proc "contextless" (id: typeid) {
@@ -613,7 +613,7 @@ write_caller_location :: #force_no_inline proc "contextless" (i: ^int, buf: []by
 		write_byte(i, buf, ':') or_return
 		return true
 	} else {
-		#panic("unhandled ODIN_ERROR_POS_STYLE")
+		#panic("unhandled ODIN_ERROR_POS_STYLE", #trigger_location)
 	}
 }
 

@@ -11,6 +11,44 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN check ../test_trigger_location_accept.odin -file $COMMON_CHECK -internal-ignore-panic
+if [[ $($ODIN check ../test_trigger_location_import_direct.odin -file $COMMON_CHECK -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import 'core:os'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_import_chain -no-entry-point $COMMON_NO_FILE -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import '../b'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_use_site.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "Triggered by use of 'trigger'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_arg_count.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#panic' expects 1 or 2 arguments") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_assert_third.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#assert' expected a constant string as its second argument when a third argument is provided") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_outside.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "#trigger_location may only be used as an argument to '#assert' or '#panic'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 $ODIN run ../test_issue_soa_contextless_footer.odin -file $COMMON
 $ODIN run ../test_issue_map_no_instrumentation.odin -file $COMMON
 
@@ -18,7 +56,7 @@ $ODIN run ../test_issue_map_no_instrumentation.odin -file $COMMON
 $ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false $COMMON_NO_FILE
-if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"

@@ -39,7 +39,7 @@ _rand_bytes :: proc "contextless" (dst: []byte) {
 	} else when ODIN_ARCH == .riscv64 {
 		SYS_getrandom :: uintptr(278)
 	} else {
-		#panic("base/runtime: no SYS_getrandom definition for target")
+		#panic("base/runtime: no SYS_getrandom definition for target", #trigger_location)
 	}
 
 	ERR_EINTR :: 4

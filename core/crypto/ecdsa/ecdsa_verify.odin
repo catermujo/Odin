@@ -71,7 +71,7 @@ verify_internal :: proc(pub_key: ^$T, hash_algo: hash.Algorithm, sig_r, sig_s, m
 		u1, u2, s_inv: secec.Scalar_p384r1 = ---, ---, ---
 		SC_SZ :: secec.SC_SIZE_P384R1
 	} else {
-		#panic("crypto/ecdsa: invalid curve")
+		#panic("crypto/ecdsa: invalid curve", #trigger_location)
 	}
 
 	if len(sig_r) > SC_SZ || len(sig_s) > SC_SZ {

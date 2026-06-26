@@ -14,7 +14,7 @@ generate_asn1_sig :: proc(r, s: ^$T, allocator := context.allocator) -> []byte {
 	} else when T == secec.Scalar_p384r1 {
 		SC_SZ :: secec.SC_SIZE_P384R1
 	} else {
-		#panic("crypto/ecdsa: invalid curve")
+		#panic("crypto/ecdsa: invalid curve", #trigger_location)
 	}
 
 	r_buf, s_buf: [SC_SZ]byte = ---, ---

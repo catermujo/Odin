@@ -2837,7 +2837,7 @@ fmt_named_buitlin_custom_formatters :: proc(fi: ^Info, v: any, verb: rune, info:
 			}
 			_write_byte(fi, ':')
 		} else {
-			#panic("Unhandled ODIN_ERROR_POS_STYLE")
+			#panic("Unhandled ODIN_ERROR_POS_STYLE", #trigger_location)
 		}
 		return true
 

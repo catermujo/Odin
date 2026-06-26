@@ -11,7 +11,7 @@ when ODIN_OS == .Darwin {
 
 // sys/socket.h - main sockets header
 
-#assert(Protocol.IP == Protocol(0), "socket() assumes this")
+#assert(Protocol.IP == Protocol(0), "socket() assumes this", #trigger_location)
 
 foreign libc {
 	/*
