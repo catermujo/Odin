@@ -2885,7 +2885,7 @@ when size_of(uintptr) == 4 {
 		szSystemStatus: [WSASYS_STATUS_LEN + 1]u8,
 	}
 } else {
-	#panic("unknown word size")
+	#panic("unknown word size", #trigger_location)
 }
 
 WSABUF :: struct {

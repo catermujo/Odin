@@ -44,7 +44,7 @@ when ODIN_OS == .Windows {
 		@(private)
 		LIBGLFW3 :: "../lib/libglfw3.a"
 		when !#exists(LIBGLFW3) {
-			#panic("Could not find the static glfw library, add it at \"" + ODIN_ROOT + "vendor/glfw/lib/\"`")
+			#panic("Could not find the static glfw library, add it at \"" + ODIN_ROOT + "vendor/glfw/lib/\"`", #trigger_location)
 		}
 
 		foreign import glfw { LIBGLFW3 }
@@ -217,4 +217,3 @@ foreign glfw {
 	@(linkage="strong" when ODIN_OS == .Windows else "weak")
 	PlatformSupported :: proc(platform: c.int) -> b32 ---
 }
-

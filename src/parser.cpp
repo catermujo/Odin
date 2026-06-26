@@ -2853,7 +2853,7 @@ gb_internal Ast *parse_asm_signature(AstFile *f, Token asm_token) {
 		is_generic = is_field_list_generic(&results->FieldList, false);
 	}
 
-	return ast_proc_type(f, asm_token, params, results, tags, cc, is_generic, diverging);
+	return ast_proc_type(f, asm_token, params, results, tags, cc, is_generic, diverging, false, {});
 }
 
 gb_internal Ast *parse_asm_spec(AstFile *f) {

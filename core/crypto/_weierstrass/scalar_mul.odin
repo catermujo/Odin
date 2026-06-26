@@ -13,7 +13,7 @@ pt_scalar_mul :: proc "contextless" (
 	} else when T == Point_p384r1 && S == Scalar_p384r1 {
 		SC_SZ :: SC_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	b: [SC_SZ]byte = ---
@@ -40,7 +40,7 @@ pt_scalar_mul_bytes :: proc "contextless" (
 		q, tmp: Point_p384r1 = ---, ---
 		SC_SZ :: SC_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	assert_contextless(len(sc) == SC_SZ, "weierstrass: invalid scalar size")
@@ -89,7 +89,7 @@ pt_double_scalar_mul_generator_vartime :: proc "contextless" (
 		q_tbl: Multiply_Table_p384r1 = ---
 		SC_SZ :: SC_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	sc_q_bytes, sc_g_bytes: [SC_SZ]byte = ---, ---
@@ -176,7 +176,7 @@ when crypto.COMPACT_IMPLS == true {
 			tmp: Point_p384r1 = ---
 			SC_SZ :: SC_SIZE_P384R1
 		} else {
-			#panic("weierstrass: invalid curve")
+			#panic("weierstrass: invalid curve", #trigger_location)
 		}
 
 		b: [SC_SZ]byte
@@ -212,7 +212,7 @@ mul_tbl_set :: proc "contextless"(
 	} else when T == Multiply_Table_p384r1 && U == Point_p384r1{
 		tmp: Point_p384r1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	pt_set(&tmp, point)

@@ -1847,7 +1847,7 @@ when ODIN_ARCH == .amd64 {
 
 	SIGCHLD :: 17
 } else {
-	#panic("Unsupported architecture")
+	#panic("Unsupported architecture", #trigger_location)
 }
 
 
