@@ -366,5 +366,5 @@ when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD {
 	NOEXPR  :: 0x50_001
 
 } else {
-	#panic("posix is unimplemented for the current target")
+	#panic("posix is unimplemented for the current target", #trigger_location)
 }

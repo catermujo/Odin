@@ -17,7 +17,7 @@ pt_set_sec_bytes :: proc "contextless" (p: ^$T, b: []byte) -> bool {
 	} else when T == Point_p384r1 {
 		FE_SZ :: FE_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	b_len := len(b)
@@ -56,7 +56,7 @@ pt_sec_bytes :: proc "contextless" (b: []byte, p: ^$T, compressed: bool) -> bool
 	} else when T == Point_p384r1 {
 		FE_SZ :: FE_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	b_len := len(b)

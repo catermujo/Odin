@@ -37,7 +37,7 @@ Handle :: _Handle
 
 // The maximum size of user arguments for an operation, can be increased at the cost of more RAM.
 MAX_USER_ARGUMENTS :: #config(NBIO_MAX_USER_ARGUMENTS, 4)
-#assert(MAX_USER_ARGUMENTS >= 4)
+#assert(MAX_USER_ARGUMENTS >= 4, #trigger_location)
 
 Operation :: struct {
 	cb:              Callback,

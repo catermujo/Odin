@@ -5,7 +5,7 @@ import "core:c"
 MINIAUDIO_SHARED :: #config(MINIAUDIO_SHARED, false)
 
 when MINIAUDIO_SHARED {
-	#panic("Shared linking for miniaudio is not supported yet")
+	#panic("Shared linking for miniaudio is not supported yet", #trigger_location)
 }
 
 @(private)
@@ -13,7 +13,7 @@ LIB :: "lib/miniaudio.lib" when ODIN_OS == .Windows else "lib/miniaudio.a"
 
 when !#exists(LIB) {
 	// Windows library is shipped with the compiler, so a Windows specific message should not be needed.
-	#panic("Could not find the compiled miniaudio library, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh\"`")
+	#panic("Could not find the compiled miniaudio library, it can be compiled by running `\"" + ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh\"`", #trigger_location)
 }
 
 foreign import lib { LIB }

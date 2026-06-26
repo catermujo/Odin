@@ -96,7 +96,7 @@ sign_internal :: proc(priv_key, sig_r, sig_s: ^$T, hash_algo: hash.Algorithm, ms
 		MIN_DRBG_HASH :: hash.Algorithm.SHA384
 		r_pt: secec.Point_p384r1 = ---
 	} else {
-		#panic("crypto/ecdsa: invalid curve")
+		#panic("crypto/ecdsa: invalid curve", #trigger_location)
 	}
 
 	// Note: `e` (derived from `hash`) in steps 4 and 5, is
