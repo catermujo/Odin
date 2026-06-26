@@ -7,7 +7,7 @@ COMMONMARK_SHARED :: #config(COMMONMARK_SHARED, false)
 BINDING_VERSION :: Version_Info{major = 0, minor = 30, patch = 2}
 
 when COMMONMARK_SHARED {
-	#panic("Shared linking for vendor:commonmark is not supported yet")
+	#panic("Shared linking for vendor:commonmark is not supported yet", #trigger_location)
 }
 
 when ODIN_OS == .Windows {

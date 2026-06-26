@@ -376,7 +376,7 @@ SMALLEST_ALLOCATION_SIZE :: 2*size_of(rawptr)
 // Subdivide regions of free space into distinct circular doubly linked lists, where each linked list
 // represents a range of free space blocks. The following function compute_free_list_bucket() converts
 // an allocation size to the bucket index that should be looked at.
-#assert(NUM_FREE_BUCKETS == 64, "Following function is tailored specifically for the NUM_FREE_BUCKETS == 64 case")
+#assert(NUM_FREE_BUCKETS == 64, "Following function is tailored specifically for the NUM_FREE_BUCKETS == 64 case", #trigger_location)
 @(private="file")
 compute_free_list_bucket :: proc(size: uint) -> uint {
 	if size < 128 { return (size >> 3) - 1 }

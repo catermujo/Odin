@@ -354,7 +354,7 @@ internal_rat_to_float :: proc($T: typeid, z: ^Rat, allocator := context.allocato
 	} else when FSIZE == 64 {
 		MSIZE :: 52
 	} else {
-		#panic("unsupported float type")
+		#panic("unsupported float type", #trigger_location)
 	}
 	
 	MSIZE1 :: MSIZE+1

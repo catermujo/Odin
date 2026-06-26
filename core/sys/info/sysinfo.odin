@@ -9,7 +9,9 @@ import "core:strconv"
 	ODIN_ARCH == .arm32   || ODIN_ARCH == .arm64     || \
 	ODIN_ARCH == .wasm32  || ODIN_ARCH == .wasm64p32 || \
 	ODIN_ARCH == .riscv64,
-	"This package is unsupported on this architecture.")
+	"This package is unsupported on this architecture.",
+	#trigger_location,
+)
 
 /*
 Retrieves the number of physical and logical CPU cores

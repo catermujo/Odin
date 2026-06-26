@@ -3,4 +3,4 @@
 #+build !darwin
 package wgpu_sdl2_glue
 
-#panic("package wgpu/sdl2glue is not supported on the current target")
+#panic("package wgpu/sdl2glue is not supported on the current target", #trigger_location)

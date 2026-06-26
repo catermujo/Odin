@@ -7,7 +7,7 @@ PORTMIDI_SHARED :: #config(PORTMIDI_SHARED, false)
 
 when ODIN_OS == .Windows {
 	when PORTMIDI_SHARED {
-		#panic("Shared linking not supported for portmidi on windows yet")
+		#panic("Shared linking not supported for portmidi on windows yet", #trigger_location)
 	} else {
 		foreign import lib {
 			"portmidi_s.lib",
