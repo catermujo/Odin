@@ -2456,7 +2456,7 @@ hypot :: proc{
 
 @(require_results)
 count_digits_of_base :: proc "contextless" (value: $T, $base: int) -> (digits: int) where intrinsics.type_is_integer(T) {
-	#assert(base >= 2, "base must be 2 or greater.")
+	#assert(base >= 2, "base must be 2 or greater.", #trigger_location)
 
 	value := value
 	when !intrinsics.type_is_unsigned(T) {

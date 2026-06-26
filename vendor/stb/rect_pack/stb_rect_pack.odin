@@ -17,7 +17,7 @@ LIB :: (
 
 when LIB != "" {
 	when !#exists(LIB) {
-		#panic("Could not find the compiled STB libraries, they can be compiled by running `\"" + ODIN_ROOT + "vendor/stb/src/build_stb.sh\"`")
+		#panic("Could not find the compiled STB libraries, they can be compiled by running `\"" + ODIN_ROOT + "vendor/stb/src/build_stb.sh\"`", #trigger_location)
 	}
 }
 
