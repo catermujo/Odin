@@ -796,7 +796,7 @@ XXH3_accumulate_512_simd_generic :: #force_inline proc(acc: []xxh_u64, input: []
 		} else when W == 8 {
 			data_val = swizzle(data_val, 1, 0, 3, 2, 5, 4, 7, 6)
 		} else {
-			#panic("Unsupported vector size!")
+			#panic("Unsupported vector size!", #trigger_location)
 		}
 
 		a := XXH64_read64_simd(acc[W * i:], W)

@@ -1092,7 +1092,6 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 		} else {
 			// NOTE(korvahkh): forces calculation of variant_block_size
 			type_size_of(bt);
--
 			i64 block_size = bt->Union.variant_block_size;
 
 			lbValue cv = lb_const_value(m, value_type, value, value_type, cc, value_expr);

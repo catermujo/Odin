@@ -2479,6 +2479,111 @@ gb_internal bool check_hash_kind(CheckerContext *c, Ast *call, String const &has
 	return true;
 }
 
+struct CompileTimeTriggerLocation {
+	bool valid;
+	bool derived_from_trace;
+	TriggerTraceKind trace_kind;
+	TokenPos pos;
+	String name;
+};
+
+gb_internal void print_compile_time_trigger_location_note(CompileTimeTriggerLocation const &loc) {
+	if (!loc.valid) {
+		return;
+	}
+
+	char const *pos = token_pos_to_string(loc.pos);
+	if (loc.derived_from_trace) {
+		switch (loc.trace_kind) {
+		case TriggerTrace_Use:
+			if (loc.name.len > 0) {
+				error_line("\tTriggered by use of '%.*s' at %s\n", LIT(loc.name), pos);
+			} else {
+				error_line("\tTriggered by use at %s\n", pos);
+			}
+			return;
+		case TriggerTrace_Import:
+			if (loc.name.len > 0) {
+				error_line("\tTriggered by import '%.*s' at %s\n", LIT(loc.name), pos);
+			} else {
+				error_line("\tTriggered by import at %s\n", pos);
+			}
+			return;
+		case TriggerTrace_Invalid:
+			break;
+		}
+	}
+
+	error_line("\tTriggered at %s\n", pos);
+}
+
+gb_internal bool check_compile_time_location_argument(CheckerContext *c, Ast *call, Ast *arg, char const *builtin_name, CompileTimeTriggerLocation *out) {
+	GB_ASSERT(out != nullptr);
+	gb_zero_item(out);
+	init_core_source_code_location(c->checker);
+
+	if (arg == nullptr) {
+		error(call, "'#%s' expected a location argument", builtin_name);
+		return false;
+	}
+
+	arg = unparen_expr(arg);
+	if (arg->kind == Ast_BasicDirective && arg->BasicDirective.name.string == "trigger_location") {
+		out->valid = true;
+		if (c->trigger_trace_count > 0) {
+			TriggerTraceFrame const &frame = c->trigger_trace[0];
+			out->derived_from_trace = true;
+			out->trace_kind = frame.kind;
+			out->pos = frame.pos;
+			out->name = frame.name;
+		} else {
+			out->pos = ast_token(call).pos;
+		}
+		return true;
+	}
+
+	if (arg->kind != Ast_CallExpr || arg->CallExpr.proc->kind != Ast_BasicDirective) {
+		gbString str = expr_to_string(arg);
+		error(arg, "'#%s' expected '#trigger_location' or '#location(...)', got %s", builtin_name, str);
+		gb_string_free(str);
+		return false;
+	}
+
+	ast_node(loc_call, CallExpr, arg);
+	if (loc_call->proc->BasicDirective.name.string != "location") {
+		gbString str = expr_to_string(arg);
+		error(arg, "'#%s' expected '#trigger_location' or '#location(...)', got %s", builtin_name, str);
+		gb_string_free(str);
+		return false;
+	}
+
+	if (loc_call->args.count > 1) {
+		error(arg, "'#location' expects either 0 or 1 arguments, got %td", loc_call->args.count);
+		return false;
+	}
+
+	out->valid = true;
+	out->pos = ast_token(loc_call->proc).pos;
+	if (loc_call->args.count == 0) {
+		return true;
+	}
+
+	Ast *target = unparen_expr(loc_call->args[0]);
+	Entity *e = nullptr;
+	Operand o = {};
+	if (target->kind == Ast_Ident) {
+		e = check_ident(c, &o, target, nullptr, nullptr, true);
+	} else if (target->kind == Ast_SelectorExpr) {
+		e = check_selector(c, &o, target, nullptr);
+	}
+	if (e == nullptr) {
+		error(loc_call->args[0], "'#location' expected a valid entity name");
+		return false;
+	}
+
+	out->pos = e->token.pos;
+	return true;
+}
 
 
 gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *operand, Ast *call, Type *type_hint) {
@@ -2681,8 +2786,8 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		}
 		return false;
 	} else if (name == "assert") {
-		if (ce->args.count != 1 && ce->args.count != 2) {
-			error(call, "'#assert' expects either 1 or 2 arguments, got %td", ce->args.count);
+		if (ce->args.count < 1 || ce->args.count > 3) {
+			error(call, "'#assert' expects between 1 and 3 arguments, got %td", ce->args.count);
 			return false;
 		}
 
@@ -2694,14 +2799,31 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 			gb_string_free(str);
 			return false;
 		}
-		if (ce->args.count == 2) {
+
+		bool has_message_arg = false;
+		bool has_location_arg = false;
+		CompileTimeTriggerLocation location_arg = {};
+		if (ce->args.count >= 2) {
 			Ast *arg = unparen_expr(ce->args[1]);
-			if (arg == nullptr || arg->kind != Ast_BasicLit || arg->BasicLit.token.kind != Token_String) {
+			if (arg != nullptr && arg->kind == Ast_BasicLit && arg->BasicLit.token.kind == Token_String) {
+				has_message_arg = true;
+			} else if (ce->args.count == 2) {
+				if (!check_compile_time_location_argument(c, call, ce->args[1], "assert", &location_arg)) {
+					return false;
+				}
+				has_location_arg = true;
+			} else {
 				gbString str = expr_to_string(arg);
-				error(call, "'%s' is not a constant string", str);
+				error(call, "'#assert' expected a constant string as its second argument when a third argument is provided, got %s", str);
 				gb_string_free(str);
 				return false;
 			}
+		}
+		if (ce->args.count == 3) {
+			if (!check_compile_time_location_argument(c, call, ce->args[2], "assert", &location_arg)) {
+				return false;
+			}
+			has_location_arg = true;
 		}
 
 		if (!operand->value.value_bool) {
@@ -2709,7 +2831,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 			gbString arg1 = expr_to_string(ce->args[0]);
 			gbString arg2 = {};
 
-			if (ce->args.count == 1) {
+			if (!has_message_arg) {
 				error(call, "Compile time assertion: %s", arg1);
 			} else {
 				arg2 = expr_to_string(ce->args[1]);
@@ -2721,9 +2843,17 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 				error_line("\tCalled within '%.*s' :: %s\n", LIT(c->proc_name), str);
 				gb_string_free(str);
 			}
+			if (has_location_arg) {
+				print_compile_time_trigger_location_note(location_arg);
+				if (location_arg.derived_from_trace) {
+					checker_context_print_trigger_trace_from(c, 1);
+				}
+			} else {
+				checker_context_print_trigger_trace(c);
+			}
 
 			gb_string_free(arg1);
-			if (ce->args.count == 2) {
+			if (has_message_arg) {
 				gb_string_free(arg2);
 			}
 		}
@@ -2732,15 +2862,23 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		operand->mode = Addressing_Constant;
 	} else if (name == "panic") {
 		ERROR_BLOCK();
-		if (ce->args.count != 1) {
-			error(call, "'#panic' expects 1 argument, got %td", ce->args.count);
+		if (ce->args.count != 1 && ce->args.count != 2) {
+			error(call, "'#panic' expects 1 or 2 arguments, got %td", ce->args.count);
 			return false;
 		}
-		if (!is_type_string(operand->type) || operand->mode != Addressing_Constant) {
+		if (operand->mode != Addressing_Constant || !is_type_string(operand->type)) {
 			gbString str = expr_to_string(ce->args[0]);
 			error(call, "'%s' is not a constant string", str);
 			gb_string_free(str);
 			return false;
+		}
+		bool has_location_arg = false;
+		CompileTimeTriggerLocation location_arg = {};
+		if (ce->args.count == 2) {
+			if (!check_compile_time_location_argument(c, call, ce->args[1], "panic", &location_arg)) {
+				return false;
+			}
+			has_location_arg = true;
 		}
 		if (!build_context.ignore_panic) {
 			error(call, "Compile time panic: %.*s", LIT(operand->value.value_string));
@@ -2748,6 +2886,14 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 				gbString str = type_to_string(c->curr_proc_sig);
 				error_line("\tCalled within '%.*s' :: %s\n", LIT(c->proc_name), str);
 				gb_string_free(str);
+			}
+			if (has_location_arg) {
+				print_compile_time_trigger_location_note(location_arg);
+				if (location_arg.derived_from_trace) {
+					checker_context_print_trigger_trace_from(c, 1);
+				}
+			} else {
+				checker_context_print_trigger_trace(c);
 			}
 		}
 		operand->type = t_invalid;

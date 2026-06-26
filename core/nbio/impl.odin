@@ -10,6 +10,8 @@ import "core:reflect"
 import "core:slice"
 import "core:strings"
 import "core:time"
+_ :: reflect
+_ :: strings
 
 @(init, private)
 init_thread_local_cleaner :: proc "contextless" () {

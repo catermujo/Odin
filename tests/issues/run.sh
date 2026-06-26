@@ -89,7 +89,7 @@ fi
 $ODIN check ../test_issue_6484.odin -no-entry-point $COMMON_CHECK
 $ODIN test ../test_issue_6753.odin $COMMON
 $ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
-if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -101,7 +101,7 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
-if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -155,6 +155,43 @@ if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
 fi
 
 if [[ $($ODIN build ../test_issue_7108.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+$ODIN check ../test_trigger_location_accept.odin $COMMON_CHECK -internal-ignore-panic
+if [[ $($ODIN check ../test_trigger_location_import_direct.odin $COMMON_CHECK -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import 'core:os'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_import_chain -no-entry-point $COMMON_NO_FILE -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import '../b'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_use_site.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "Triggered by use of 'trigger'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_arg_count.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#panic' expects 1 or 2 arguments") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_assert_third.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#assert' expected a constant string as its second argument when a third argument is provided") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_outside.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "#trigger_location may only be used as an argument to '#assert' or '#panic'") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"

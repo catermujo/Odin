@@ -43,7 +43,7 @@ pt_set_xy_bytes :: proc "contextless" (p: ^$T, x_raw, y_raw: []byte) -> bool {
 		x, y: Field_Element_p384r1
 		defer fe_clear_vec([]^Field_Element_p384r1{&x, &y})
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	if len(x_raw) != FE_SZ || len(y_raw) != FE_SZ {
@@ -78,7 +78,7 @@ pt_set_x_bytes :: proc "contextless" (p: ^$T, x_raw: []byte, y_is_odd: int) -> b
 		x, y, yy, y_neg: Field_Element_p384r1
 		defer fe_clear_vec([]^Field_Element_p384r1{&x, &y, &yy, &y_neg})
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	if len(x_raw) != FE_SZ {
@@ -111,7 +111,7 @@ pt_bytes :: proc "contextless" (x, y: []byte, p: ^$T) -> bool {
 	} else when T == Point_p384r1 {
 		FE_SZ :: FE_SIZE_P384R1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	if pt_is_identity(p) == 1 {
@@ -187,7 +187,7 @@ pt_add :: proc "contextless" (p, a, b: ^$T) {
 		x3, y3, z3: Field_Element_p384r1
 		defer fe_clear_vec([]^Field_Element_p384r1{&t0, &t1, &t2, &t3, &t4, &x3, &y3, &z3})
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	x1, y1, z1 := &a.x, &a.y, &a.z
@@ -295,7 +295,7 @@ pt_add_mixed :: proc "contextless" (p, a: ^$T, x2, y2: ^$U) {
 		x3, y3, z3: Field_Element_p384r1
 		defer fe_clear_vec([]^Field_Element_p384r1{&t0, &t1, &t2, &t3, &t4, &x3, &y3, &z3})
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	x1, y1, z1 := &a.x, &a.y, &a.z
@@ -386,7 +386,7 @@ pt_double :: proc "contextless" (p, a: ^$T) {
 		x3, y3, z3: Field_Element_p384r1
 		defer fe_clear_vec([]^Field_Element_p384r1{&t0, &t1, &t2, &t3, &x3, &y3, &z3})
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	x, y, z := &a.x, &a.y, &a.z
@@ -490,7 +490,7 @@ pt_rescale :: proc "contextless" (p, a: ^$T) {
 	} else when T == Point_p384r1 {
 		z_inv: Field_Element_p384r1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	ident: T
@@ -518,7 +518,7 @@ pt_equal :: proc "contextless" (a, b: ^$T) -> int {
 	} else when T == Point_p384r1 {
 		x1z2, x2z1, y1z2, y2z1: Field_Element_p384r1
 	} else {
-		#panic("weierstrass: invalid curve")
+		#panic("weierstrass: invalid curve", #trigger_location)
 	}
 
 	// Check X1Z2 == X2Z1 && Y1Z2 == Y2Z1
