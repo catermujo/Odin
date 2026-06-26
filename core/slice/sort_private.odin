@@ -22,7 +22,7 @@ _stable_sort_general :: proc(data: $T/[]$E, call: $P, $KIND: Sort_Kind) where (O
 		} else when KIND == .Cmp {
 			return call(a, b) == .Less
 		} else {
-			#panic("unhandled Sort_Kind")
+			#panic("unhandled Sort_Kind", #trigger_location)
 		}
 	}
 	

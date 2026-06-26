@@ -1758,6 +1758,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 
 		GB_ASSERT(pl->body->kind == Ast_BlockStmt);
 		if (!pt->is_polymorphic && (e->flags & EntityFlag_Disabled) == 0) {
+			decl_info_copy_trigger_trace(d, ctx);
 			check_procedure_later(ctx->checker, ctx->file, e->token, d, proc_type, pl->body, pl->tags);
 		}
 	} else if (!is_foreign && !e->Procedure.is_objc_impl_or_import) {

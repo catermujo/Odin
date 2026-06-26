@@ -2433,7 +2433,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			hp.type = type
 			return hp
 
-		case "file", "directory", "line", "procedure", "caller_location":
+		case "file", "directory", "line", "procedure", "caller_location", "trigger_location":
 			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
 			bd.tok  = tok
 			bd.name = name.text

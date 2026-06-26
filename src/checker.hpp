@@ -213,6 +213,20 @@ struct VariadicReuseData {
 	i64 max_count;
 };
 
+enum TriggerTraceKind : u8 {
+	TriggerTrace_Invalid,
+	TriggerTrace_Import,
+	TriggerTrace_Use,
+};
+
+struct TriggerTraceFrame {
+	TriggerTraceKind kind;
+	TokenPos         pos;
+	String           name;
+};
+
+enum { MAX_TRIGGER_TRACE_FRAMES = 32 };
+
 // DeclInfo is used to store information of certain declarations to allow for "any order" usage
 struct DeclInfo {
 	DeclInfo *    parent; // NOTE(bill): only used for procedure literals at the moment
@@ -261,6 +275,8 @@ struct DeclInfo {
 	Array<VariadicReuseData> variadic_reuses;
 	i64 variadic_reuse_max_bytes;
 	i64 variadic_reuse_max_align;
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	// NOTE(bill): this is to prevent a race condition since these procedure literals can be created anywhere at any time
 	std::atomic<struct lbModule *> code_gen_module;
@@ -276,6 +292,8 @@ struct ProcInfo {
 	u64       tags;
 	bool      generated_from_polymorphic;
 	Ast *     poly_def_node;
+	i32       trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 
@@ -564,6 +582,8 @@ struct Scope {
 	RwMutex mutex;
 	ScopeMap elements;
 	PtrSet<Scope *> imported;
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	DeclInfo *decl_info;
 
@@ -864,10 +884,24 @@ struct CheckerContext {
 	Scope *    polymorphic_scope;
 
 	Ast *assignment_lhs_hint;
+	i32  trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 gb_internal u64 check_vet_flags(CheckerContext *c);
 gb_internal u64 check_vet_flags(Ast *node);
+
+gb_internal void checker_context_clear_trigger_trace(CheckerContext *ctx);
+gb_internal void checker_context_copy_trigger_trace(CheckerContext *dst, CheckerContext const *src);
+gb_internal void checker_context_set_trigger_trace_from_proc_info(CheckerContext *ctx, ProcInfo const *pi);
+gb_internal void checker_context_set_trigger_trace_from_scope(CheckerContext *ctx, Scope const *scope);
+gb_internal void checker_context_build_import_trigger_trace(CheckerContext *ctx, AstPackage *pkg);
+gb_internal void checker_context_prepend_trigger_trace(CheckerContext *ctx, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void decl_info_copy_trigger_trace(DeclInfo *decl, CheckerContext const *ctx);
+gb_internal void proc_info_copy_trigger_trace(ProcInfo *pi, CheckerContext const *ctx);
+gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void checker_context_print_trigger_trace_from(CheckerContext *ctx, i32 start_index);
+gb_internal void checker_context_print_trigger_trace(CheckerContext *ctx);
 
 
 struct Checker {

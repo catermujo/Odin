@@ -9,7 +9,7 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
-$ODIN test ../test_issue_829.odin  $COMMON
+$ODIN test ../test_issue_829.odin $COMMON
 $ODIN test ../test_issue_1592.odin $COMMON
 $ODIN test ../test_issue_1730.odin $COMMON
 $ODIN test ../test_issue_2056.odin $COMMON
@@ -23,7 +23,7 @@ $ODIN test ../test_issue_3435.odin $COMMON
 $ODIN test ../test_issue_4210.odin $COMMON
 $ODIN test ../test_issue_4364.odin $COMMON
 $ODIN test ../test_issue_4584.odin $COMMON
-if [[ $($ODIN build ../test_issue_2395.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]] ; then
+if [[ $($ODIN build ../test_issue_2395.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -42,59 +42,59 @@ $ODIN test ../test_issue_6344.odin $COMMON -o:speed
 $ODIN test ../test_issue_6396.odin $COMMON
 $ODIN test ../test_pr_6476.odin $COMMON
 
-if [[ $($ODIN build ../test_issue_6240.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 3 ]] ; then
+if [[ $($ODIN build ../test_issue_6240.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 3 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
-if [[ $($ODIN build ../test_issue_6401.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 3 ]] ; then
+if [[ $($ODIN build ../test_issue_6401.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 3 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
-if [[ $($ODIN build ../test_issue_6594.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN build ../test_issue_6594.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
-if [[ $($ODIN build ../test_issue_6621.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN build ../test_issue_6621.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
 $ODIN test ../test_pr_6470.odin $COMMON
-if [[ $($ODIN test ../test_pr_6470.odin -define:TEST_EXPECT_FAILURE=true $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN test ../test_pr_6470.odin -define:TEST_EXPECT_FAILURE=true $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
 $ODIN check ../test_issue_build_tag_define_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE=false
-if [[ $($ODIN check ../test_issue_build_tag_define_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_issue_build_tag_define_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
 $ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
-if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
 $ODIN check ../test_issue_6484.odin -no-entry-point $COMMON
-if [[ $($ODIN check ../test_issue_6874.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_issue_6874.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
-if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]] ; then
+if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -102,7 +102,49 @@ else
 fi
 $ODIN check ../test_issue_6979.odin -no-entry-point $COMMON
 $ODIN build ../test_issue_7037.odin $COMMON -o:none
-
+$ODIN check ../test_trigger_location_accept.odin $COMMON -internal-ignore-panic
+if [[ $($ODIN check ../test_trigger_location_import_direct.odin $COMMON -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import 'core:os'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_import_chain -no-entry-point $COMMON_NO_FILE -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import '../b'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_import_chain -no-entry-point $COMMON_NO_FILE -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Imported via './a'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_use_site.odin $COMMON 2>&1 >/dev/null | grep -F -c "Triggered by use of 'trigger'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_arg_count.odin $COMMON 2>&1 >/dev/null | grep -F -c "'#panic' expects 1 or 2 arguments") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_assert_third.odin $COMMON 2>&1 >/dev/null | grep -F -c "'#assert' expected a constant string as its second argument when a third argument is provided") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_outside.odin $COMMON 2>&1 >/dev/null | grep -F -c "#trigger_location may only be used as an argument to '#assert' or '#panic'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 
 clang -c ../test_issue_7010.c -o test_issue_7010_c.o
 $ODIN test ../test_issue_7010.odin $COMMON

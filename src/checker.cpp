@@ -2016,6 +2016,7 @@ gb_internal bool add_curr_ast_file(CheckerContext *ctx, AstFile *file) {
 		ctx->decl  = file->pkg->decl_info;
 		ctx->scope = file->scope;
 		ctx->pkg   = file->pkg;
+		checker_context_set_trigger_trace_from_scope(ctx, file->pkg->scope);
 		return true;
 	}
 	return false;
@@ -2883,6 +2884,10 @@ gb_internal void check_procedure_later(Checker *c, AstFile *file, Token token, D
 	info->type  = type;
 	info->body  = body;
 	info->tags  = tags;
+	info->trigger_trace_count = gb_clamp(decl->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (info->trigger_trace_count > 0) {
+		gb_memmove(info->trigger_trace, decl->trigger_trace, info->trigger_trace_count*gb_size_of(TriggerTraceFrame));
+	}
 	check_procedure_later(c, info);
 }
 
@@ -6087,6 +6092,289 @@ struct ImportPathItem {
 	Ast *   decl;
 };
 
+gb_internal gb_inline bool trigger_trace_positions_match(TokenPos const &x, TokenPos const &y) {
+	return x.file_id == y.file_id &&
+	       x.line    == y.line &&
+	       x.column  == y.column &&
+	       x.offset  == y.offset;
+}
+
+gb_internal gb_inline String trigger_trace_import_name(String s) {
+	if (s.len >= 2) {
+		u8 first = s[0];
+		u8 last  = s[s.len-1];
+		if ((first == '"'  && last == '"') ||
+		    (first == '\'' && last == '\'') ||
+		    (first == '`'  && last == '`')) {
+			return substring(s, 1, s.len-1);
+		}
+	}
+	return s;
+}
+
+gb_internal void trigger_trace_push_back(TriggerTraceFrame *frames, i32 *count, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (count == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 n = *count;
+	if (n > 0) {
+		TriggerTraceFrame *prev = &frames[n-1];
+		if (prev->kind == kind &&
+		    trigger_trace_positions_match(prev->pos, pos) &&
+		    prev->name == name) {
+			return;
+		}
+	}
+	if (n >= MAX_TRIGGER_TRACE_FRAMES) {
+		return;
+	}
+
+	frames[n].kind = kind;
+	frames[n].pos  = pos;
+	frames[n].name = name;
+	*count = n+1;
+}
+
+gb_internal void checker_context_clear_trigger_trace(CheckerContext *ctx) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+}
+
+gb_internal void checker_context_copy_trigger_trace(CheckerContext *dst, CheckerContext const *src) {
+	if (dst == nullptr) {
+		return;
+	}
+	dst->trigger_trace_count = 0;
+	if (src == nullptr || src->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(src->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(dst->trigger_trace, src->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	dst->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_set_trigger_trace_from_proc_info(CheckerContext *ctx, ProcInfo const *pi) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+	if (pi == nullptr || pi->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(pi->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(ctx->trigger_trace, pi->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	ctx->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_set_trigger_trace_from_scope(CheckerContext *ctx, Scope const *scope) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+	if (scope == nullptr || scope->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(scope->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(ctx->trigger_trace, scope->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	ctx->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_prepend_trigger_trace(CheckerContext *ctx, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (ctx == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (count > 0) {
+		TriggerTraceFrame *first = &ctx->trigger_trace[0];
+		if (first->kind == kind &&
+		    trigger_trace_positions_match(first->pos, pos) &&
+		    first->name == name) {
+			return;
+		}
+	}
+
+	if (count >= MAX_TRIGGER_TRACE_FRAMES) {
+		count = MAX_TRIGGER_TRACE_FRAMES-1;
+	}
+	if (count > 0) {
+		gb_memmove(ctx->trigger_trace+1, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	}
+	ctx->trigger_trace[0].kind = kind;
+	ctx->trigger_trace[0].pos  = pos;
+	ctx->trigger_trace[0].name = name;
+	ctx->trigger_trace_count = count+1;
+}
+
+gb_internal void decl_info_copy_trigger_trace(DeclInfo *decl, CheckerContext const *ctx) {
+	if (decl == nullptr) {
+		return;
+	}
+	decl->trigger_trace_count = 0;
+	if (ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(decl->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	decl->trigger_trace_count = count;
+}
+
+gb_internal void proc_info_copy_trigger_trace(ProcInfo *pi, CheckerContext const *ctx) {
+	if (pi == nullptr) {
+		return;
+	}
+	pi->trigger_trace_count = 0;
+	if (ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(pi->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	pi->trigger_trace_count = count;
+	decl_info_copy_trigger_trace(pi->decl, ctx);
+}
+
+gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (pi == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(pi->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (count > 0) {
+		TriggerTraceFrame *first = &pi->trigger_trace[0];
+		if (first->kind == kind &&
+		    trigger_trace_positions_match(first->pos, pos) &&
+		    first->name == name) {
+			return;
+		}
+	}
+
+	if (count >= MAX_TRIGGER_TRACE_FRAMES) {
+		count = MAX_TRIGGER_TRACE_FRAMES-1;
+	}
+	if (count > 0) {
+		gb_memmove(pi->trigger_trace+1, pi->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	}
+	pi->trigger_trace[0].kind = kind;
+	pi->trigger_trace[0].pos  = pos;
+	pi->trigger_trace[0].name = name;
+	pi->trigger_trace_count = count+1;
+}
+
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
+
+gb_internal void scope_copy_trigger_trace_if_shorter(Scope *scope, CheckerContext const *ctx) {
+	if (scope == nullptr || ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (scope->trigger_trace_count > 0 && scope->trigger_trace_count <= count) {
+		return;
+	}
+
+	gb_memmove(scope->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	scope->trigger_trace_count = count;
+}
+
+gb_internal void checker_build_active_import_trigger_traces(Checker *c) {
+	if (c == nullptr) {
+		return;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	PtrSet<AstPackage *> has_incoming = {};
+	ptr_set_init(&has_incoming, c->parser->packages.count);
+	defer (ptr_set_destroy(&has_incoming));
+
+	Array<AstPackage *> queue = {};
+	array_init(&queue, temporary_allocator(), 0, c->parser->packages.count);
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg != nullptr && pkg->scope != nullptr) {
+			pkg->scope->trigger_trace_count = 0;
+		}
+	}
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg == nullptr) {
+			continue;
+		}
+		for_array(j, pkg->files) {
+			AstFile *f = pkg->files[j];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+			for_array(k, f->imports) {
+				Ast *decl = f->imports[k];
+				if (decl == nullptr || decl->kind != Ast_ImportDecl) {
+					continue;
+				}
+				AstPackage *child = decl->ImportDecl.package;
+				if (child != nullptr && child->scope != nullptr) {
+					ptr_set_add(&has_incoming, child);
+				}
+			}
+		}
+	}
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg == nullptr || pkg->scope == nullptr) {
+			continue;
+		}
+		if (!ptr_set_exists(&has_incoming, pkg)) {
+			array_add(&queue, pkg);
+		}
+	}
+
+	for (isize head = 0; head < queue.count; head++) {
+		AstPackage *pkg = queue[head];
+		CheckerContext pkg_ctx = {};
+		checker_context_set_trigger_trace_from_scope(&pkg_ctx, pkg->scope);
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+			for_array(j, f->imports) {
+				Ast *decl = f->imports[j];
+				if (decl == nullptr || decl->kind != Ast_ImportDecl) {
+					continue;
+				}
+
+				ast_node(id, ImportDecl, decl);
+				AstPackage *child = id->package;
+				if (child == nullptr || child->scope == nullptr) {
+					continue;
+				}
+
+				CheckerContext child_ctx = {};
+				checker_context_copy_trigger_trace(&child_ctx, &pkg_ctx);
+				checker_context_prepend_trigger_trace(&child_ctx, TriggerTrace_Import, id->relpath.pos, trigger_trace_import_name(id->relpath.string));
+
+				i32 prev_count = child->scope->trigger_trace_count;
+				scope_copy_trigger_trace_if_shorter(child->scope, &child_ctx);
+				if (child->scope->trigger_trace_count != prev_count) {
+					array_add(&queue, child);
+				}
+			}
+		}
+	}
+}
+
 gb_internal Array<ImportPathItem> find_import_path(Checker *c, AstPackage *start, AstPackage *end, PtrSet<AstPackage *> *visited, gbAllocator allocator) {
 	Array<ImportPathItem> empty_path = {};
 
@@ -6134,6 +6422,96 @@ gb_internal Array<ImportPathItem> find_import_path(Checker *c, AstPackage *start
 		}
 	}
 	return empty_path;
+}
+
+gb_internal void checker_context_build_import_trigger_trace(CheckerContext *ctx, AstPackage *pkg) {
+	checker_context_clear_trigger_trace(ctx);
+	if (ctx == nullptr || ctx->checker == nullptr || pkg == nullptr || pkg->kind == Package_Init) {
+		return;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	Array<ImportPathItem> best_path = {};
+	for_array(i, ctx->checker->parser->packages) {
+		AstPackage *start = ctx->checker->parser->packages[i];
+		if (start == nullptr || start->kind != Package_Init || start == pkg) {
+			continue;
+		}
+
+		PtrSet<AstPackage *> visited = {};
+		defer (ptr_set_destroy(&visited));
+
+		auto path = find_import_path(ctx->checker, start, pkg, &visited, temporary_allocator());
+		if (path.count == 0) {
+			continue;
+		}
+		if (best_path.count == 0 || path.count < best_path.count) {
+			best_path = path;
+		}
+	}
+
+	for (isize i = best_path.count-1; i >= 0; i--) {
+		ImportPathItem item = best_path[i];
+		if (item.decl == nullptr || item.decl->kind != Ast_ImportDecl) {
+			continue;
+		}
+		ast_node(id, ImportDecl, item.decl);
+		trigger_trace_push_back(ctx->trigger_trace, &ctx->trigger_trace_count, TriggerTrace_Import, id->relpath.pos, trigger_trace_import_name(id->relpath.string));
+	}
+}
+
+gb_internal void checker_context_print_trigger_trace_from(CheckerContext *ctx, i32 start_index) {
+	if (ctx == nullptr) {
+		return;
+	}
+
+	i32 start = gb_clamp(start_index, 0, ctx->trigger_trace_count);
+	for (i32 i = start; i < ctx->trigger_trace_count; i++) {
+		TriggerTraceFrame const &frame = ctx->trigger_trace[i];
+		char const *pos = token_pos_to_string(frame.pos);
+
+		switch (frame.kind) {
+		case TriggerTrace_Use:
+			if (i == 0) {
+				if (frame.name.len > 0) {
+					error_line("\tTriggered by use of '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tTriggered by use at %s\n", pos);
+				}
+			} else {
+				if (frame.name.len > 0) {
+					error_line("\tUsed from '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tUsed from %s\n", pos);
+				}
+			}
+			break;
+
+		case TriggerTrace_Import:
+			if (i == 0) {
+				if (frame.name.len > 0) {
+					error_line("\tTriggered by import '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tTriggered by import at %s\n", pos);
+				}
+			} else {
+				if (frame.name.len > 0) {
+					error_line("\tImported via '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tImported via %s\n", pos);
+				}
+			}
+			break;
+
+		case TriggerTrace_Invalid:
+			break;
+		}
+	}
+}
+
+gb_internal void checker_context_print_trigger_trace(CheckerContext *ctx) {
+	checker_context_print_trigger_trace_from(ctx, 0);
 }
 #endif
 
@@ -6973,6 +7351,8 @@ gb_internal void check_import_entities(Checker *c) {
 		min_pkg_index = pkg_index;
 	}
 
+	checker_build_active_import_trigger_traces(c);
+
 	TIME_SECTION("check_import_entities - check delayed entities");
 	for (isize pkg_index = 0; pkg_index < package_order.count; pkg_index++) {
 		ImportGraphNode *node = package_order[pkg_index];
@@ -7027,6 +7407,9 @@ gb_internal void check_import_entities(Checker *c) {
 		for_array(i, pkg->files) {
 			AstFile *f = pkg->files[i];
 			reset_checker_context(&ctx, f, &untyped);
+			if (ctx.trigger_trace_count == 0) {
+				checker_context_build_import_trigger_trace(&ctx, pkg);
+			}
 
 			for (Ast *expr : f->delayed_decls_queues[AstDelayQueue_Expr]) {
 				Operand o = {};
@@ -7231,6 +7614,10 @@ gb_internal void check_procedure_later_from_entity(Checker *c, Entity *e, char c
 	pi->token = e->token;
 	pi->decl  = e->decl_info;
 	pi->type  = e->type;
+	pi->trigger_trace_count = gb_clamp(e->decl_info->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (pi->trigger_trace_count > 0) {
+		gb_memmove(pi->trigger_trace, e->decl_info->trigger_trace, pi->trigger_trace_count*gb_size_of(TriggerTraceFrame));
+	}
 
 	Ast *pl = e->decl_info->proc_lit;
 	GB_ASSERT(pl != nullptr);
@@ -7307,6 +7694,14 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 	defer (destroy_checker_context(&ctx));
 	reset_checker_context(&ctx, pi->file, untyped);
 	ctx.decl = pi->decl;
+	if (pi->trigger_trace_count > 0) {
+		checker_context_set_trigger_trace_from_proc_info(&ctx, pi);
+	} else if (pi->decl != nullptr && pi->decl->trigger_trace_count > 0) {
+		CheckerContext trace_ctx = {};
+		trace_ctx.trigger_trace_count = gb_clamp(pi->decl->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+		gb_memmove(trace_ctx.trigger_trace, pi->decl->trigger_trace, trace_ctx.trigger_trace_count*gb_size_of(TriggerTraceFrame));
+		checker_context_copy_trigger_trace(&ctx, &trace_ctx);
+	}
 
 	bool bounds_check    = (pi->tags & ProcTag_bounds_check)    != 0;
 	bool no_bounds_check = (pi->tags & ProcTag_no_bounds_check) != 0;
