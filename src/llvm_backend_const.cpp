@@ -1,3 +1,138 @@
+gb_internal LLVMValueRef llvm_const_cast_expr(lbModule *m, LLVMOpcode opcode, LLVMValueRef value, LLVMTypeRef type) {
+	if (LLVMTypeOf(value) == type) {
+		return value;
+	}
+
+	LLVMValueRef res = nullptr;
+	switch (opcode) {
+	case LLVMTrunc:
+		res = LLVMConstTrunc(value, type);
+		break;
+	case LLVMZExt:
+		res = LLVMBuildZExt(m->const_dummy_builder, value, type, "");
+		break;
+	default:
+		GB_PANIC("unsupported const cast opcode: %d", cast(int)opcode);
+	}
+
+	GB_ASSERT(LLVMIsConstant(res));
+	return res;
+}
+
+gb_internal LLVMValueRef llvm_const_bin_expr(lbModule *m, LLVMOpcode opcode, LLVMValueRef lhs, LLVMValueRef rhs) {
+	LLVMValueRef res = nullptr;
+	switch (opcode) {
+	case LLVMAnd:
+		res = LLVMBuildAnd(m->const_dummy_builder, lhs, rhs, "");
+		break;
+	case LLVMOr:
+		res = LLVMBuildOr(m->const_dummy_builder, lhs, rhs, "");
+		break;
+	case LLVMShl:
+		res = LLVMBuildShl(m->const_dummy_builder, lhs, rhs, "");
+		break;
+	case LLVMLShr:
+		res = LLVMBuildLShr(m->const_dummy_builder, lhs, rhs, "");
+		break;
+	default:
+		GB_PANIC("unsupported const binary opcode: %d", cast(int)opcode);
+	}
+
+	GB_ASSERT(LLVMIsConstant(res));
+	return res;
+}
+
+LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef dst_ty);
+
+gb_internal bool llvm_const_try_pack_to_integer_array_chunks(lbModule *m, LLVMValueRef val, LLVMTypeRef elem_ty, unsigned elem_bits, LLVMValueRef *elems, unsigned elem_count, uint64_t bit_offset) {
+	LLVMTargetDataRef td = LLVMGetModuleDataLayout(m->mod);
+	LLVMTypeRef src_ty = LLVMTypeOf(val);
+	unsigned src_bits = cast(unsigned)LLVMSizeOfTypeInBits(td, src_ty);
+	if (src_bits == 0) {
+		return true;
+	}
+
+	switch (LLVMGetTypeKind(src_ty)) {
+	case LLVMStructTypeKind: {
+		unsigned field_count = LLVMCountStructElementTypes(src_ty);
+		for (unsigned i = 0; i < field_count; i++) {
+			LLVMTypeRef field_ty = LLVMStructGetTypeAtIndex(src_ty, i);
+			unsigned field_bits = cast(unsigned)LLVMSizeOfTypeInBits(td, field_ty);
+			if (field_bits == 0) {
+				continue;
+			}
+
+			uint64_t field_offset_bits = 8*LLVMOffsetOfElement(td, src_ty, i);
+			LLVMValueRef field = llvm_const_extract_value(m, val, i);
+			if (!llvm_const_try_pack_to_integer_array_chunks(m, field, elem_ty, elem_bits, elems, elem_count, bit_offset + field_offset_bits)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case LLVMArrayTypeKind: {
+		LLVMTypeRef src_elem_ty = LLVMGetElementType(src_ty);
+		unsigned src_elem_bits = cast(unsigned)LLVMSizeOfTypeInBits(td, src_elem_ty);
+		unsigned src_elem_count = LLVMGetArrayLength(src_ty);
+		for (unsigned i = 0; i < src_elem_count; i++) {
+			LLVMValueRef elem = llvm_const_extract_value(m, val, i);
+			if (!llvm_const_try_pack_to_integer_array_chunks(m, elem, elem_ty, elem_bits, elems, elem_count, bit_offset + src_elem_bits*i)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	default:
+		break;
+	}
+
+	uint64_t start_idx = bit_offset/elem_bits;
+	uint64_t end_idx = (bit_offset + src_bits - 1)/elem_bits;
+	if (start_idx >= elem_count || end_idx >= elem_count || start_idx != end_idx) {
+		return false;
+	}
+
+	uint64_t intra_offset = bit_offset % elem_bits;
+	LLVMValueRef elem = llvm_const_pad_to_size(m, val, elem_ty);
+	if (elem == nullptr) {
+		return false;
+	}
+	if (LLVMGetTypeKind(src_ty) == LLVMPointerTypeKind) {
+		if (intra_offset != 0 || src_bits != elem_bits) {
+			return false;
+		}
+	} else {
+		if (src_bits > elem_bits) {
+			return false;
+		}
+		if (intra_offset != 0) {
+			elem = llvm_const_bin_expr(m, LLVMShl, elem, LLVMConstInt(elem_ty, intra_offset, false));
+		}
+	}
+
+	elems[start_idx] = llvm_const_bin_expr(m, LLVMOr, elems[start_idx], elem);
+	return true;
+}
+
+gb_internal LLVMValueRef llvm_const_try_pad_to_integer_array(lbModule *m, LLVMValueRef val, LLVMTypeRef dst_ty) {
+	LLVMTypeRef elem_ty = LLVMGetElementType(dst_ty);
+	if (LLVMGetTypeKind(elem_ty) != LLVMIntegerTypeKind) {
+		return nullptr;
+	}
+
+	unsigned elem_count = LLVMGetArrayLength(dst_ty);
+	unsigned elem_bits = cast(unsigned)LLVMSizeOfTypeInBits(LLVMGetModuleDataLayout(m->mod), elem_ty);
+	LLVMValueRef *elems = temporary_alloc_array<LLVMValueRef>(elem_count);
+	for (unsigned i = 0; i < elem_count; i++) {
+		elems[i] = LLVMConstInt(elem_ty, 0, false);
+	}
+
+	if (!llvm_const_try_pack_to_integer_array_chunks(m, val, elem_ty, elem_bits, elems, elem_count, 0)) {
+		return nullptr;
+	}
+	return LLVMConstArray(elem_ty, elems, elem_count);
+}
+
 gb_internal LLVMValueRef lb_const_low_bits_mask(LLVMTypeRef type, u64 bit_count) {
 	GB_ASSERT(bit_count <= 64);
 	if (bit_count == 0) {
@@ -635,6 +770,16 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 	}
 	unsigned src_bits = (unsigned)LLVMSizeOfTypeInBits(td, src_ty);
 	unsigned dst_bits = (unsigned)LLVMSizeOfTypeInBits(td, dst_ty);
+	if (src_bits == 0 || dst_bits == 0) {
+		return LLVMConstNull(dst_ty);
+	}
+
+	LLVMTypeKind dst_kind = LLVMGetTypeKind(dst_ty);
+	if (dst_kind == LLVMArrayTypeKind) {
+		if (LLVMValueRef direct = llvm_const_try_pad_to_integer_array(m, val, dst_ty)) {
+			return direct;
+		}
+	}
 
 	if (src_bits == dst_bits) {
 		bool failure = false;
@@ -667,11 +812,18 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 		as_int = LLVMConstInt(src_int_ty, 0, false);
 
 		for (unsigned i = 0; i < elem_count; i++) {
+			if (elem_bits == 0) {
+				continue;
+			}
 			LLVMValueRef elem = llvm_const_extract_value(m, val, i);
 			LLVMTypeRef elem_int_ty = LLVMIntTypeInContext(ctx, elem_bits);
 			LLVMValueRef elem_int = llvm_const_pad_to_size(m, elem, elem_int_ty);
-			LLVMValueRef shifted = LLVMBuildShl(m->const_dummy_builder, LLVMBuildZExt(m->const_dummy_builder, elem_int, src_int_ty, ""), LLVMConstInt(src_int_ty, i * elem_bits, false), "");
-			as_int = LLVMBuildOr(m->const_dummy_builder, as_int, shifted, "");
+			if (elem_int == nullptr) {
+				return nullptr;
+			}
+			LLVMValueRef zext = llvm_const_cast_expr(m, LLVMZExt, elem_int, src_int_ty);
+			LLVMValueRef shifted = llvm_const_bin_expr(m, LLVMShl, zext, LLVMConstInt(src_int_ty, i * elem_bits, false));
+			as_int = llvm_const_bin_expr(m, LLVMOr, as_int, shifted);
 		}
 	} else if (src_kind == LLVMStructTypeKind) {
 		unsigned field_count = LLVMCountStructElementTypes(src_ty);
@@ -681,16 +833,23 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 		for (unsigned i = 0; i < field_count; i++) {
 			LLVMTypeRef field_ty = LLVMStructGetTypeAtIndex(src_ty, i);
 			unsigned field_bits = (unsigned)LLVMSizeOfTypeInBits(td, field_ty);
+			if (field_bits == 0) {
+				continue;
+			}
 			LLVMValueRef field = llvm_const_extract_value(m, val, i);
 
 			LLVMTypeRef field_int_ty = LLVMIntTypeInContext(ctx, field_bits);
 			LLVMValueRef field_int = llvm_const_pad_to_size(m, field, field_int_ty);
+			if (field_int == nullptr) {
+				return nullptr;
+			}
 
 			uint64_t field_offset_bytes = LLVMOffsetOfElement(td, src_ty, i);
 			uint64_t field_offset_bits = field_offset_bytes * 8;
 
-			LLVMValueRef shifted = LLVMBuildShl(m->const_dummy_builder, LLVMBuildZExt(m->const_dummy_builder, field_int, src_int_ty, ""), LLVMConstInt(src_int_ty, field_offset_bits, false), "");
-			as_int = LLVMBuildOr(m->const_dummy_builder, as_int, shifted, "");
+			LLVMValueRef zext = llvm_const_cast_expr(m, LLVMZExt, field_int, src_int_ty);
+			LLVMValueRef shifted = llvm_const_bin_expr(m, LLVMShl, zext, LLVMConstInt(src_int_ty, field_offset_bits, false));
+			as_int = llvm_const_bin_expr(m, LLVMOr, as_int, shifted);
 		}
 	} else {
 		gb_printf_err("unsupported const_pad source type: %s\n", LLVMPrintTypeToString(src_ty));
@@ -700,13 +859,11 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 	if (src_bits != dst_bits) {
 		LLVMTypeRef dst_int_ty = LLVMIntTypeInContext(ctx, dst_bits);
 		if (src_bits < dst_bits) {
-			as_int = LLVMBuildZExt(m->const_dummy_builder, as_int, dst_int_ty, "");
+			as_int = llvm_const_cast_expr(m, LLVMZExt, as_int, dst_int_ty);
 		} else {
 			as_int = LLVMConstTrunc(as_int, dst_int_ty);
 		}
 	}
-
-	LLVMTypeKind dst_kind = LLVMGetTypeKind(dst_ty);
 
 	if (dst_kind == LLVMIntegerTypeKind ||
 		dst_kind == LLVMFloatTypeKind ||
@@ -728,7 +885,7 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 		LLVMTypeRef as_int_ty = LLVMTypeOf(as_int);
 
 		for (unsigned i = 0; i < elem_count; i++) {
-			LLVMValueRef shifted = LLVMBuildLShr(m->const_dummy_builder, as_int, LLVMConstInt(as_int_ty, i * elem_bits, false), "");
+			LLVMValueRef shifted = llvm_const_bin_expr(m, LLVMLShr, as_int, LLVMConstInt(as_int_ty, i * elem_bits, false));
 			LLVMTypeRef elem_int_ty = LLVMIntTypeInContext(ctx, elem_bits);
 			LLVMValueRef trunc = LLVMConstTrunc(shifted, elem_int_ty);
 			elems[i] = llvm_const_pad_to_size(m, trunc, elem_ty);
@@ -877,15 +1034,15 @@ gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value
 
 			LLVMValueRef elem = values[i].value;
 			if (lb_sizeof(lit) < lb_sizeof(LLVMTypeOf(elem))) {
-				elem = LLVMBuildTrunc(m->const_dummy_builder, elem, lit, "");
+				elem = llvm_const_cast_expr(m, LLVMTrunc, elem, lit);
 			} else {
-				elem = LLVMBuildZExt(m->const_dummy_builder, elem, lit, "");
+				elem = llvm_const_cast_expr(m, LLVMZExt, elem, lit);
 			}
-			elem = LLVMBuildAnd(m->const_dummy_builder, elem, mask, "");
+			elem = llvm_const_bin_expr(m, LLVMAnd, elem, mask);
 
-			elem = LLVMBuildShl(m->const_dummy_builder, elem, LLVMConstInt(lit, f.bit_offset, false), "");
+			elem = llvm_const_bin_expr(m, LLVMShl, elem, LLVMConstInt(lit, f.bit_offset, false));
 
-			res = LLVMBuildOr(m->const_dummy_builder, res, elem, "");
+			res = llvm_const_bin_expr(m, LLVMOr, res, elem);
 		}
 
 		return {res, type};
@@ -922,21 +1079,21 @@ gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value
 
 				LLVMValueRef mask = lb_const_low_bits_mask(vt, mask_width);
 
-				LLVMValueRef to_set = LLVMBuildAnd(m->const_dummy_builder, val, mask, "");
+				LLVMValueRef to_set = llvm_const_bin_expr(m, LLVMAnd, val, mask);
 
 				if (elem_bit_offset != 0) {
-					to_set = LLVMBuildShl(m->const_dummy_builder, to_set, LLVMConstInt(vt, elem_bit_offset, false), "");
+					to_set = llvm_const_bin_expr(m, LLVMShl, to_set, LLVMConstInt(vt, elem_bit_offset, false));
 				}
-				to_set = LLVMBuildTrunc(m->const_dummy_builder, to_set, lit, "");
+				to_set = llvm_const_cast_expr(m, LLVMTrunc, to_set, lit);
 
 				if (LLVMIsNull(elems[elem_idx])) {
 					elems[elem_idx] = to_set; // don't even bother doing `0 | to_set`
 				} else {
-					elems[elem_idx] = LLVMBuildOr(m->const_dummy_builder, elems[elem_idx], to_set, "");
+					elems[elem_idx] = llvm_const_bin_expr(m, LLVMOr, elems[elem_idx], to_set);
 				}
 
 				if (mask_width != 0) {
-					val = LLVMBuildLShr(m->const_dummy_builder, val, LLVMConstInt(vt, mask_width, false), "");
+					val = llvm_const_bin_expr(m, LLVMLShr, val, LLVMConstInt(vt, mask_width, false));
 				}
 				curr_bit_offset += mask_width;
 			}
@@ -1098,11 +1255,8 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 			LLVMValueRef values[4] = {};
 			unsigned value_count = 0;
 
-			values[value_count++] = cv.value;
-			if (block_size != type_size_of(variant_type)) {
-				LLVMTypeRef padding_type = lb_type_padding_filler(m, block_size - type_size_of(variant_type), 1);
-				values[value_count++] = LLVMConstNull(padding_type);
-			}
+			LLVMTypeRef block_type = lb_type_internal_union_block_type(m, bt);
+			values[value_count++] = llvm_const_pad_to_size(m, cv.value, block_type);
 
 			Type *tag_type = union_tag_type(bt);
 			LLVMTypeRef llvm_tag_type = lb_type(m, tag_type);
