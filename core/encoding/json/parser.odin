@@ -264,7 +264,15 @@ parse_array :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 
 	for p.curr_token.kind != .Close_Bracket {
 		elem := parse_value(p, loc) or_return
-		append(&array, elem, loc)
+		_, append_err := append(&array, elem, loc)
+		if append_err != nil {
+			if append_err == mem.Allocator_Error.Out_Of_Memory {
+				err = .Out_Of_Memory
+			} else {
+				err = .Invalid_Allocator
+			}
+			return
+		}
 
 		if parse_comma(p) {
 			break
