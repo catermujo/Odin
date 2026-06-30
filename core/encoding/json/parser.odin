@@ -1,9 +1,9 @@
 package encoding_json
 
 import "core:mem"
-import "core:unicode/utf8"
-import "core:unicode/utf16"
 import "core:strconv"
+import "core:unicode/utf16"
+import "core:unicode/utf8"
 
 Parser :: struct {
 	tok:            Tokenizer,
@@ -14,17 +14,27 @@ Parser :: struct {
 	parse_integers: bool,
 }
 
-make_parser :: proc{
+make_parser :: proc {
 	make_parser_from_bytes,
 	make_parser_from_string,
 }
 
 @(require_results)
-make_parser_from_bytes :: proc(data: []byte, spec := DEFAULT_SPECIFICATION, parse_integers := false, allocator := context.allocator) -> Parser {
+make_parser_from_bytes :: proc(
+	data: []byte,
+	spec := DEFAULT_SPECIFICATION,
+	parse_integers := false,
+	allocator := context.allocator,
+) -> Parser {
 	return make_parser_from_string(string(data), spec, parse_integers, allocator)
 }
 @(require_results)
-make_parser_from_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers := false, allocator := context.allocator) -> Parser {
+make_parser_from_string :: proc(
+	data: string,
+	spec := DEFAULT_SPECIFICATION,
+	parse_integers := false,
+	allocator := context.allocator,
+) -> Parser {
 	p: Parser
 	p.tok = make_tokenizer(data, spec, parse_integers)
 	p.spec = spec
@@ -34,19 +44,37 @@ make_parser_from_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, par
 	return p
 }
 
-parse :: proc{
+parse :: proc {
 	parse_bytes,
 	parse_string,
 }
 
 
 @(require_results)
-parse_bytes :: proc(data: []byte, spec := DEFAULT_SPECIFICATION, parse_integers := false, allocator := context.allocator, loc := #caller_location) -> (Value, Error) {
+parse_bytes :: proc(
+	data: []byte,
+	spec := DEFAULT_SPECIFICATION,
+	parse_integers := false,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	Value,
+	Error,
+) {
 	return parse_string(string(data), spec, parse_integers, allocator, loc)
 }
 
 @(require_results)
-parse_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers := false, allocator := context.allocator, loc := #caller_location) -> (Value, Error) {
+parse_string :: proc(
+	data: string,
+	spec := DEFAULT_SPECIFICATION,
+	parse_integers := false,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	Value,
+	Error,
+) {
 	context.allocator = allocator
 	p := make_parser_from_string(data, spec, parse_integers, allocator)
 
@@ -257,14 +285,22 @@ parse_array :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 	array.allocator = p.allocator
 	defer if err != nil {
 		for elem in array {
-			destroy_value(elem, loc=loc)
+			destroy_value(elem, loc = loc)
 		}
 		delete(array, loc)
 	}
 
 	for p.curr_token.kind != .Close_Bracket {
 		elem := parse_value(p, loc) or_return
-		append(&array, elem, loc)
+		_, append_err := append(&array, elem, loc)
+		if append_err != nil {
+			if append_err == mem.Allocator_Error.Out_Of_Memory {
+				err = .Out_Of_Memory
+			} else {
+				err = .Invalid_Allocator
+			}
+			return
+		}
 
 		if parse_comma(p) {
 			break
@@ -277,7 +313,14 @@ parse_array :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 }
 
 @(private, require_results)
-bytes_make :: proc(size, alignment: int, allocator: mem.Allocator, loc := #caller_location) -> (bytes: []byte, err: Error) {
+bytes_make :: proc(
+	size, alignment: int,
+	allocator: mem.Allocator,
+	loc := #caller_location,
+) -> (
+	bytes: []byte,
+	err: Error,
+) {
 	b, berr := mem.alloc_bytes(size, alignment, allocator, loc)
 	if berr != nil {
 		if berr == .Out_Of_Memory {
@@ -293,7 +336,7 @@ bytes_make :: proc(size, alignment: int, allocator: mem.Allocator, loc := #calle
 @(require_results)
 clone_string :: proc(s: string, allocator: mem.Allocator, loc := #caller_location) -> (str: string, err: Error) {
 	n := len(s)
-	b := bytes_make(n+1, 1, allocator, loc) or_return
+	b := bytes_make(n + 1, 1, allocator, loc) or_return
 	copy(b, s)
 	if len(b) > n {
 		b[n] = 0
@@ -303,7 +346,14 @@ clone_string :: proc(s: string, allocator: mem.Allocator, loc := #caller_locatio
 }
 
 @(require_results)
-parse_object_key :: proc(p: ^Parser, key_allocator: mem.Allocator, loc := #caller_location) -> (key: string, err: Error) {
+parse_object_key :: proc(
+	p: ^Parser,
+	key_allocator: mem.Allocator,
+	loc := #caller_location,
+) -> (
+	key: string,
+	err: Error,
+) {
 	tok := p.curr_token
 	if p.spec != .JSON {
 		if allow_token(p, .Ident) {
@@ -319,12 +369,12 @@ parse_object_key :: proc(p: ^Parser, key_allocator: mem.Allocator, loc := #calle
 
 @(require_results)
 parse_object_body :: proc(p: ^Parser, end_token: Token_Kind, loc := #caller_location) -> (obj: Object, err: Error) {
-	obj = make(Object, allocator=p.allocator, loc=loc)
+	obj = make(Object, allocator = p.allocator, loc = loc)
 
 	defer if err != nil {
 		for key, elem in obj {
 			delete(key, p.allocator, loc)
-			destroy_value(elem, loc=loc)
+			destroy_value(elem, loc = loc)
 		}
 		delete(obj, loc)
 	}
@@ -389,7 +439,15 @@ parse_object :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err:
 
 // IMPORTANT NOTE(bill): unquote_string assumes a mostly valid string
 @(require_results)
-unquote_string :: proc(token: Token, spec: Specification, allocator := context.allocator, loc := #caller_location) -> (value: string, err: Error) {
+unquote_string :: proc(
+	token: Token,
+	spec: Specification,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	value: string,
+	err: Error,
+) {
 	get_u2_rune :: proc(s: string) -> rune {
 		if len(s) < 4 || s[0] != '\\' || s[1] != 'x' {
 			return -1
@@ -399,12 +457,16 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 		for c in s[2:4] {
 			x: rune
 			switch c {
-			case '0'..='9': x = c - '0'
-			case 'a'..='f': x = c - 'a' + 10
-			case 'A'..='F': x = c - 'A' + 10
-			case: return -1
+			case '0' ..= '9':
+				x = c - '0'
+			case 'a' ..= 'f':
+				x = c - 'a' + 10
+			case 'A' ..= 'F':
+				x = c - 'A' + 10
+			case:
+				return -1
 			}
-			r = r*16 + x
+			r = r * 16 + x
 		}
 		return r
 	}
@@ -417,12 +479,16 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 		for c in s[2:6] {
 			x: rune
 			switch c {
-			case '0'..='9': x = c - '0'
-			case 'a'..='f': x = c - 'a' + 10
-			case 'A'..='F': x = c - 'A' + 10
-			case: return -1
+			case '0' ..= '9':
+				x = c - '0'
+			case 'a' ..= 'f':
+				x = c - 'a' + 10
+			case 'A' ..= 'F':
+				x = c - 'A' + 10
+			case:
+				return -1
 			}
-			r = r*16 + x
+			r = r * 16 + x
 		}
 		return r
 	}
@@ -435,11 +501,11 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 		return "", nil
 	}
 	quote := s[0]
-	if s[0] != s[len(s)-1] {
+	if s[0] != s[len(s) - 1] {
 		// Invalid string
 		return "", nil
 	}
-	s = s[1:len(s)-1]
+	s = s[1:len(s) - 1]
 
 	i := 0
 	for i < len(s) {
@@ -461,7 +527,7 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 		return clone_string(s, allocator, loc)
 	}
 
-	b := bytes_make(len(s) + 2*utf8.UTF_MAX, 1, allocator) or_return
+	b := bytes_make(len(s) + 2 * utf8.UTF_MAX, 1, allocator) or_return
 	w := copy(b, s[0:i])
 
 	if len(b) == 0 && allocator.data == nil {
@@ -478,8 +544,9 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 				break loop
 			}
 			switch s[i] {
-			case: break loop
-			case '"',  '\'', '\\', '/':
+			case:
+				break loop
+			case '"', '\'', '\\', '/':
 				b[w] = s[i]
 				i += 1
 				w += 1
@@ -513,7 +580,7 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 				i += 6
 
 				// If this is a surrogate pair, decode as such by taking the next rune too.
-				if r >= utf8.SURROGATE_MIN && r <= utf8.SURROGATE_HIGH_MAX && len(s) > i + 2 && s[i:i+2] == "\\u" {
+				if r >= utf8.SURROGATE_MIN && r <= utf8.SURROGATE_HIGH_MAX && len(s) > i + 2 && s[i:i + 2] == "\\u" {
 					r2 := get_u4_rune(s[i:])
 					if r2 >= utf8.SURROGATE_LOW_MIN && r2 <= utf8.SURROGATE_MAX {
 						i += 6
