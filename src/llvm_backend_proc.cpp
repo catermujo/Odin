@@ -1006,6 +1006,39 @@ gb_internal Array<lbValue> lb_value_to_array(lbProcedure *p, gbAllocator const &
 
 
 gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue return_ptr, Array<lbValue> const &processed_args, Type *abi_rt, lbAddr context_ptr, ProcInlining inlining, ProcTailing tailing, LLVMValueRef closure_env = nullptr) {
+	if (LLVMTypeOf(value.value) != nullptr && p->module->ctx != LLVMGetTypeContext(LLVMTypeOf(value.value))) {
+		LLVMValueRef proc_value = value.value;
+		if (LLVMIsAConstantExpr(proc_value)) {
+			proc_value = LLVMGetOperand(proc_value, 0);
+		}
+
+		LLVMContextRef other_ctx = LLVMGetTypeContext(LLVMTypeOf(proc_value));
+		lbModule **other_module_ptr = map_get(&p->module->gen->modules_through_ctx, other_ctx);
+		if (other_module_ptr != nullptr) {
+			lbModule *other_module = *other_module_ptr;
+			Entity **entity_ptr = map_get(&other_module->procedure_values, proc_value);
+			if (entity_ptr != nullptr && *entity_ptr != nullptr) {
+				value = lb_find_procedure_value_from_entity(p->module, *entity_ptr);
+			}
+		}
+
+		if (p->module->ctx != LLVMGetTypeContext(LLVMTypeOf(value.value)) &&
+		    LLVMGetValueKind(proc_value) == LLVMFunctionValueKind) {
+			size_t name_len = 0;
+			char const *name_text = LLVMGetValueName2(proc_value, &name_len);
+			if (name_len > 0) {
+				char *name = gb_alloc_array(permanent_allocator(), char, name_len+1);
+				gb_memmove(name, name_text, name_len);
+				name[name_len] = 0;
+				LLVMValueRef local_proc = LLVMGetNamedFunction(p->module->mod, name);
+				if (local_proc == nullptr) {
+					local_proc = LLVMAddFunction(p->module->mod, name, lb_get_procedure_raw_type(p->module, value.type));
+					LLVMSetLinkage(local_proc, LLVMExternalLinkage);
+				}
+				value.value = local_proc;
+			}
+		}
+	}
 	GB_ASSERT(p->module->ctx == LLVMGetTypeContext(LLVMTypeOf(value.value)));
 
 	unsigned arg_count = cast(unsigned)processed_args.count;
