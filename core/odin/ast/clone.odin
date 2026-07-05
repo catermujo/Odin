@@ -300,6 +300,7 @@ clone_node :: proc(node: ^Node) -> ^Node {
 		case ^Proc_Type:
 			r.params  = auto_cast clone(r.params)
 			r.results = auto_cast clone(r.results)
+			r.captures = clone(r.captures)
 		case ^Pointer_Type:
 			r.elem = clone(r.elem)
 			r.tag  = clone(r.tag)

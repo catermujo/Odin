@@ -735,6 +735,8 @@ Proc_Type :: struct {
 	tags:      Proc_Tags,
 	generic:   bool,
 	diverging: bool,
+	is_lambda: bool,
+	captures:  []^Expr,
 }
 
 Pointer_Type :: struct {
