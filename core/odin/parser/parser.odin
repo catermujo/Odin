@@ -2273,9 +2273,33 @@ is_field_list_generic :: proc(field_list : ^ast.Field_List, check_names : bool) 
 	return is_generic
 }
 
-parse_proc_type :: proc(p: ^Parser, tok: tokenizer.Token) -> ^ast.Proc_Type {
+parse_lambda_capture_list :: proc(p: ^Parser) -> []^ast.Expr {
+	captures: [dynamic]^ast.Expr
+
+	expect_token(p, .Open_Bracket)
+	for p.curr_tok.kind != .Close_Bracket &&
+	    p.curr_tok.kind != .EOF {
+		if p.curr_tok.kind == .And {
+			amp := expect_token(p, .And)
+			name := parse_ident(p)
+			expr := ast.new(ast.Unary_Expr, amp.pos, name)
+			expr.op = amp
+			expr.expr = name
+			append(&captures, expr)
+		} else {
+			append(&captures, parse_ident(p))
+		}
+
+		allow_token(p, .Comma) or_break
+	}
+	expect_token(p, .Close_Bracket)
+
+	return captures[:]
+}
+
+parse_proc_type :: proc(p: ^Parser, tok: tokenizer.Token, is_lambda := false) -> ^ast.Proc_Type {
 	cc: ast.Proc_Calling_Convention
-	if p.curr_tok.kind == .String {
+	if !is_lambda && p.curr_tok.kind == .String {
 		str := expect_token(p, .String)
 		cc = string_to_calling_convention(str.text)
 		if cc == nil {
@@ -2285,6 +2309,11 @@ parse_proc_type :: proc(p: ^Parser, tok: tokenizer.Token) -> ^ast.Proc_Type {
 
 	if cc == nil && p.in_foreign_block {
 		cc = .Foreign_Block_Default
+	}
+
+	captures: []^ast.Expr
+	if is_lambda && p.curr_tok.kind == .Open_Bracket {
+		captures = parse_lambda_capture_list(p)
 	}
 
 	expect_token(p, .Open_Paren)
@@ -2307,6 +2336,8 @@ parse_proc_type :: proc(p: ^Parser, tok: tokenizer.Token) -> ^ast.Proc_Type {
 	pt.results = results
 	pt.diverging = diverging
 	pt.generic = is_generic
+	pt.is_lambda = is_lambda
+	pt.captures = captures
 	return pt
 }
 
@@ -2674,6 +2705,32 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		pl.where_token = where_token
 		pl.where_clauses = where_clauses
 		return pl
+
+	case .Lambda:
+		tok := expect_token(p, .Lambda)
+		type := parse_proc_type(p, tok, true)
+
+		skip_possible_newline_for_literal(p)
+
+		if p.allow_type && p.expr_level < 0 {
+			return type
+		}
+
+		skip_possible_newline_for_literal(p)
+
+		if p.curr_tok.kind == .Open_Brace {
+			prev_proc := p.curr_proc
+			p.curr_proc = type
+			body := parse_body(p)
+			p.curr_proc = prev_proc
+
+			pl := ast.new(ast.Proc_Lit, tok.pos, end_pos(p.prev_tok))
+			pl.type = type
+			pl.body = body
+			return pl
+		}
+
+		return type
 
 	case .Dollar:
 		tok := advance_token(p)

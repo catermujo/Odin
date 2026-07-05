@@ -355,6 +355,7 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 			walk(v, n.specialization)
 		}
 	case ^Proc_Type:
+		walk_expr_list(v, n.captures)
 		walk(v, n.params)
 		walk(v, n.results)
 	case ^Pointer_Type:
@@ -488,4 +489,3 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 
 	v->visit(nil)
 }
-
