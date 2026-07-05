@@ -2146,6 +2146,7 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 				param = &entities_to_use[entities_to_use_index++];
 				INTERNAL_ENTITY_INIT(param, Entity_TypeName, scope, name->Ident.token, type);
 				param->state = EntityState_Resolved;
+				param->flags |= EntityFlag_PolyConst;
 				param->interned_name.store(name->Ident.interned);
 				param->interned_name_hash.store(name->Ident.hash);
 
@@ -2914,9 +2915,11 @@ gb_internal i64 check_array_count(CheckerContext *ctx, Operand *o, Ast *e) {
 					entity->flags&EntityFlag_PolyConst;
 			}
 
-			// NOTE(bill, 2021-03-27): Improve error message for parametric polymorphic parameters which want to generate
-			// and enumerated array but cannot determine what it ought to be yet
+			// NOTE(bill, 2021-03-27): A polymorphic enum index like `[E]T` starts as a generic count and
+			// is specialized into an enumerated array once `E` is known.
 			if (ctx->allow_polymorphic_types && is_poly_type) {
+				o->mode = Addressing_Type;
+				o->type = alloc_type_generic(entity->scope, 0, entity->interned_name.load(), nullptr);
 				return 0;
 			}
 
