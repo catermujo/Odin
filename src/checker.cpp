@@ -7212,21 +7212,22 @@ gb_internal bool ast_file_has_deferred_build_tags(AstFile *f) {
 	return (f->flags & AstFile_HasDeferredBuildTags) != 0;
 }
 
-gb_internal BuildTagConditionValue checker_build_tag_define_resolver(void *user_data, Token token_for_pos, String define_name) {
+gb_internal BuildTagConditionValue checker_when_expr_resolver(void *user_data, TokenPos pos, String name, ExactValue *value) {
 	auto *data = cast(DeferredBuildTagResolverData *)user_data;
-	char const *key = string_intern_cstring(define_name);
+	char const *key = string_intern_cstring(name);
 	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
 		map_set(&build_context.used_defined_values, key, true);
-		if (v->kind != ExactValue_Bool) {
-			error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
-			return BuildTagCondition_False;
-		}
-		return v->value_bool ? BuildTagCondition_True : BuildTagCondition_False;
+		*value = *v;
+		return BuildTagCondition_True;
 	}
 
-	Entity *e = scope_lookup_current(data->pkg->scope, string_interner_insert(define_name));
+	Entity *e = scope_lookup_current(data->pkg->scope, string_interner_insert(name));
 	if (e == nullptr) {
-		return data->missing_is_false ? BuildTagCondition_False : BuildTagCondition_Unknown;
+		if (data->missing_is_false) {
+			*value = exact_value_bool(false);
+			return BuildTagCondition_True;
+		}
+		return BuildTagCondition_Unknown;
 	}
 
 	if (e->kind == Entity_Constant && e->decl_info != nullptr && e->state != EntityState_Resolved) {
@@ -7234,18 +7235,15 @@ gb_internal BuildTagConditionValue checker_build_tag_define_resolver(void *user_
 	}
 
 	if (e->kind != Entity_Constant) {
-		error(token_for_pos, "Build tag define '%.*s' must be a boolean constant", LIT(define_name));
+		error(pos, "#+when: '%.*s' must be a constant", LIT(name));
 		return BuildTagCondition_False;
 	}
 	if (e->state != EntityState_Resolved) {
 		return data->missing_is_false ? BuildTagCondition_False : BuildTagCondition_Unknown;
 	}
-	if (e->Constant.value.kind != ExactValue_Bool) {
-		error(token_for_pos, "Build tag define '%.*s' must be a boolean constant", LIT(define_name));
-		return BuildTagCondition_False;
-	}
 
-	return e->Constant.value.value_bool ? BuildTagCondition_True : BuildTagCondition_False;
+	*value = e->Constant.value;
+	return BuildTagCondition_True;
 }
 
 gb_internal BuildTagConditionValue check_evaluate_deferred_build_tags(Checker *c, AstFile *f, bool missing_is_false) {
@@ -7256,7 +7254,7 @@ gb_internal BuildTagConditionValue check_evaluate_deferred_build_tags(Checker *c
 
 	BuildTagConditionValue result = BuildTagCondition_True;
 	for (String tag : f->deferred_build_tags) {
-		BuildTagConditionValue tag_result = evaluate_build_tag_condition(ast_token(f->pkg_decl), tag, checker_build_tag_define_resolver, &data);
+		BuildTagConditionValue tag_result = evaluate_build_tag_condition(ast_token(f->pkg_decl), tag);
 		if (result == BuildTagCondition_False || tag_result == BuildTagCondition_False) {
 			result = BuildTagCondition_False;
 		} else if (result == BuildTagCondition_Unknown || tag_result == BuildTagCondition_Unknown) {
@@ -7266,6 +7264,24 @@ gb_internal BuildTagConditionValue check_evaluate_deferred_build_tags(Checker *c
 		}
 		if (result == BuildTagCondition_False) {
 			break;
+		}
+	}
+	if (result != BuildTagCondition_False) {
+		for (WhenExpr *expr : f->deferred_when_exprs) {
+			ExactValue when_val = {};
+			BuildTagConditionValue expr_result = evaluate_when_tag_expr(expr, checker_when_expr_resolver, &data, &when_val);
+			if (expr_result == BuildTagCondition_True) {
+				if (when_val.kind == ExactValue_Bool && !when_val.value_bool) {
+					result = BuildTagCondition_False;
+				}
+			} else if (expr_result == BuildTagCondition_Unknown) {
+				result = BuildTagCondition_Unknown;
+			} else {
+				result = BuildTagCondition_False;
+			}
+			if (result == BuildTagCondition_False) {
+				break;
+			}
 		}
 	}
 	return result;

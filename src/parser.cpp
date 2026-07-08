@@ -6480,6 +6480,7 @@ gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, Tok
 	array_init(&f->comments, ast_allocator(f), 0, 0);
 	array_init(&f->imports,  ast_allocator(f), 0, 0);
 	array_init(&f->deferred_build_tags, ast_allocator(f), 0, 0);
+	array_init(&f->deferred_when_exprs, ast_allocator(f), 0, 0);
 
 	f->curr_proc = nullptr;
 
@@ -6492,6 +6493,7 @@ gb_internal void destroy_ast_file(AstFile *f) {
 	array_free(&f->comments);
 	array_free(&f->imports);
 	array_free(&f->deferred_build_tags);
+	array_free(&f->deferred_when_exprs);
 }
 
 gb_internal bool init_parser(Parser *p) {
@@ -7067,6 +7069,390 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 	}
 }
 
+//
+// #+when expression parser
+//
+enum WhenTokenKind {
+	WhenToken_End,
+	WhenToken_Ident,
+	WhenToken_Integer,
+	WhenToken_Bool,
+	WhenToken_EqEq,
+	WhenToken_NotEq,
+	WhenToken_Lt,
+	WhenToken_Gt,
+	WhenToken_LtEq,
+	WhenToken_GtEq,
+	WhenToken_AndAnd,
+	WhenToken_OrOr,
+	WhenToken_Not,
+	WhenToken_OpenParen,
+	WhenToken_CloseParen,
+};
+
+struct WhenToken {
+	WhenTokenKind kind;
+	String text;
+	i64 integer;
+};
+
+gb_internal WhenToken when_lex(String s, isize *offset) {
+	WhenToken tok = {};
+	while (*offset < s.len) {
+		Rune rune = 0;
+		isize width = utf8_decode(&s.text[*offset], s.len - *offset, &rune);
+		if (rune == ' ' || rune == '\t' || rune == '\n' || rune == '\r') {
+			*offset += width;
+			continue;
+		}
+		if (rune == '(') { *offset += 1; tok.kind = WhenToken_OpenParen; return tok; }
+		if (rune == ')') { *offset += 1; tok.kind = WhenToken_CloseParen; return tok; }
+		if (rune == '=') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '=') { *offset += 1 + w2; tok.kind = WhenToken_EqEq; return tok; }
+			}
+			tok.kind = WhenToken_End;
+			return tok;
+		}
+		if (rune == '!') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '=') { *offset += 1 + w2; tok.kind = WhenToken_NotEq; return tok; }
+			}
+			*offset += 1; tok.kind = WhenToken_Not; return tok;
+		}
+		if (rune == '<') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '=') { *offset += 1 + w2; tok.kind = WhenToken_LtEq; return tok; }
+			}
+			*offset += 1; tok.kind = WhenToken_Lt; return tok;
+		}
+		if (rune == '>') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '=') { *offset += 1 + w2; tok.kind = WhenToken_GtEq; return tok; }
+			}
+			*offset += 1; tok.kind = WhenToken_Gt; return tok;
+		}
+		if (rune == '&') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '&') { *offset += 1 + w2; tok.kind = WhenToken_AndAnd; return tok; }
+			}
+			tok.kind = WhenToken_End;
+			return tok;
+		}
+		if (rune == '|') {
+			if (*offset + 1 < s.len) {
+				isize w2 = utf8_decode(&s.text[*offset+1], s.len - *offset - 1, &rune);
+				if (rune == '|') { *offset += 1 + w2; tok.kind = WhenToken_OrOr; return tok; }
+			}
+			tok.kind = WhenToken_End;
+			return tok;
+		}
+		if (rune_is_digit(rune)) {
+			isize start = *offset;
+			*offset += width;
+			while (*offset < s.len) {
+				isize w = utf8_decode(&s.text[*offset], s.len - *offset, &rune);
+				if (!rune_is_digit(rune)) break;
+				*offset += w;
+			}
+			tok.kind = WhenToken_Integer;
+			tok.text = substring(s, start, *offset);
+			tok.integer = 0;
+			for (isize i = start; i < *offset; i++) {
+				tok.integer = tok.integer * 10 + (s.text[i] - '0');
+			}
+			return tok;
+		}
+		if (rune_is_letter(rune) || rune == '_') {
+			isize start = *offset;
+			*offset += width;
+			while (*offset < s.len) {
+				isize w = utf8_decode(&s.text[*offset], s.len - *offset, &rune);
+				if (!rune_is_letter(rune) && !rune_is_digit(rune) && rune != '_') break;
+				*offset += w;
+			}
+			String id = substring(s, start, *offset);
+			if (id == "true") {
+				tok.kind = WhenToken_Bool; tok.integer = 1;
+			} else if (id == "false") {
+				tok.kind = WhenToken_Bool; tok.integer = 0;
+			} else {
+				tok.kind = WhenToken_Ident; tok.text = id;
+			}
+			return tok;
+		}
+		break;
+	}
+	tok.kind = WhenToken_End;
+	return tok;
+}
+
+gb_internal WhenExpr *alloc_when_expr(TokenPos pos, WhenExprKind kind) {
+	WhenExpr *e = gb_alloc_item(permanent_allocator(), WhenExpr);
+	e->pos = pos;
+	e->kind = kind;
+	return e;
+}
+
+gb_internal WhenExpr *parse_when_primary(String s, isize *offset, TokenPos pos);
+gb_internal WhenExpr *parse_when_cmp_expr(String s, isize *offset, TokenPos pos);
+gb_internal WhenExpr *parse_when_and_expr(String s, isize *offset, TokenPos pos);
+gb_internal WhenExpr *parse_when_or_expr(String s, isize *offset, TokenPos pos);
+
+gb_internal WhenExpr *parse_when_primary(String s, isize *offset, TokenPos pos) {
+	WhenToken tok = when_lex(s, offset);
+	switch (tok.kind) {
+	case WhenToken_Integer: {
+		WhenExpr *e = alloc_when_expr(pos, WhenExpr_Integer);
+		e->integer = tok.integer;
+		return e;
+	}
+	case WhenToken_Bool: {
+		WhenExpr *e = alloc_when_expr(pos, WhenExpr_Bool);
+		e->boolean = tok.integer != 0;
+		return e;
+	}
+	case WhenToken_Ident: {
+		WhenExpr *e = alloc_when_expr(pos, WhenExpr_Ident);
+		e->ident = tok.text;
+		return e;
+	}
+	case WhenToken_Not: {
+		WhenExpr *e = alloc_when_expr(pos, WhenExpr_Unary);
+		e->unary.expr = parse_when_primary(s, offset, pos);
+		e->unary.op = '!';
+		return e;
+	}
+	case WhenToken_OpenParen: {
+		WhenExpr *e = parse_when_or_expr(s, offset, pos);
+		WhenToken close = when_lex(s, offset);
+		if (close.kind != WhenToken_CloseParen) {
+			syntax_error(pos, "#+when: expected ')'");
+		}
+		return e;
+	}
+	default:
+		syntax_error(pos, "#+when: expected expression");
+		return alloc_when_expr(pos, WhenExpr_Bool);
+	}
+}
+
+gb_internal i32 when_token_to_cmp_op(WhenTokenKind kind) {
+	switch (kind) {
+	case WhenToken_EqEq:  return Token_CmpEq;
+	case WhenToken_NotEq: return Token_NotEq;
+	case WhenToken_Lt:    return Token_Lt;
+	case WhenToken_Gt:    return Token_Gt;
+	case WhenToken_LtEq:  return Token_LtEq;
+	case WhenToken_GtEq:  return Token_GtEq;
+	case WhenToken_AndAnd: return Token_CmpAnd;
+	case WhenToken_OrOr:   return Token_CmpOr;
+	default: return 0;
+	}
+}
+
+gb_internal WhenExpr *parse_when_cmp_expr(String s, isize *offset, TokenPos pos) {
+	WhenExpr *left = parse_when_primary(s, offset, pos);
+	isize saved = *offset;
+	WhenToken tok = when_lex(s, offset);
+	if (tok.kind == WhenToken_EqEq || tok.kind == WhenToken_NotEq ||
+	    tok.kind == WhenToken_Lt || tok.kind == WhenToken_Gt ||
+	    tok.kind == WhenToken_LtEq || tok.kind == WhenToken_GtEq) {
+		WhenExpr *e = alloc_when_expr(pos, WhenExpr_Binary);
+		e->binary.left = left;
+		e->binary.right = parse_when_primary(s, offset, pos);
+		e->binary.op = when_token_to_cmp_op(tok.kind);
+		return e;
+	}
+	*offset = saved;
+	return left;
+}
+
+gb_internal WhenExpr *parse_when_and_expr(String s, isize *offset, TokenPos pos) {
+	WhenExpr *left = parse_when_cmp_expr(s, offset, pos);
+	while (true) {
+		isize saved = *offset;
+		WhenToken tok = when_lex(s, offset);
+		if (tok.kind == WhenToken_AndAnd) {
+			WhenExpr *e = alloc_when_expr(pos, WhenExpr_Binary);
+			e->binary.left = left;
+			e->binary.right = parse_when_cmp_expr(s, offset, pos);
+			e->binary.op = Token_CmpAnd;
+			left = e;
+		} else {
+			*offset = saved;
+			break;
+		}
+	}
+	return left;
+}
+
+gb_internal WhenExpr *parse_when_or_expr(String s, isize *offset, TokenPos pos) {
+	WhenExpr *left = parse_when_and_expr(s, offset, pos);
+	while (true) {
+		isize saved = *offset;
+		WhenToken tok = when_lex(s, offset);
+		if (tok.kind == WhenToken_OrOr) {
+			WhenExpr *e = alloc_when_expr(pos, WhenExpr_Binary);
+			e->binary.left = left;
+			e->binary.right = parse_when_and_expr(s, offset, pos);
+			e->binary.op = Token_CmpOr;
+			left = e;
+		} else {
+			*offset = saved;
+			break;
+		}
+	}
+	return left;
+}
+
+gb_internal WhenExpr *parse_when_tag_expr(String s, TokenPos pos) {
+	isize offset = 0;
+	return parse_when_or_expr(s, &offset, pos);
+}
+
+gb_internal BuildTagConditionValue evaluate_when_tag_expr(WhenExpr *expr, WhenExprIdentResolverProc *resolver, void *user_data, ExactValue *out_value) {
+	switch (expr->kind) {
+	case WhenExpr_Ident: {
+		if (resolver != nullptr) {
+			return resolver(user_data, expr->pos, expr->ident, out_value);
+		}
+		return BuildTagCondition_Unknown;
+	}
+	case WhenExpr_Integer: {
+		*out_value = exact_value_i64(expr->integer);
+		return BuildTagCondition_True;
+	}
+	case WhenExpr_Bool: {
+		*out_value = exact_value_bool(expr->boolean);
+		return BuildTagCondition_True;
+	}
+	case WhenExpr_Unary: {
+		ExactValue val = {};
+		BuildTagConditionValue res = evaluate_when_tag_expr(expr->unary.expr, resolver, user_data, &val);
+		if (res != BuildTagCondition_True) return res;
+		if (val.kind != ExactValue_Bool) {
+			error(expr->pos, "#+when: '!' requires boolean operand");
+			return BuildTagCondition_False;
+		}
+		*out_value = exact_value_bool(!val.value_bool);
+		return BuildTagCondition_True;
+	}
+	case WhenExpr_Binary: {
+		i32 op = expr->binary.op;
+
+		if (op == Token_CmpAnd) {
+			ExactValue lhs = {};
+			BuildTagConditionValue lr = evaluate_when_tag_expr(expr->binary.left, resolver, user_data, &lhs);
+			if (lr == BuildTagCondition_False) {
+				*out_value = exact_value_bool(false);
+				return BuildTagCondition_True;
+			}
+			if (lr == BuildTagCondition_True) {
+				if (lhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '&&' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				if (!lhs.value_bool) {
+					*out_value = exact_value_bool(false);
+					return BuildTagCondition_True;
+				}
+				ExactValue rhs = {};
+				BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+				if (rr != BuildTagCondition_True) return rr;
+				if (rhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '&&' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				*out_value = exact_value_bool(lhs.value_bool && rhs.value_bool);
+				return BuildTagCondition_True;
+			}
+			ExactValue rhs = {};
+			BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+			if (rr == BuildTagCondition_False) {
+				*out_value = exact_value_bool(false);
+				return BuildTagCondition_True;
+			}
+			return BuildTagCondition_Unknown;
+		}
+
+		if (op == Token_CmpOr) {
+			ExactValue lhs = {};
+			BuildTagConditionValue lr = evaluate_when_tag_expr(expr->binary.left, resolver, user_data, &lhs);
+			if (lr == BuildTagCondition_True) {
+				if (lhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '||' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				if (lhs.value_bool) {
+					*out_value = exact_value_bool(true);
+					return BuildTagCondition_True;
+				}
+				ExactValue rhs = {};
+				BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+				if (rr != BuildTagCondition_True) return rr;
+				if (rhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '||' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				*out_value = exact_value_bool(rhs.value_bool);
+				return BuildTagCondition_True;
+			}
+			if (lr == BuildTagCondition_False) {
+				ExactValue rhs = {};
+				BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+				if (rr != BuildTagCondition_True) return rr;
+				if (rhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '||' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				*out_value = exact_value_bool(rhs.value_bool);
+				return BuildTagCondition_True;
+			}
+			ExactValue rhs = {};
+			BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+			if (rr == BuildTagCondition_True) {
+				if (rhs.kind != ExactValue_Bool) {
+					error(expr->pos, "#+when: '||' requires boolean operands");
+					return BuildTagCondition_False;
+				}
+				if (rhs.value_bool) {
+					*out_value = exact_value_bool(true);
+					return BuildTagCondition_True;
+				}
+			}
+			return BuildTagCondition_Unknown;
+		}
+
+		ExactValue lhs = {}, rhs = {};
+		BuildTagConditionValue lr = evaluate_when_tag_expr(expr->binary.left, resolver, user_data, &lhs);
+		if (lr != BuildTagCondition_True) return lr;
+		BuildTagConditionValue rr = evaluate_when_tag_expr(expr->binary.right, resolver, user_data, &rhs);
+		if (rr != BuildTagCondition_True) return rr;
+
+		*out_value = exact_value_bool(compare_exact_values(cast(TokenKind)op, lhs, rhs));
+		return BuildTagCondition_True;
+	}
+	}
+	return BuildTagCondition_Unknown;
+}
+
+gb_internal BuildTagConditionValue parser_when_expr_resolver(void *user_data, TokenPos pos, String name, ExactValue *value) {
+	GB_ASSERT(user_data == nullptr);
+	char const *key = string_intern_cstring(name);
+	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+		map_set(&build_context.used_defined_values, key, true);
+		*value = *v;
+		return BuildTagCondition_True;
+	}
+	return BuildTagCondition_Unknown;
+}
+
 gb_internal String build_tag_get_token(String s, String *out) {
 	s = string_trim_whitespace(s);
 	isize n = 0;
@@ -7121,20 +7507,7 @@ gb_internal BuildTagConditionValue build_tag_condition_or(BuildTagConditionValue
 	return BuildTagCondition_False;
 }
 
-gb_internal BuildTagConditionValue parser_build_tag_define_resolver(void *, Token token_for_pos, String define_name) {
-	char const *key = string_intern_cstring(define_name);
-	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
-		map_set(&build_context.used_defined_values, key, true);
-		if (v->kind != ExactValue_Bool) {
-			syntax_error(token_for_pos, "Build tag define '%.*s' must be a boolean value", LIT(define_name));
-			return BuildTagCondition_False;
-		}
-		return v->value_bool ? BuildTagCondition_True : BuildTagCondition_False;
-	}
-	return BuildTagCondition_Unknown;
-}
-
-gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s, BuildTagDefineResolverProc *resolve_define, void *user_data) {
+gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s) {
 	String const prefix = str_lit("build");
 	GB_ASSERT(string_starts_with(s, prefix));
 	if (build_require_space_after(s, prefix)) {
@@ -7178,30 +7551,11 @@ gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_
 				continue;
 			}
 
-				String const define_prefix = str_lit("define:");
-				if (string_starts_with(p, define_prefix)) {
-					String define_name = substring(p, define_prefix.len, p.len);
-					if (!string_is_valid_identifier(define_name) || define_name == "_") {
-						syntax_error(token_for_pos, "Invalid build define name: '%.*s'. Expected an identifier after 'define:'", LIT(define_name));
-						break;
-					}
-
-					BuildTagConditionValue define_value = BuildTagCondition_Unknown;
-					if (resolve_define != nullptr) {
-						define_value = resolve_define(user_data, token_for_pos, define_name);
-					}
-					if (is_notted && define_value != BuildTagCondition_Unknown) {
-						define_value = define_value == BuildTagCondition_True ? BuildTagCondition_False : BuildTagCondition_True;
-					}
-					this_kind_correct = build_tag_condition_and(this_kind_correct, define_value);
-					continue;
-				}
-
-				if (p == "bedrock") {
-					BuildTagConditionValue bedrock_value = build_context.bedrock == !is_notted ? BuildTagCondition_True : BuildTagCondition_False;
-					this_kind_correct = build_tag_condition_and(this_kind_correct, bedrock_value);
-					continue;
-				}
+			if (p == "bedrock") {
+				BuildTagConditionValue bedrock_value = build_context.bedrock == !is_notted ? BuildTagCondition_True : BuildTagCondition_False;
+				this_kind_correct = build_tag_condition_and(this_kind_correct, bedrock_value);
+				continue;
+			}
 
 			Subtarget subtarget     = Subtarget_Invalid;
 			String    subtarget_str = {};
@@ -7211,7 +7565,7 @@ gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_
 
 			// Catches 'windows linux' and 'amd64 arm64', both of which are impossible combinations.
 			if ((this_kind_os_seen && os != TargetOs_Invalid) || (this_kind_arch_seen && arch != TargetArch_Invalid)) {
-				syntax_error(token_for_pos, "Invalid build tag: Missing ',' before '%.*s'. Format: '#+build linux, windows amd64, define:FEATURE'", LIT(p));
+				syntax_error(token_for_pos, "Invalid build tag: Missing ',' before '%.*s'.", LIT(p));
 				break;
 			}
 
@@ -7264,10 +7618,6 @@ gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_
 	}
 
 	return any_correct;
-}
-
-gb_internal BuildTagConditionValue parse_build_tag(Token token_for_pos, String s) {
-	return evaluate_build_tag_condition(token_for_pos, s, parser_build_tag_define_resolver, nullptr);
 }
 
 gb_internal String vet_tag_get_token(String s, String *out, bool allow_colon) {
@@ -7531,7 +7881,7 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 			return false;
 		}
 	} else if (string_starts_with(lc, str_lit("build"))) {
-		BuildTagConditionValue result = parse_build_tag(tok, lc);
+		BuildTagConditionValue result = evaluate_build_tag_condition(tok, lc);
 		if (result == BuildTagCondition_False) {
 			return false;
 		}
@@ -7569,6 +7919,35 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 			// Ignore
 		} else {
 			f->flags |= AstFile_IsLazy;
+		}
+	} else if (string_starts_with(lc, str_lit("when"))) {
+		String const when_prefix = str_lit("when");
+		if (build_require_space_after(lc, when_prefix)) {
+			syntax_error(tok, "Expected a space after #+%.*s", LIT(when_prefix));
+			return false;
+		}
+		String expr_str = string_trim_whitespace(substring(lc, 4, lc.len));
+		if (expr_str.len == 0) {
+			syntax_error(tok, "Expected expression after '#+when'");
+			return false;
+		}
+		WhenExpr *expr = parse_when_tag_expr(expr_str, tok.pos);
+		if (expr == nullptr) {
+			return false;
+		}
+
+		ExactValue when_val = {};
+		BuildTagConditionValue result = evaluate_when_tag_expr(expr, parser_when_expr_resolver, nullptr, &when_val);
+		if (result == BuildTagCondition_False) {
+			return false;
+		}
+		if (result == BuildTagCondition_Unknown) {
+			array_add(&f->deferred_when_exprs, expr);
+			f->flags |= AstFile_HasDeferredBuildTags;
+		} else if (result == BuildTagCondition_True) {
+			if (when_val.kind == ExactValue_Bool && !when_val.value_bool) {
+				return false;
+			}
 		}
 	} else if (lc == "no-instrumentation") {
 		f->flags |= AstFile_NoInstrumentation;

@@ -156,6 +156,7 @@ struct AstFile {
 	f64            time_to_tokenize; // seconds
 	f64            time_to_parse;    // seconds
 	Array<String>  deferred_build_tags;
+	Array<struct WhenExpr *> deferred_when_exprs;
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
 	CommentGroup *line_comment;     // Comment after the semicolon
@@ -1001,9 +1002,32 @@ enum BuildTagConditionValue {
 	BuildTagCondition_Unknown,
 };
 
-typedef BuildTagConditionValue BuildTagDefineResolverProc(void *user_data, Token token_for_pos, String define_name);
+enum WhenExprKind {
+	WhenExpr_Ident,
+	WhenExpr_Integer,
+	WhenExpr_Bool,
+	WhenExpr_Unary,
+	WhenExpr_Binary,
+};
 
-gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s, BuildTagDefineResolverProc *resolve_define, void *user_data);
+struct WhenExpr {
+	WhenExprKind kind;
+	TokenPos pos;
+	union {
+		String       ident;
+		i64          integer;
+		bool         boolean;
+		struct { WhenExpr *expr; i32 op; } unary;
+		struct { WhenExpr *left, *right; i32 op; } binary;
+	};
+};
+
+typedef BuildTagConditionValue WhenExprIdentResolverProc(void *user_data, TokenPos pos, String name, ExactValue *value);
+
+gb_internal WhenExpr *parse_when_tag_expr(String s, TokenPos pos);
+gb_internal BuildTagConditionValue evaluate_when_tag_expr(WhenExpr *expr, WhenExprIdentResolverProc *resolver, void *user_data, ExactValue *value);
+
+gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s);
 
 gb_internal Ast *alloc_ast_node(AstFile *f, AstKind kind);
 
