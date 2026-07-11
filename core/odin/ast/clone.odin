@@ -132,6 +132,10 @@ clone_node :: proc(node: ^Node) -> ^Node {
 		case ^Proc_Lit:
 			r.type = auto_cast clone(r.type)
 			r.body = clone(r.body)
+			r.scope_exit_contract = auto_cast clone(r.scope_exit_contract)
+		case ^Scope_Exit:
+			r.policy = clone(r.policy)
+			r.cleanup = clone(r.cleanup)
 		case ^Comp_Lit:
 			r.type  = clone(r.type)
 			r.elems = clone(r.elems)
@@ -226,6 +230,11 @@ clone_node :: proc(node: ^Node) -> ^Node {
 			r.results = clone(r.results)
 		case ^Defer_Stmt:
 			r.stmt = clone(r.stmt)
+		case ^With_Stmt:
+			r.label = clone(r.label)
+			r.init = clone(r.init)
+			r.opener = clone(r.opener)
+			r.body = clone(r.body)
 		case ^For_Stmt:
 			r.label = clone(r.label)
 			r.init = clone(r.init)

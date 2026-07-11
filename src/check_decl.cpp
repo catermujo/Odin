@@ -1311,6 +1311,175 @@ gb_internal bool proc_type_ast_has_results(Ast *proc_type_node) {
 	return results->FieldList.list.count > 0;
 }
 
+gb_internal bool find_scope_exit_binding(TypeProc *pt, Entity *entity, ScopeExitBindingSource *source_, i32 *index_) {
+	if (pt->params != nullptr) {
+		for_array(i, pt->params->Tuple.variables) {
+			if (pt->params->Tuple.variables[i] == entity) {
+				if (source_) *source_ = ScopeExitBinding_Input;
+				if (index_) *index_ = cast(i32)i;
+				return true;
+			}
+		}
+	}
+	if (pt->results != nullptr) {
+		for_array(i, pt->results->Tuple.variables) {
+			Entity *result = pt->results->Tuple.variables[i];
+			if (result == entity && result->token.string.len > 0) {
+				if (source_) *source_ = ScopeExitBinding_Result;
+				if (index_) *index_ = cast(i32)i;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+gb_internal void check_scope_exit_contract(CheckerContext *ctx, Entity *src, Ast *node, AttributeContext const &ac) {
+	if (node == nullptr) {
+		return;
+	}
+	GB_ASSERT(node->kind == Ast_ScopeExit);
+	AstScopeExit *contract_ast = &node->ScopeExit;
+
+	ScopeExitPolicy policy = ScopeExitPolicy_Invalid;
+	Ast *policy_expr = unparen_expr(contract_ast->policy);
+	if (policy_expr != nullptr && policy_expr->kind == Ast_ImplicitSelectorExpr) {
+		Ast *selector = policy_expr->ImplicitSelectorExpr.selector;
+		if (selector != nullptr && selector->kind == Ast_Ident) {
+			String name = selector->Ident.token.string;
+			if (name == "explicit") {
+				policy = ScopeExitPolicy_Explicit;
+			} else if (name == "implicit") {
+				policy = ScopeExitPolicy_Implicit;
+			}
+		}
+	}
+	if (policy == ScopeExitPolicy_Invalid) {
+		error(contract_ast->policy, "Expected '#scope_exit(.explicit, ...)' or '#scope_exit(.implicit, ...)'" );
+		return;
+	}
+
+	if (ac.deferred_procedure.entity != nullptr) {
+		error(node, "A procedure cannot mix '#scope_exit' with a legacy 'deferred_*' attribute");
+		return;
+	}
+
+	Ast *cleanup_expr = unparen_expr(contract_ast->cleanup);
+	if (cleanup_expr == nullptr || cleanup_expr->kind != Ast_CallExpr) {
+		error(contract_ast->cleanup, "Scope-exit cleanup must be a direct procedure call");
+		return;
+	}
+	AstCallExpr *cleanup_call = &cleanup_expr->CallExpr;
+	if (cleanup_call->ellipsis.kind != Token_Invalid) {
+		error(cleanup_expr, "Scope-exit cleanup calls cannot be variadic");
+	}
+	for (Ast *arg : cleanup_call->args) {
+		if (arg->kind == Ast_FieldValue) {
+			error(arg, "Scope-exit cleanup bindings cannot use named arguments");
+			return;
+		}
+	}
+
+	Ast *cleanup_proc_expr = unparen_expr(cleanup_call->proc);
+	Operand cleanup_proc_operand = {};
+	check_expr_base(ctx, &cleanup_proc_operand, cleanup_proc_expr, nullptr);
+	Entity *cleanup = entity_of_node(cleanup_proc_expr);
+	if (cleanup == nullptr || cleanup->kind != Entity_Procedure) {
+		error(cleanup_call->proc, "Expected a procedure for scope-exit cleanup");
+		return;
+	}
+	if (cleanup == src) {
+		error(node, "A procedure cannot use itself as scope-exit cleanup");
+		return;
+	}
+	if (cleanup->flags & EntityFlag_Disabled) {
+		return;
+	}
+	if (is_type_polymorphic(src->type) || is_type_polymorphic(cleanup->type)) {
+		error(node, "Scope-exit contracts cannot use polymorphic procedures");
+		return;
+	}
+
+	Type *cleanup_type = base_type(cleanup->type);
+	if (cleanup_type == nullptr || cleanup_type->kind != Type_Proc) {
+		error(cleanup_call->proc, "Invalid scope-exit cleanup procedure");
+		return;
+	}
+	TypeProc *cleanup_pt = &cleanup_type->Proc;
+	if (cleanup_pt->result_count != 0) {
+		error(cleanup_expr, "Scope-exit cleanup must return no values");
+	}
+	if (cleanup_pt->variadic) {
+		error(cleanup_expr, "Scope-exit cleanup cannot be variadic");
+	}
+
+	Type *src_type = base_type(src->type);
+	if (src_type == nullptr || src_type->kind != Type_Proc) {
+		return;
+	}
+	TypeProc *src_pt = &src_type->Proc;
+	if (cleanup_call->args.count > cleanup_pt->param_count) {
+		error(cleanup_expr, "Scope-exit cleanup provides too many bindings");
+		return;
+	}
+	for (isize i = cleanup_call->args.count; i < cleanup_pt->param_count; i++) {
+		Entity *param = cleanup_pt->params->Tuple.variables[i];
+		if (param->kind != Entity_Variable || param->Variable.param_value.kind == ParameterValue_Invalid) {
+			error(param->token, "Scope-exit cleanup must provide a binding for this parameter");
+			return;
+		}
+	}
+
+	ScopeExitContract contract = {};
+	contract.policy = policy;
+	contract.cleanup = cleanup;
+	contract.pos = ast_token(node).pos;
+	contract.bindings = slice_make<ScopeExitBinding>(permanent_allocator(), cleanup_call->args.count);
+
+	for_array(i, cleanup_call->args) {
+		Ast *arg = unparen_expr(cleanup_call->args[i]);
+		bool by_pointer = false;
+		if (arg != nullptr && arg->kind == Ast_UnaryExpr && arg->UnaryExpr.op.kind == Token_And) {
+			by_pointer = true;
+			arg = unparen_expr(arg->UnaryExpr.expr);
+		}
+		if (arg == nullptr || arg->kind != Ast_Ident) {
+			error(cleanup_call->args[i], "Scope-exit cleanup bindings must be named inputs or results, optionally prefixed with '&'");
+			return;
+		}
+		Operand binding_operand = {};
+		check_expr_base(ctx, &binding_operand, arg, nullptr);
+
+		Entity *binding_entity = entity_of_node(arg);
+		ScopeExitBindingSource source = ScopeExitBinding_Input;
+		i32 index = -1;
+		if (!find_scope_exit_binding(src_pt, binding_entity, &source, &index)) {
+			error(arg, "Scope-exit cleanup binding must name an input or named result of the procedure");
+			return;
+		}
+
+		Type *binding_type = source == ScopeExitBinding_Input
+			? src_pt->params->Tuple.variables[index]->type
+			: src_pt->results->Tuple.variables[index]->type;
+		if (by_pointer) {
+			binding_type = alloc_type_pointer(binding_type);
+		}
+		Type *cleanup_param_type = cleanup_pt->params->Tuple.variables[i]->type;
+		if (!are_types_identical(binding_type, cleanup_param_type)) {
+			gbString binding_str = type_to_string(binding_type);
+			gbString cleanup_str = type_to_string(cleanup_param_type);
+			error(arg, "Scope-exit cleanup parameter type does not match binding: %s != %s", binding_str, cleanup_str);
+			gb_string_free(cleanup_str);
+			gb_string_free(binding_str);
+			return;
+		}
+
+		contract.bindings[i] = ScopeExitBinding{source, index, by_pointer};
+	}
+
+	src->Procedure.scope_exit_contract = contract;
+}
+
 gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 	GB_ASSERT(e->type == nullptr);
 	if (d->proc_lit->kind != Ast_ProcLit) {
@@ -1360,6 +1529,8 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 			tmp_ctx.type_hint = decl_type;
 		}
 		check_procedure_type(&tmp_ctx, proc_type, pl->type);
+
+		check_scope_exit_contract(ctx, e, pl->scope_exit_contract, ac);
 
 		if (decl_type != nullptr) {
 			Operand x = {};

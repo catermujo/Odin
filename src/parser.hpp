@@ -472,6 +472,7 @@ struct AsmMemClassify {
 	AST_KIND(ProcLit, "procedure literal", struct { \
 		Ast *type; \
 		Ast *body; \
+		Ast *scope_exit_contract; \
 		u64  tags; \
 		ProcInlining inlining; \
 		ProcTailing  tailing; \
@@ -707,6 +708,14 @@ AST_KIND(_ComplexStmtBegin, "", bool) \
 		bool partial; \
 	}) \
 	AST_KIND(DeferStmt,  "defer statement",  struct { Token token; Ast *stmt; }) \
+	AST_KIND(WithStmt, "with statement", struct { \
+		Scope *scope; \
+		Token token; \
+		Ast *label; \
+		Ast *init; \
+		Ast *opener; \
+		Ast *body; \
+	}) \
 	AST_KIND(BranchStmt, "branch statement", struct { Token token; Ast *label; }) \
 	AST_KIND(UsingStmt,  "using statement",  struct { \
 		Token token; \
@@ -769,6 +778,13 @@ AST_KIND(_DeclEnd,   "", bool) \
 		Token token;        \
 		Slice<Ast *> elems; \
 		Token open, close;  \
+	}) \
+	AST_KIND(ScopeExit, "scope exit contract", struct { \
+		Token token; \
+		Ast *policy; \
+		Ast *cleanup; \
+		Token open; \
+		Token close; \
 	}) \
 	AST_KIND(Field, "field", struct { \
 		Slice<Ast *> names;         \
