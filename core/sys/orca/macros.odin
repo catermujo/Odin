@@ -253,17 +253,18 @@ str32_list_for :: proc "contextless" (list: ^str32_list, elt: ^^list_elt) -> (^s
 	return list_for(&list.list, elt, str32_elt, "listElt")
 }
 
-@(deferred_none = ui_box_end)
-ui_container :: proc "contextless" (name: string) -> ^ui_box {
+_ui_box_end_scope_exit :: proc "contextless" () {
+	_ = ui_box_end()
+}
+
+ui_container :: proc "contextless" (name: string) -> ^ui_box #scope_exit(.implicit, _ui_box_end_scope_exit()) {
 	return ui_box_begin_str8(name)
 }
 
-@(deferred_none = ui_menu_end)
-ui_menu :: proc "contextless" (key, name: string) {
+ui_menu :: proc "contextless" (key, name: string) #scope_exit(.implicit, ui_menu_end()) {
 	ui_menu_begin_str8(key, name)
 }
 
-@(deferred_none = ui_menu_bar_end)
-ui_menu_bar :: proc "contextless" (key: string) {
+ui_menu_bar :: proc "contextless" (key: string) #scope_exit(.implicit, ui_menu_bar_end()) {
 	ui_menu_bar_begin_str8(key)
 }

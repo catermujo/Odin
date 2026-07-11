@@ -45,8 +45,7 @@ MakeConstantString :: proc "c" (#const c: cstring) -> ^String {
 }
 
 // Creates an autorelease pool which is drained at the end of the enclosing scope.
-@(deferred_out=scoped_autoreleasepool_drain)
-scoped_autoreleasepool :: proc "c" () -> ^AutoreleasePool {
+scoped_autoreleasepool :: proc "c" () -> (pool: ^AutoreleasePool) #scope_exit(.implicit, scoped_autoreleasepool_drain(pool)) {
 	return AutoreleasePool.alloc()->init()
 }
 

@@ -111,9 +111,8 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=mutex_unlock)
 @(synchronizes=.Acquire)
-mutex_guard :: proc "contextless" (m: ^Mutex) -> bool {
+mutex_guard :: proc "contextless" (m: ^Mutex) -> bool #scope_exit(.implicit, mutex_unlock(m)) {
 	mutex_lock(m)
 	return true
 }
@@ -267,8 +266,8 @@ section by running this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=rw_mutex_unlock, synchronizes=.Acquire)
-rw_mutex_guard :: proc "contextless" (m: ^RW_Mutex) -> bool {
+@(synchronizes=.Acquire)
+rw_mutex_guard :: proc "contextless" (m: ^RW_Mutex) -> bool #scope_exit(.implicit, rw_mutex_unlock(m)) {
 	rw_mutex_lock(m)
 	return true
 }
@@ -294,8 +293,8 @@ section by running this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=rw_mutex_shared_unlock, synchronizes_shared=.Acquire)
-rw_mutex_shared_guard :: proc "contextless" (m: ^RW_Mutex) -> bool {
+@(synchronizes_shared=.Acquire)
+rw_mutex_shared_guard :: proc "contextless" (m: ^RW_Mutex) -> bool #scope_exit(.implicit, rw_mutex_shared_unlock(m)) {
 	rw_mutex_shared_lock(m)
 	return true
 }
@@ -392,8 +391,8 @@ section by calling this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=recursive_mutex_unlock, synchronizes=.Acquire)
-recursive_mutex_guard :: proc "contextless" (m: ^Recursive_Mutex) -> bool {
+@(synchronizes=.Acquire)
+recursive_mutex_guard :: proc "contextless" (m: ^Recursive_Mutex) -> bool #scope_exit(.implicit, recursive_mutex_unlock(m)) {
 	recursive_mutex_lock(m)
 	return true
 }

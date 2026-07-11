@@ -121,6 +121,7 @@ Token_Kind :: enum u32 {
 		Package,     // package
 		Typeid,      // typeid
 		When,        // when
+		With,        // with
 		Where,       // where
 		If,          // if
 		Else,        // else
@@ -257,6 +258,7 @@ tokens := [Token_Kind.COUNT]string {
 	"package",
 	"typeid",
 	"when",
+	"with",
 	"where",
 	"if",
 	"else",

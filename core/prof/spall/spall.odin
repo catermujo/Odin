@@ -161,16 +161,15 @@ buffer_destroy :: proc(ctx: ^Context, buffer: ^Buffer) {
 
 
 
-@(deferred_in=_scoped_buffer_end)
 @(no_instrumentation)
-SCOPED_EVENT :: proc(ctx: ^Context, buffer: ^Buffer, name: string, args: string = "", location := #caller_location) -> bool {
+SCOPED_EVENT :: proc(ctx: ^Context, buffer: ^Buffer, name: string, args: string = "", location := #caller_location) -> (ok: bool) #scope_exit(.implicit, _scoped_buffer_end(ctx, buffer, name, args)) {
 	_buffer_begin(ctx, buffer, name, args, location)
 	return true
 }
 
 @(private)
 @(no_instrumentation)
-_scoped_buffer_end :: proc(ctx: ^Context, buffer: ^Buffer, _, _: string, _ := #caller_location) {
+_scoped_buffer_end :: proc(ctx: ^Context, buffer: ^Buffer, _, _: string) {
 	_buffer_end(ctx, buffer)
 }
 
