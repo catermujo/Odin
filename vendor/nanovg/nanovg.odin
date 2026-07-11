@@ -371,13 +371,12 @@ BeginFrame :: proc(
 	ctx.textTriCount = 0
 }
 
-@(deferred_out=EndFrame)
 FrameScoped :: proc(
 	ctx:              ^Context,
 	windowWidth:      f32,
 	windowHeight:     f32,
 	devicePixelRatio: f32,
-) -> ^Context {
+) -> (result: ^Context) #scope_exit(.implicit, EndFrame(result)) {
 	BeginFrame(ctx, windowWidth, windowHeight, devicePixelRatio)
 	return ctx
 }
@@ -682,8 +681,7 @@ Restore :: proc(ctx: ^Context) {
 }
 
 // NOTE useful helper
-@(deferred_in=Restore)
-SaveScoped :: #force_inline proc(ctx: ^Context) {
+SaveScoped :: #force_inline proc(ctx: ^Context) #scope_exit(.implicit, Restore(ctx)) {
 	Save(ctx)
 }
 
@@ -2215,18 +2213,15 @@ BeginPath :: proc(ctx: ^Context) {
 	__clearPathCache(ctx)
 }
 
-@(deferred_in=Fill)
-FillScoped :: proc(ctx: ^Context) {
+FillScoped :: proc(ctx: ^Context) #scope_exit(.implicit, Fill(ctx)) {
 	BeginPath(ctx)
 }
 
-@(deferred_in=Stroke)
-StrokeScoped :: proc(ctx: ^Context) {
+StrokeScoped :: proc(ctx: ^Context) #scope_exit(.implicit, Stroke(ctx)) {
 	BeginPath(ctx)
 }
 
-@(deferred_in=Stroke)
-FillStrokeScoped :: proc(ctx: ^Context) {
+FillStrokeScoped :: proc(ctx: ^Context) #scope_exit(.implicit, Stroke(ctx)) {
 	BeginPath(ctx)		
 }
 
