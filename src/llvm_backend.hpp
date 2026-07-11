@@ -488,7 +488,7 @@ gb_internal void lb_emit_downcast_assert(lbProcedure *p, lbValue value, Type *t,
 gb_internal void lb_emit_bit_field_downcast_assert(lbProcedure *p, lbValue value, Type *field_type, u64 bit_size, TokenPos pos);
 gb_internal lbValue lb_emit_transmute(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right);
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none, lbValue *sret_dst = nullptr);
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none, lbValue *sret_dst = nullptr, Ast *call_expression = nullptr);
 gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp_against_nil(lbProcedure *p, TokenKind op_kind, lbValue x);
 

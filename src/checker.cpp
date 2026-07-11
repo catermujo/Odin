@@ -601,6 +601,7 @@ gb_internal void add_scope(CheckerContext *c, Ast *node, Scope *scope) {
 	case Ast_ForStmt:         node->ForStmt.scope         = scope; break;
 	case Ast_RangeStmt:       node->RangeStmt.scope       = scope; break;
 	case Ast_UnrollRangeStmt: node->UnrollRangeStmt.scope = scope; break;
+	case Ast_WithStmt:        node->WithStmt.scope        = scope; break;
 	case Ast_CaseClause:      node->CaseClause.scope      = scope; break;
 	case Ast_SwitchStmt:      node->SwitchStmt.scope      = scope; break;
 	case Ast_TypeSwitchStmt:  node->TypeSwitchStmt.scope  = scope; break;
@@ -623,6 +624,7 @@ gb_internal Scope *scope_of_node(Ast *node) {
 	case Ast_ForStmt:         return node->ForStmt.scope;
 	case Ast_RangeStmt:       return node->RangeStmt.scope;
 	case Ast_UnrollRangeStmt: return node->UnrollRangeStmt.scope;
+	case Ast_WithStmt:        return node->WithStmt.scope;
 	case Ast_CaseClause:      return node->CaseClause.scope;
 	case Ast_SwitchStmt:      return node->SwitchStmt.scope;
 	case Ast_TypeSwitchStmt:  return node->TypeSwitchStmt.scope;
@@ -2469,6 +2471,12 @@ gb_internal void add_entity_use(CheckerContext *c, Ast *identifier, Entity *enti
 		Entity *deferred = entity->Procedure.deferred_procedure.entity;
 		if (deferred != entity) {
 			add_entity_use(c, nullptr, deferred);
+		}
+	}
+	if (entity_has_scope_exit_contract(entity)) {
+		Entity *cleanup = entity->Procedure.scope_exit_contract.cleanup;
+		if (cleanup != entity) {
+			add_entity_use(c, nullptr, cleanup);
 		}
 	}
 	if (identifier == nullptr || identifier->kind != Ast_Ident) {
@@ -4389,6 +4397,10 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_group_attribute) {
 
 
 gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
+	if (string_starts_with(name, str_lit("deferred_"))) {
+		warning(elem, "Legacy '@(%.*s=...)' attribute; use '#scope_exit(...)' instead", LIT(name));
+	}
+
 	if (name == ATTRIBUTE_USER_TAG_NAME) {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind != ExactValue_String) {
@@ -8303,6 +8315,39 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				}
 			} break;
 		}
+
+		ScopeExitContract contract = {};
+		contract.policy = ScopeExitPolicy_Implicit;
+		contract.cleanup = dst;
+		contract.pos = src->token.pos;
+		bool bind_inputs = dst_kind == DeferredProcedure_in ||
+		                   dst_kind == DeferredProcedure_in_out ||
+		                   dst_kind == DeferredProcedure_in_by_ptr ||
+		                   dst_kind == DeferredProcedure_in_out_by_ptr;
+		bool bind_results = dst_kind == DeferredProcedure_out ||
+		                    dst_kind == DeferredProcedure_in_out ||
+		                    dst_kind == DeferredProcedure_out_by_ptr ||
+		                    dst_kind == DeferredProcedure_in_out_by_ptr;
+		bool bindings_by_pointer = dst_kind == DeferredProcedure_in_by_ptr ||
+		                           dst_kind == DeferredProcedure_out_by_ptr ||
+		                           dst_kind == DeferredProcedure_in_out_by_ptr;
+		Type *scope_src_type = base_type(src->type);
+		isize input_count = scope_src_type->Proc.params != nullptr ? scope_src_type->Proc.params->Tuple.variables.count : 0;
+		isize result_count = scope_src_type->Proc.results != nullptr ? scope_src_type->Proc.results->Tuple.variables.count : 0;
+		isize binding_count = (bind_inputs ? input_count : 0) + (bind_results ? result_count : 0);
+		contract.bindings = slice_make<ScopeExitBinding>(permanent_allocator(), binding_count);
+		isize binding_index = 0;
+		if (bind_inputs) {
+			for (isize i = 0; i < input_count; i++) {
+				contract.bindings[binding_index++] = ScopeExitBinding{ScopeExitBinding_Input, cast(i32)i, bindings_by_pointer};
+			}
+		}
+		if (bind_results) {
+			for (isize i = 0; i < result_count; i++) {
+				contract.bindings[binding_index++] = ScopeExitBinding{ScopeExitBinding_Result, cast(i32)i, bindings_by_pointer};
+			}
+		}
+		src->Procedure.scope_exit_contract = contract;
 	}
 
 }

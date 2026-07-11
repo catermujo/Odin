@@ -315,8 +315,7 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=ticket_mutex_unlock)
-ticket_mutex_guard :: proc "contextless" (m: ^Ticket_Mutex) -> bool {
+ticket_mutex_guard :: proc "contextless" (m: ^Ticket_Mutex) -> bool #scope_exit(.implicit, ticket_mutex_unlock(m)) {
 	ticket_mutex_lock(m)
 	return true
 }
@@ -404,8 +403,7 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=benaphore_unlock)
-benaphore_guard :: proc "contextless" (m: ^Benaphore) -> bool {
+benaphore_guard :: proc "contextless" (m: ^Benaphore) -> bool #scope_exit(.implicit, benaphore_unlock(m)) {
 	benaphore_lock(m)
 	return true
 }
@@ -525,8 +523,7 @@ section by calling this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=recursive_benaphore_unlock)
-recursive_benaphore_guard :: proc "contextless" (m: ^Recursive_Benaphore) -> bool {
+recursive_benaphore_guard :: proc "contextless" (m: ^Recursive_Benaphore) -> bool #scope_exit(.implicit, recursive_benaphore_unlock(m)) {
 	recursive_benaphore_lock(m)
 	return true
 }

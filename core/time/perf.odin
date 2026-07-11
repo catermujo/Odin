@@ -68,8 +68,7 @@ tick_since :: proc "contextless" (start: Tick) -> Duration {
 /*
 Capture the duration the code in the current scope takes to execute.
 */
-@(deferred_in_out=_tick_duration_end)
-SCOPED_TICK_DURATION :: proc "contextless" (d: ^Duration) -> Tick {
+SCOPED_TICK_DURATION :: proc "contextless" (d: ^Duration) -> (result: Tick) #scope_exit(.implicit, _tick_duration_end(d, result)) {
 	return tick_now()
 }
 

@@ -140,8 +140,7 @@ print_timings :: proc() {
 	// }
 }
 
-@(deferred_in_out=_SCOPE_END)
-SCOPED_TIMING :: #force_inline proc(c: Category) -> (ticks: time.Tick, cycles: u64) {
+SCOPED_TIMING :: #force_inline proc(c: Category) -> (ticks: time.Tick, cycles: u64) #scope_exit(.implicit, _SCOPE_END(c, ticks, cycles)) {
 	cycles = time.read_cycle_counter()
 	ticks  = time.tick_now()
 	return

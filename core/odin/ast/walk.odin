@@ -87,7 +87,11 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 	case ^Proc_Lit:
 		walk(v, n.type)
 		walk(v, n.body)
+		walk(v, n.scope_exit_contract)
 		walk_expr_list(v, n.where_clauses)
+	case ^Scope_Exit:
+		walk(v, n.policy)
+		walk(v, n.cleanup)
 	case ^Comp_Lit:
 		if n.type != nil {
 			walk(v, n.type)
@@ -198,6 +202,15 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		walk_expr_list(v, n.results)
 	case ^Defer_Stmt:
 		walk(v, n.stmt)
+	case ^With_Stmt:
+		if n.label != nil {
+			walk(v, n.label)
+		}
+		if n.init != nil {
+			walk(v, n.init)
+		}
+		walk(v, n.opener)
+		walk(v, n.body)
 	case ^For_Stmt:
 		if n.label != nil {
 			walk(v, n.label)

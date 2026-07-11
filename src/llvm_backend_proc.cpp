@@ -1342,7 +1342,7 @@ gb_internal lbValue lb_emit_conjugate(lbProcedure *p, lbValue val, Type *type) {
 	return lb_emit_load(p, res);
 }
 
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining, ProcTailing tailing, lbValue *sret_dst) {
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining, ProcTailing tailing, lbValue *sret_dst, Ast *call_expression) {
 	lbModule *m = p->module;
 
 	Type *pt = base_type(value.type);
@@ -1548,7 +1548,33 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 	Entity **found = map_get(&p->module->procedure_values, the_proc_value);
 	if (found != nullptr) {
 		Entity *e = *found;
-		if (e != nullptr && entity_has_deferred_procedure(e)) {
+		if (e != nullptr && entity_has_scope_exit_contract(e)) {
+			ScopeExitContract const &contract = e->Procedure.scope_exit_contract;
+			lbValue deferred = lb_find_procedure_value_from_entity(p->module, contract.cleanup);
+			Type *cleanup_type = base_type(contract.cleanup->type);
+			GB_ASSERT(cleanup_type != nullptr && cleanup_type->kind == Type_Proc);
+			TypeProc *cleanup_pt = &cleanup_type->Proc;
+			Array<lbValue> result_values = lb_value_to_array(p, heap_allocator(), result);
+			Array<lbValue> result_as_args = array_make<lbValue>(heap_allocator(), 0, cleanup_pt->param_count);
+			for_array(i, contract.bindings) {
+				ScopeExitBinding const &binding = contract.bindings[i];
+				lbValue value = binding.source == ScopeExitBinding_Input
+					? args[binding.index]
+					: result_values[binding.index];
+				if (binding.by_pointer) {
+					value = lb_address_from_load_or_generate_local(p, value);
+				}
+				array_add(&result_as_args, value);
+			}
+			for (isize i = contract.bindings.count; i < cleanup_pt->param_count; i++) {
+				Entity *param = cleanup_pt->params->Tuple.variables[i];
+				GB_ASSERT(param->kind == Entity_Variable);
+				GB_ASSERT(param->Variable.param_value.kind != ParameterValue_Invalid);
+				lbValue value = lb_handle_param_value(p, param->type, param->Variable.param_value, cleanup_pt, call_expression);
+				array_add(&result_as_args, value);
+			}
+			lb_add_defer_proc(p, p->scope_index, deferred, result_as_args, e->token.pos);
+		} else if (e != nullptr && entity_has_deferred_procedure(e)) {
 			DeferredProcedureKind kind = e->Procedure.deferred_procedure.kind;
 			Entity *deferred_entity = e->Procedure.deferred_procedure.entity;
 			lbValue deferred = lb_find_procedure_value_from_entity(p->module, deferred_entity);
@@ -5600,6 +5626,6 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 		GB_ASSERT(value.value == nullptr);
 		return lb_emit_asm_template_call(p, asm_template, call_args);
 	} else {
-		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst);
+		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst, expr);
 	}
 }

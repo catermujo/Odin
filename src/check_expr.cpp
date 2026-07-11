@@ -7693,6 +7693,7 @@ gb_internal bool check_call_arguments_single(CheckerContext *c, Ast *call, Opera
 
 	Entity *entity_to_use = data->gen_entity != nullptr ? data->gen_entity : e;
 	if (!return_on_failure && entity_to_use != nullptr) {
+		call->CallExpr.entity_procedure_of = entity_to_use;
 		add_entity_use(c, ident, entity_to_use);
 		update_untyped_expr_type(c, operand->expr, entity_to_use->type, true);
 		add_type_and_value(c, operand->expr, operand->mode, entity_to_use->type, operand->value);
@@ -10121,6 +10122,16 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 	Entity *initial_entity = entity_of_node(operand->expr);
 
 	if (initial_entity != nullptr && initial_entity->kind == Entity_Procedure) {
+		if (entity_has_scope_exit_contract(initial_entity)) {
+			ScopeExitContract const &contract = initial_entity->Procedure.scope_exit_contract;
+			if (contract.policy == ScopeExitPolicy_Explicit && !c->allow_scope_exit_opener) {
+				error(operand->expr, "Explicit scope-exit procedure calls require a 'with' opener");
+			}
+			call->viral_state_flags |= ViralStateFlag_ContainsDeferredProcedure;
+			if (c->decl) {
+				c->decl->defer_used += 1;
+			}
+		}
 		if (initial_entity->Procedure.deferred_procedure.entity != nullptr) {
 			call->viral_state_flags |= ViralStateFlag_ContainsDeferredProcedure;
 			if (c->decl) {
@@ -10165,6 +10176,27 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 	}
 
 	CallArgumentData data = check_call_arguments(c, operand, call);
+	Entity *selected_entity = call->CallExpr.entity_procedure_of;
+	if (selected_entity != nullptr &&
+		selected_entity != initial_entity &&
+		selected_entity->kind == Entity_Procedure) {
+		if (entity_has_scope_exit_contract(selected_entity)) {
+			ScopeExitContract const &contract = selected_entity->Procedure.scope_exit_contract;
+			if (contract.policy == ScopeExitPolicy_Explicit && !c->allow_scope_exit_opener) {
+				error(operand->expr, "Explicit scope-exit procedure calls require a 'with' opener");
+			}
+			call->viral_state_flags |= ViralStateFlag_ContainsDeferredProcedure;
+			if (c->decl) {
+				c->decl->defer_used += 1;
+			}
+		}
+		if (entity_has_deferred_procedure(selected_entity)) {
+			call->viral_state_flags |= ViralStateFlag_ContainsDeferredProcedure;
+			if (c->decl) {
+				c->decl->defer_used += 1;
+			}
+		}
+	}
 	Type *result_type = data.result_type;
 	gb_zero_item(operand);
 	operand->expr = call;

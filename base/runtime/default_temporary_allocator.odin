@@ -19,7 +19,7 @@ when NO_DEFAULT_TEMP_ALLOCATOR {
 		return
 	}
 
-	default_temp_allocator_temp_end :: proc(temp: Arena_Temp, loc := #caller_location) {
+	default_temp_allocator_temp_end :: proc(temp: Arena_Temp, loc: Source_Code_Location) {
 	}
 } else {
 	// `Default_Temp_Allocator` is an `Arena` based type of allocator. See `runtime.Arena` for its implementation.
@@ -58,7 +58,7 @@ when NO_DEFAULT_TEMP_ALLOCATOR {
 		return
 	}
 
-	default_temp_allocator_temp_end :: proc(temp: Arena_Temp, loc := #caller_location) {
+	default_temp_allocator_temp_end :: proc(temp: Arena_Temp, loc: Source_Code_Location) {
 		arena_temp_end(temp, loc)
 	}
 
@@ -68,8 +68,7 @@ when NO_DEFAULT_TEMP_ALLOCATOR {
 	}
 }
 
-@(deferred_out=default_temp_allocator_temp_end)
-DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD :: #force_inline proc(ignore := false, loc := #caller_location) -> (Arena_Temp, Source_Code_Location) {
+DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD :: #force_inline proc(ignore := false, loc := #caller_location) -> (temp: Arena_Temp, source_loc: Source_Code_Location) #scope_exit(.implicit, default_temp_allocator_temp_end(temp, source_loc)) {
 	if ignore {
 		return {}, loc
 	} else {

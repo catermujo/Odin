@@ -4134,6 +4134,33 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, Ast *node) {
 }
 
 
+gb_internal void lb_build_with_stmt(lbProcedure *p, Ast *node) {
+	ast_node(ws, WithStmt, node);
+	lb_open_scope(p, ws->scope);
+
+	lbBlock *done = lb_create_block(p, "with.done");
+	if (ws->label != nullptr && p->debug_info != nullptr) {
+		lbBlock *label = lb_create_block(p, "with.label");
+		lb_emit_jump(p, label);
+		lb_start_block(p, label);
+		LLVMSetCurrentDebugLocation2(p->builder, lb_debug_location_from_ast(p, ws->label));
+		lb_add_debug_label(p, ws->label, label);
+	}
+
+	lb_push_target_list(p, ws->label, done, nullptr, nullptr)->is_block = true;
+	if (ws->init != nullptr) {
+		lb_build_stmt(p, ws->init);
+	}
+	lb_build_stmt(p, ws->opener);
+	if (ws->body != nullptr && ws->body->kind == Ast_BlockStmt) {
+		lb_build_stmt_list(p, ws->body->BlockStmt.stmts);
+	}
+	lb_close_scope(p, lbDeferExit_Default, nullptr, node);
+	lb_pop_target_list(p);
+	lb_emit_jump(p, done);
+	lb_start_block(p, done);
+}
+
 gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 	Ast *prev_stmt = p->curr_stmt;
 	defer (p->curr_stmt = prev_stmt);
@@ -4351,6 +4378,10 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 
 	case_ast_node(ds, DeferStmt, node);
 		lb_add_defer_node(p, p->scope_index, ds->stmt);
+	case_end;
+
+	case_ast_node(ws, WithStmt, node);
+		lb_build_with_stmt(p, node);
 	case_end;
 
 	case_ast_node(rs, ReturnStmt, node);

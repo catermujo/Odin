@@ -108,6 +108,30 @@ struct DeferredProcedure {
 	Entity *entity;
 };
 
+enum ScopeExitPolicy {
+	ScopeExitPolicy_Invalid,
+	ScopeExitPolicy_Explicit,
+	ScopeExitPolicy_Implicit,
+};
+
+enum ScopeExitBindingSource {
+	ScopeExitBinding_Input,
+	ScopeExitBinding_Result,
+};
+
+struct ScopeExitBinding {
+	ScopeExitBindingSource source;
+	i32 index;
+	bool by_pointer;
+};
+
+struct ScopeExitContract {
+	ScopeExitPolicy policy;
+	Entity *cleanup;
+	Slice<ScopeExitBinding> bindings;
+	TokenPos pos;
+};
+
 
 enum InstrumentationFlag : i32 {
 	Instrumentation_Enabled  = -1,
@@ -879,6 +903,7 @@ struct CheckerContext {
 	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	bool       allow_arrow_right_selector_expr;
+	bool       allow_scope_exit_opener;
 	bool       allow_c_vararg_param;
 	u8         bit_field_bit_size;
 	Scope *    polymorphic_scope;

@@ -187,6 +187,8 @@ gb_internal bool check_has_break_expr_list(Slice<Ast *> const &exprs, String con
 	return false;
 }
 
+String label_string(Ast *node);
+
 gb_internal bool check_has_break(Ast *stmt, String const &label, bool implicit) {
 	switch (stmt->kind) {
 	case Ast_BranchStmt:
@@ -203,6 +205,18 @@ gb_internal bool check_has_break(Ast *stmt, String const &label, bool implicit) 
 
 	case Ast_DeferStmt:
 		return check_has_break(stmt->DeferStmt.stmt, label, implicit);
+
+	case Ast_WithStmt:
+		if (stmt->WithStmt.init && check_has_break(stmt->WithStmt.init, label, implicit)) {
+			return true;
+		}
+		if (stmt->WithStmt.label == nullptr) {
+			return check_has_break(stmt->WithStmt.body, label, implicit);
+		}
+		if (label_string(stmt->WithStmt.label) == label) {
+			return check_has_break(stmt->WithStmt.body, label, false);
+		}
+		break;
 
 	case Ast_BlockStmt:
 		return check_has_break_list(stmt->BlockStmt.stmts, label, implicit);
@@ -337,6 +351,10 @@ gb_internal bool check_is_terminating(Ast *node, String const &label) {
 			    return true;
 		    }
 		}
+	case_end;
+
+	case_ast_node(ws, WithStmt, node);
+		return check_is_terminating(ws->body, label);
 	case_end;
 
 	case_ast_node(ws, WhenStmt, node);
@@ -2943,6 +2961,65 @@ gb_internal void check_if_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 	check_close_scope(ctx);
 }
 
+gb_internal Ast *scope_exit_opener_call(Ast *stmt) {
+	if (stmt == nullptr) {
+		return nullptr;
+	}
+	Ast *expr = nullptr;
+	switch (stmt->kind) {
+	case Ast_ExprStmt:
+		expr = stmt->ExprStmt.expr;
+		break;
+	case Ast_AssignStmt:
+		if (stmt->AssignStmt.rhs.count == 1) {
+			expr = stmt->AssignStmt.rhs[0];
+		}
+		break;
+	case Ast_ValueDecl:
+		if (stmt->ValueDecl.values.count == 1) {
+			expr = stmt->ValueDecl.values[0];
+		}
+		break;
+	}
+	expr = unparen_expr(expr);
+	return expr != nullptr && expr->kind == Ast_CallExpr ? expr : nullptr;
+}
+
+gb_internal void check_with_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
+	ast_node(ws, WithStmt, node);
+	check_open_scope(ctx, node);
+	check_label(ctx, ws->label, node);
+
+	if (ws->init != nullptr) {
+		check_stmt(ctx, ws->init, 0);
+	}
+
+	Ast *opener_call = scope_exit_opener_call(ws->opener);
+	if (opener_call == nullptr) {
+		error(ws->opener, "A 'with' opener must be a direct scope-exit call or a declaration/assignment whose RHS is one");
+	} else {
+		bool prev_allow = ctx->allow_scope_exit_opener;
+		ctx->allow_scope_exit_opener = true;
+		check_stmt(ctx, ws->opener, 0);
+		ctx->allow_scope_exit_opener = prev_allow;
+
+		Entity *entity = entity_of_node(opener_call);
+		if (entity == nullptr ||
+		    (entity->kind != Entity_Procedure) ||
+		    (!entity_has_scope_exit_contract(entity) && !entity_has_deferred_procedure(entity))) {
+			error(opener_call, "A 'with' opener must call a procedure with a scope-exit contract or legacy deferred attribute");
+		}
+	}
+
+	if (ws->body == nullptr || ws->body->kind != Ast_BlockStmt) {
+		error(node, "A 'with' statement requires a block body");
+	} else {
+		check_stmt_list(ctx, ws->body->BlockStmt.stmts, mod_flags);
+	}
+
+	check_close_scope(ctx);
+}
+
 // NOTE(bill): This is very basic escape analysis
 // This needs to be improved tremendously, and a lot of it done during the
 // middle-end (or LLVM side) to improve checks and error messages
@@ -3177,6 +3254,10 @@ gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) 
 		check_if_stmt(ctx, node, mod_flags);
 	case_end;
 
+	case_ast_node(ws, WithStmt, node);
+		check_with_stmt(ctx, node, mod_flags);
+	case_end;
+
 	case_ast_node(ws, WhenStmt, node);
 		check_when_stmt(ctx, ws, flags);
 	case_end;
@@ -3318,6 +3399,7 @@ gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) 
 			switch (parent->kind) {
 			case Ast_BlockStmt:
 			case Ast_IfStmt:
+			case Ast_WithStmt:
 			case Ast_SwitchStmt:
 			case Ast_TypeSwitchStmt:
 				if (token.kind != Token_break) {

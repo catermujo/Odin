@@ -92,6 +92,7 @@ gb_internal Token ast_token(Ast *node) {
 	case Ast_SwitchStmt:         return node->SwitchStmt.token;
 	case Ast_TypeSwitchStmt:     return node->TypeSwitchStmt.token;
 	case Ast_DeferStmt:          return node->DeferStmt.token;
+	case Ast_WithStmt:           return node->WithStmt.token;
 	case Ast_BranchStmt:         return node->BranchStmt.token;
 	case Ast_UsingStmt:          return node->UsingStmt.token;
 
@@ -107,6 +108,8 @@ gb_internal Token ast_token(Ast *node) {
 
 	case Ast_Attribute:
 		return node->Attribute.token;
+	case Ast_ScopeExit:
+		return node->ScopeExit.token;
 
 	case Ast_Field:
 		if (node->Field.names.count > 0) {
@@ -307,6 +310,7 @@ Token ast_end_token(Ast *node) {
 	case Ast_SwitchStmt:         return ast_end_token(node->SwitchStmt.body);
 	case Ast_TypeSwitchStmt:     return ast_end_token(node->TypeSwitchStmt.body);
 	case Ast_DeferStmt:          return ast_end_token(node->DeferStmt.stmt);
+	case Ast_WithStmt:           return ast_end_token(node->WithStmt.body);
 	case Ast_BranchStmt:
 		if (node->BranchStmt.label) {
 			return ast_end_token(node->BranchStmt.label);
@@ -362,6 +366,8 @@ Token ast_end_token(Ast *node) {
 			return node->Attribute.open;
 		}
 		return node->Attribute.token;
+	case Ast_ScopeExit:
+		return node->ScopeExit.close;
 	case Ast_Field:
 		if (node->Field.tag.kind != Token_Invalid) {
 			return node->Field.tag;

@@ -287,6 +287,7 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 	case Ast_ProcLit:
 		n->ProcLit.type = clone_ast(n->ProcLit.type, f);
 		n->ProcLit.body = clone_ast(n->ProcLit.body, f);
+		n->ProcLit.scope_exit_contract = clone_ast(n->ProcLit.scope_exit_contract, f);
 		n->ProcLit.where_clauses = clone_ast_array(n->ProcLit.where_clauses, f);
 		break;
 	case Ast_CompoundLit:
@@ -453,6 +454,12 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 	case Ast_DeferStmt:
 		n->DeferStmt.stmt = clone_ast(n->DeferStmt.stmt, f);
 		break;
+	case Ast_WithStmt:
+		n->WithStmt.label = clone_ast(n->WithStmt.label, f);
+		n->WithStmt.init = clone_ast(n->WithStmt.init, f);
+		n->WithStmt.opener = clone_ast(n->WithStmt.opener, f);
+		n->WithStmt.body = clone_ast(n->WithStmt.body, f);
+		break;
 	case Ast_BranchStmt:
 		n->BranchStmt.label = clone_ast(n->BranchStmt.label, f);
 		break;
@@ -479,6 +486,10 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 
 	case Ast_Attribute:
 		n->Attribute.elems = clone_ast_array(n->Attribute.elems, f);
+		break;
+	case Ast_ScopeExit:
+		n->ScopeExit.policy = clone_ast(n->ScopeExit.policy, f);
+		n->ScopeExit.cleanup = clone_ast(n->ScopeExit.cleanup, f);
 		break;
 	case Ast_Field:
 		n->Field.names = clone_ast_array(n->Field.names, f);
@@ -1051,6 +1062,25 @@ gb_internal Ast *ast_proc_lit(AstFile *f, Ast *type, Ast *body, u64 tags, Token 
 	result->ProcLit.tags = tags;
 	result->ProcLit.where_token = where_token;
 	result->ProcLit.where_clauses = slice_from_array(where_clauses);
+	return result;
+}
+
+gb_internal Ast *ast_scope_exit(AstFile *f, Token token, Ast *policy, Ast *cleanup, Token open, Token close) {
+	Ast *result = alloc_ast_node(f, Ast_ScopeExit);
+	result->ScopeExit.token = token;
+	result->ScopeExit.policy = policy;
+	result->ScopeExit.cleanup = cleanup;
+	result->ScopeExit.open = open;
+	result->ScopeExit.close = close;
+	return result;
+}
+
+gb_internal Ast *ast_with_stmt(AstFile *f, Token token, Ast *init, Ast *opener, Ast *body) {
+	Ast *result = alloc_ast_node(f, Ast_WithStmt);
+	result->WithStmt.token = token;
+	result->WithStmt.init = init;
+	result->WithStmt.opener = opener;
+	result->WithStmt.body = body;
 	return result;
 }
 
@@ -2211,7 +2241,8 @@ gb_internal void check_proc_add_tag(AstFile *f, Ast *tag_expr, u64 *tags, ProcTa
 gb_internal void parse_proc_tags(AstFile *f, u64 *tags) {
 	GB_ASSERT(tags != nullptr);
 
-	while (f->curr_token.kind == Token_Hash) {
+	while (f->curr_token.kind == Token_Hash &&
+	       !(peek_token_n(f, 0).kind == Token_Ident && peek_token_n(f, 0).string == "scope_exit")) {
 		Ast *tag_expr = parse_tag_expr(f, nullptr);
 		ast_node(te, TagExpr, tag_expr);
 		String tag_name = te->name.string;
@@ -2249,6 +2280,21 @@ gb_internal void parse_proc_tags(AstFile *f, u64 *tags) {
 	if ((*tags & ProcTag_downcast_assert) && (*tags & ProcTag_no_downcast_assert)) {
 		syntax_error(f->curr_token, "You cannot apply both #downcast_assert and #no_downcast_assert to a procedure");
 	}
+}
+
+gb_internal Ast *parse_scope_exit_contract(AstFile *f) {
+	Token token = expect_token(f, Token_Hash);
+	Token name = expect_token(f, Token_Ident);
+	if (name.string != "scope_exit") {
+		syntax_error(name, "Expected '#scope_exit'");
+	}
+	Token open = expect_token(f, Token_OpenParen);
+	Token period = expect_token(f, Token_Period);
+	Ast *policy = ast_implicit_selector_expr(f, period, ast_ident(f, expect_token(f, Token_Ident)));
+	expect_token(f, Token_Comma);
+	Ast *cleanup = parse_expr(f, false);
+	Token close = expect_closing(f, Token_CloseParen, str_lit("scope exit contract"));
+	return ast_scope_exit(f, token, policy, cleanup, open, close);
 }
 
 
@@ -3221,6 +3267,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 
 
 		Ast *type = parse_proc_type(f, token, false);
+		Ast *scope_exit_contract = nullptr;
 		Token where_token = {};
 		Array<Ast *> where_clauses = {};
 		u64 tags = 0;
@@ -3236,7 +3283,16 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			f->expr_level = prev_level;
 		}
 
-		parse_proc_tags(f, &tags);
+		while (f->curr_token.kind == Token_Hash) {
+			if (peek_token_n(f, 0).kind == Token_Ident && peek_token_n(f, 0).string == "scope_exit") {
+				if (scope_exit_contract != nullptr) {
+					syntax_error(f->curr_token, "Duplicate '#scope_exit' contract");
+				}
+				scope_exit_contract = parse_scope_exit_contract(f);
+			} else {
+				parse_proc_tags(f, &tags);
+			}
+		}
 		if ((tags & ProcTag_require_results) != 0) {
 			syntax_error(f->curr_token, "#require_results has now been replaced as an attribute @(require_results) on the declaration");
 			tags &= ~ProcTag_require_results;
@@ -3245,6 +3301,9 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		type->ProcType.tags = tags;
 
 		if (f->allow_type && f->expr_level < 0) {
+			if (scope_exit_contract != nullptr) {
+				syntax_error(scope_exit_contract, "A procedure type cannot have a '#scope_exit' contract");
+			}
 			if (tags != 0) {
 				syntax_error(token, "A procedure type cannot have suffix tags");
 			}
@@ -3260,7 +3319,9 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			if (where_token.kind != Token_Invalid) {
 				syntax_error(where_token, "'where' clauses are not allowed on procedure literals without a defined body (replaced with ---)");
 			}
-			return ast_proc_lit(f, type, nullptr, tags, where_token, where_clauses);
+			Ast *result = ast_proc_lit(f, type, nullptr, tags, where_token, where_clauses);
+			result->ProcLit.scope_exit_contract = scope_exit_contract;
+			return result;
 		} else if (f->curr_token.kind == Token_OpenBrace) {
 			Ast *curr_proc = f->curr_proc;
 			Ast *body = nullptr;
@@ -3288,7 +3349,9 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 				body->state_flags |= StateFlag_downcast_assert;
 			}
 
-			return ast_proc_lit(f, type, body, tags, where_token, where_clauses);
+			Ast *result = ast_proc_lit(f, type, body, tags, where_token, where_clauses);
+			result->ProcLit.scope_exit_contract = scope_exit_contract;
+			return result;
 		} else if (allow_token(f, Token_do)) {
 			Ast *curr_proc = f->curr_proc;
 			Ast *body = nullptr;
@@ -3298,11 +3361,16 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 
 			syntax_error(body, "'do' for procedure bodies is not allowed, prefer {}");
 
-			return ast_proc_lit(f, type, body, tags, where_token, where_clauses);
+			Ast *result = ast_proc_lit(f, type, body, tags, where_token, where_clauses);
+			result->ProcLit.scope_exit_contract = scope_exit_contract;
+			return result;
 		}
 
 		if (tags != 0) {
 			syntax_error(token, "A procedure type cannot have suffix tags");
+		}
+		if (scope_exit_contract != nullptr) {
+			syntax_error(scope_exit_contract, "A procedure type cannot have a '#scope_exit' contract");
 		}
 		if (where_token.kind != Token_Invalid) {
 			syntax_error(where_token, "'where' clauses are not allowed on procedure types");
@@ -4573,7 +4641,8 @@ gb_internal Ast *parse_simple_stmt(AstFile *f, u32 flags) {
 			case Token_OpenBrace: // block statement
 			case Token_if:
 			case Token_for:
-			case Token_switch: {
+			case Token_switch:
+			case Token_with: {
 				Ast *name = lhs[0];
 				Ast *label = ast_label_decl(f, ast_token(name), name);
 				Ast *stmt = parse_stmt(f);
@@ -4585,6 +4654,7 @@ gb_internal Ast *parse_simple_stmt(AstFile *f, u32 flags) {
 				_SET_LABEL(RangeStmt, label);
 				_SET_LABEL(SwitchStmt, label);
 				_SET_LABEL(TypeSwitchStmt, label);
+				_SET_LABEL(WithStmt, label);
 				default:
 					syntax_error(token, "Labels can only be applied to a loop or switch statement");
 					break;
@@ -5831,6 +5901,39 @@ gb_internal Ast *parse_defer_stmt(AstFile *f) {
 	return ast_defer_stmt(f, token, stmt);
 }
 
+gb_internal Ast *parse_with_stmt(AstFile *f) {
+	if (f->curr_proc == nullptr) {
+		syntax_error(f->curr_token, "You cannot use a with statement in the file scope");
+		return ast_bad_stmt(f, f->curr_token, f->curr_token);
+	}
+
+	Token token = expect_token(f, Token_with);
+	isize prev_level = f->expr_level;
+	f->expr_level = -1;
+	Ast *first = parse_simple_stmt(f, StmtAllowFlag_None);
+	f->expr_level = prev_level;
+	Ast *init = nullptr;
+	Ast *opener = first;
+
+	// Value declarations consume their semicolon; other simple statements do not.
+	if (f->curr_token.kind != Token_OpenBrace) {
+		allow_token(f, Token_Semicolon);
+		init = first;
+		prev_level = f->expr_level;
+		f->expr_level = -1;
+		opener = parse_simple_stmt(f, StmtAllowFlag_None);
+		f->expr_level = prev_level;
+	}
+	allow_token(f, Token_Semicolon);
+
+	if (f->curr_token.kind == Token_do) {
+		syntax_error(f->curr_token, "A with statement requires a block body");
+		advance_token(f);
+	}
+	Ast *body = parse_block_stmt(f, false);
+	return ast_with_stmt(f, token, init, opener, body);
+}
+
 
 enum ImportDeclKind {
 	ImportDecl_Standard,
@@ -6129,6 +6232,7 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 	case Token_when:   return parse_when_stmt(f);
 	case Token_for:    return parse_for_stmt(f);
 	case Token_switch: return parse_switch_stmt(f);
+	case Token_with:   return parse_with_stmt(f);
 	case Token_defer:  return parse_defer_stmt(f);
 	case Token_return: return parse_return_stmt(f);
 
