@@ -299,6 +299,7 @@ struct Entity {
 			String  objc_selector_name;
 			Entity *objc_class;
 			DeferredProcedure deferred_procedure;
+			ScopeExitContract scope_exit_contract;
 
 			struct GenProcsData *gen_procs;
 			BlockingMutex gen_procs_mutex;
@@ -441,6 +442,11 @@ gb_internal bool entity_has_deferred_procedure(Entity *e) {
 		return e->Procedure.deferred_procedure.entity != nullptr;
 	}
 	return false;
+}
+
+gb_internal bool entity_has_scope_exit_contract(Entity *e) {
+	GB_ASSERT(e != nullptr);
+	return e->kind == Entity_Procedure && e->Procedure.scope_exit_contract.cleanup != nullptr;
 }
 
 

@@ -516,7 +516,7 @@ fix_advance_to_next_stmt :: proc(p: ^Parser) {
 			return
 
 		case .Package, .Foreign, .Import,
-		     .If, .For, .When, .Return, .Switch,
+			 .If, .For, .When, .Return, .Switch, .With,
 		     .Defer, .Using,
 		     .Break, .Continue, .Fallthrough,
 		     .Hash:
@@ -552,7 +552,7 @@ is_semicolon_optional_for_node :: proc(p: ^Parser, node: ^ast.Node) -> bool {
 
 	case ^ast.If_Stmt, ^ast.When_Stmt,
 	     ^ast.For_Stmt, ^ast.Range_Stmt, ^ast.Inline_Range_Stmt,
-	     ^ast.Switch_Stmt, ^ast.Type_Switch_Stmt:
+	     ^ast.Switch_Stmt, ^ast.Type_Switch_Stmt, ^ast.With_Stmt:
 		return true
 
 	case ^ast.Helper_Type:
@@ -1374,6 +1374,42 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 	return range_stmt
 }
 
+parse_with_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
+	if p.curr_proc == nil {
+		error(p, p.curr_tok.pos, "you cannot use a with statement in the file scope")
+		return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+	}
+
+	tok := expect_token(p, .With)
+	prev_level := p.expr_level
+	p.expr_level = -1
+	first := parse_simple_stmt(p, {})
+	p.expr_level = prev_level
+	init: ^ast.Stmt
+	opener := first
+	if p.curr_tok.kind != .Open_Brace {
+		allow_token(p, .Semicolon)
+		init = first
+		prev_level = p.expr_level
+		p.expr_level = -1
+		opener = parse_simple_stmt(p, {})
+		p.expr_level = prev_level
+	}
+	allow_token(p, .Semicolon)
+	if p.curr_tok.kind == .Do {
+		error(p, p.curr_tok.pos, "a with statement requires a block body")
+		advance_token(p)
+	}
+	body := parse_block_stmt(p, false)
+
+	stmt := ast.new(ast.With_Stmt, tok.pos, body.end)
+	stmt.tok = tok
+	stmt.init = init
+	stmt.opener = opener
+	stmt.body = body
+	return stmt
+}
+
 parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	#partial switch p.curr_tok.kind {
 	// Operands
@@ -1399,6 +1435,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	case .When:    return parse_when_stmt(p)
 	case .For:     return parse_for_stmt(p)
 	case .Switch:  return parse_switch_stmt(p)
+	case .With:    return parse_with_stmt(p)
 
 	case .Defer:
 		tok := advance_token(p)
@@ -2192,7 +2229,8 @@ string_to_calling_convention :: proc(s: string) -> ast.Proc_Calling_Convention {
 }
 
 parse_proc_tags :: proc(p: ^Parser) -> (tags: ast.Proc_Tags) {
-	for p.curr_tok.kind == .Hash {
+	for p.curr_tok.kind == .Hash &&
+	    !(peek_token(p).kind == .Ident && peek_token(p).text == "scope_exit") {
 		_ = expect_token(p, .Hash)
 		ident := expect_token(p, .Ident)
 
@@ -2220,6 +2258,27 @@ parse_proc_tags :: proc(p: ^Parser) -> (tags: ast.Proc_Tags) {
 	}
 
 	return
+}
+
+parse_scope_exit_contract :: proc(p: ^Parser) -> ^ast.Scope_Exit {
+	hash := expect_token(p, .Hash)
+	name := expect_token(p, .Ident)
+	if name.text != "scope_exit" {
+		error(p, name.pos, "expected '#scope_exit'")
+	}
+	open := expect_token(p, .Open_Paren)
+	policy := parse_expr(p, false)
+	expect_token(p, .Comma)
+	cleanup := parse_expr(p, false)
+	close := expect_token_after(p, .Close_Paren, "scope exit contract")
+
+	contract := ast.new(ast.Scope_Exit, hash.pos, end_pos(close))
+	contract.tok = hash
+	contract.policy = policy
+	contract.cleanup = cleanup
+	contract.open = open.pos
+	contract.close = close.pos
+	return contract
 }
 
 is_expr_generic :: proc(expr : ^ast.Expr) -> bool {
@@ -2651,6 +2710,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		type := parse_proc_type(p, tok)
 		tags: ast.Proc_Tags
+		scope_exit_contract: ^ast.Scope_Exit
 		where_token: tokenizer.Token
 		where_clauses: []^ast.Expr
 
@@ -2663,10 +2723,22 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			where_clauses = parse_rhs_expr_list(p)
 			p.expr_level = prev_level
 		}
-		tags = parse_proc_tags(p)
+		for p.curr_tok.kind == .Hash {
+			if peek_token(p).kind == .Ident && peek_token(p).text == "scope_exit" {
+				if scope_exit_contract != nil {
+					error(p, p.curr_tok.pos, "duplicate '#scope_exit' contract")
+				}
+				scope_exit_contract = parse_scope_exit_contract(p)
+			} else {
+				tags += parse_proc_tags(p)
+			}
+		}
 		type.tags = tags
 
 		if p.allow_type && p.expr_level < 0 {
+			if scope_exit_contract != nil {
+				error(p, scope_exit_contract.pos, "a procedure type cannot have a '#scope_exit' contract")
+			}
 			if where_token.kind != .Invalid {
 				error(p, where_token.pos, "'where' clauses are not allowed on procedure types")
 			}
@@ -2704,6 +2776,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		pl.tags = tags
 		pl.where_token = where_token
 		pl.where_clauses = where_clauses
+		pl.scope_exit_contract = scope_exit_contract
 		return pl
 
 	case .Lambda:
@@ -3834,7 +3907,7 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 			}
 
 			#partial switch p.curr_tok.kind {
-			case .Open_Brace, .If, .For, .Switch:
+			case .Open_Brace, .If, .For, .Switch, .With:
 				label := lhs[0]
 				stmt := parse_stmt(p)
 
@@ -3846,6 +3919,7 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 					case ^ast.Switch_Stmt:      n.label = label
 					case ^ast.Type_Switch_Stmt: n.label = label
 					case ^ast.Range_Stmt:	    n.label = label
+					case ^ast.With_Stmt:       n.label = label
 					}
 
 					if is_partial {
