@@ -34,8 +34,7 @@ TEMP_ALLOCATOR_GUARD_END :: proc(temp: Temp_Allocator) {
 	runtime.arena_temp_end(temp.tmp, temp.loc)
 }
 
-@(deferred_out=TEMP_ALLOCATOR_GUARD_END)
-TEMP_ALLOCATOR_GUARD :: #force_inline proc(collisions: []runtime.Allocator, loc := #caller_location) -> Temp_Allocator {
+TEMP_ALLOCATOR_GUARD :: #force_inline proc(collisions: []runtime.Allocator, loc := #caller_location) -> (result: Temp_Allocator) #scope_exit(.implicit, TEMP_ALLOCATOR_GUARD_END(result)) {
 	assert(len(collisions) <= MAX_TEMP_ARENA_COLLISIONS, "Maximum collision count exceeded. MAX_TEMP_ARENA_COUNT must be increased!")
 	good_arena: ^runtime.Arena
 	for i in 0..<MAX_TEMP_ARENA_COUNT {
@@ -59,8 +58,7 @@ TEMP_ALLOCATOR_GUARD :: #force_inline proc(collisions: []runtime.Allocator, loc 
 
 temp_allocator_begin :: runtime.arena_temp_begin
 temp_allocator_end :: runtime.arena_temp_end
-@(deferred_out=_temp_allocator_end)
-temp_allocator_scope :: proc(tmp: Temp_Allocator) -> (runtime.Arena_Temp) {
+temp_allocator_scope :: proc(tmp: Temp_Allocator) -> (result: runtime.Arena_Temp) #scope_exit(.implicit, _temp_allocator_end(result)) {
 	return temp_allocator_begin(tmp.arena)
 }
 @(private="file")

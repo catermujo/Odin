@@ -740,8 +740,7 @@ layout_end_column :: proc(ctx: ^Context) {
 	a.max.y = max(a.max.y, b.max.y)
 }
 
-@(deferred_in=layout_end_column)
-layout_column :: proc(ctx: ^Context) -> bool {
+layout_column :: proc(ctx: ^Context) -> bool #scope_exit(.implicit, layout_end_column(ctx)) {
 	layout_begin_column(ctx)
 	return true
 }
@@ -1302,8 +1301,7 @@ scoped_end_treenode :: proc(ctx: ^Context, _: string, _: Options, result_set: Re
 }
 
 /* This is scoped and is intended to be use in the condition of a if-statement */
-@(deferred_in_out=scoped_end_treenode)
-treenode :: proc(ctx: ^Context, label: string, opt := Options{}) -> Result_Set {
+treenode :: proc(ctx: ^Context, label: string, opt := Options{}) -> (result_set: Result_Set) #scope_exit(.implicit, scoped_end_treenode(ctx, label, opt, result_set)) {
 	return begin_treenode(ctx, label, opt)
 }
 
@@ -1499,8 +1497,7 @@ end_window :: proc(ctx: ^Context) {
 
 
 /* This is scoped and is intended to be use in the condition of a if-statement */
-@(deferred_in_out=scoped_end_window)
-window :: proc(ctx: ^Context, title: string, rect: Rect, opt := Options{}) -> bool {
+window :: proc(ctx: ^Context, title: string, rect: Rect, opt := Options{}) -> (ok: bool) #scope_exit(.implicit, scoped_end_window(ctx, title, rect, opt, ok)) {
 	return begin_window(ctx, title, rect, opt)
 }
 
@@ -1532,8 +1529,7 @@ end_popup :: proc(ctx: ^Context) {
 
 
 /* This is scoped and is intended to be use in the condition of a if-statement */
-@(deferred_in_out=scoped_end_popup)
-popup :: proc(ctx: ^Context, name: string) -> bool {
+popup :: proc(ctx: ^Context, name: string) -> (ok: bool) #scope_exit(.implicit, scoped_end_popup(ctx, name, ok)) {
 	return begin_popup(ctx, name)
 }
 

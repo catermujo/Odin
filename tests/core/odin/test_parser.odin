@@ -171,6 +171,40 @@ test_parse_parser :: proc(t: ^testing.T) {
 }
 
 @test
+test_parse_scope_exit_with :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	file := ast.File{
+		fullpath = "scope_exit.odin",
+		src = `
+package main
+
+cleanup :: proc(value: int) {
+}
+
+scope :: proc(value: int) -> int #scope_exit(.explicit, cleanup(value)) {
+	return value
+}
+
+main :: proc() {
+	with result := scope(1) {}
+}
+`,
+	}
+
+	p := parser.default_parser()
+	p.err = proc(pos: tokenizer.Pos, format: string, args: ..any) {
+		message := fmt.tprintf(format, ..args)
+		log.errorf("%s(%d:%d): %s", pos.file, pos.line, pos.column, message)
+	}
+
+	ok := parser.parse_file(&p, &file)
+	testing.expect(t, ok, "bad parse")
+	testing.expect(t, file.syntax_error_count == 0, "should contain zero errors")
+}
+
+@test
 test_parse_stb_image :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
