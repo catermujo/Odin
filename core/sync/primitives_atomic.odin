@@ -87,8 +87,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_mutex_unlock)
-atomic_mutex_guard :: proc "contextless" (m: ^Atomic_Mutex) -> bool {
+atomic_mutex_guard :: proc "contextless" (m: ^Atomic_Mutex) -> bool #scope_exit(.implicit, atomic_mutex_unlock(m)) {
 	atomic_mutex_lock(m)
 	return true
 }
@@ -221,8 +220,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_rw_mutex_unlock)
-atomic_rw_mutex_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool {
+atomic_rw_mutex_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool #scope_exit(.implicit, atomic_rw_mutex_unlock(m)) {
 	atomic_rw_mutex_lock(m)
 	return true
 }
@@ -233,8 +231,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_rw_mutex_shared_unlock)
-atomic_rw_mutex_shared_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool {
+atomic_rw_mutex_shared_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool #scope_exit(.implicit, atomic_rw_mutex_shared_unlock(m)) {
 	atomic_rw_mutex_shared_lock(m)
 	return true
 }
@@ -297,8 +294,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_recursive_mutex_unlock)
-atomic_recursive_mutex_guard :: proc "contextless" (m: ^Atomic_Recursive_Mutex) -> bool {
+atomic_recursive_mutex_guard :: proc "contextless" (m: ^Atomic_Recursive_Mutex) -> bool #scope_exit(.implicit, atomic_recursive_mutex_unlock(m)) {
 	atomic_recursive_mutex_lock(m)
 	return true
 }
