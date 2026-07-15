@@ -11,6 +11,8 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% check ..\test_recursive_type_field_query.odin -file -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "2" || exit /b
+
 %ODIN% run ..\test_issue_soa_contextless_footer.odin -file %COMMON%  || exit /b
 %ODIN% run ..\test_issue_map_no_instrumentation.odin -file %COMMON%  || exit /b
 

@@ -11,6 +11,13 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+if [[ $($ODIN check ../test_recursive_type_field_query.odin -file -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 $ODIN check ../test_trigger_location_accept.odin -file $COMMON_CHECK -internal-ignore-panic
 if [[ $($ODIN check ../test_trigger_location_import_direct.odin -file $COMMON_CHECK -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import 'core:os'") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"

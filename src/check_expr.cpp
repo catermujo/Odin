@@ -10366,6 +10366,9 @@ gb_internal Type *instantiate_polymorphic_record(CheckerContext *c, Type *origin
 
 		mutex_unlock(&found_gen_types->mutex);
 		gen_types_locked = false;
+		if (check_cycle(c, found_entity, true)) {
+			return t_invalid;
+		}
 		if (!polymorphic_record_has_errors(found_entity->type)) {
 			return found_entity->type;
 		}
@@ -10727,6 +10730,10 @@ gb_internal CallArgumentError check_polymorphic_record_type(CheckerContext *c, O
 
 	operand->mode = Addressing_Type;
 	operand->type = instantiate_polymorphic_record(c, original_type, ordered_operands, call);
+	if (operand->type == t_invalid) {
+		operand->mode = Addressing_Invalid;
+		return CallArgumentError_WrongTypes;
+	}
 	return err;
 }
 
