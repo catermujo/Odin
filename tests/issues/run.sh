@@ -197,6 +197,12 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+if [[ $($ODIN check ../test_recursive_type_field_query.odin -no-entry-point $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 
 if [[ $($ODIN build ../test_issue_7073-1.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
