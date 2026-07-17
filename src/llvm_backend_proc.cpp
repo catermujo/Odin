@@ -93,6 +93,7 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 		link_name = lb_get_entity_name(m, entity);
 	}
 
+	MUTEX_GUARD(&m->procedure_mutex);
 	{
 		StringHashKey key = string_hash_string(link_name);
 		lbValue *found = string_map_get(&m->members, key);
@@ -416,6 +417,7 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 }
 
 gb_internal lbProcedure *lb_create_dummy_procedure(lbModule *m, String link_name, Type *type) {
+	MUTEX_GUARD(&m->procedure_mutex);
 	{
 		lbValue *found = string_map_get(&m->members, link_name);
 		GB_ASSERT_MSG(found == nullptr, "failed to create dummy procedure for: %.*s", LIT(link_name));
