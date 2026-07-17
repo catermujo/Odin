@@ -3066,6 +3066,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 }
 
 gb_internal void lb_generate_procedure(lbModule *m, lbProcedure *p) {
+	MUTEX_GUARD(&m->procedure_mutex);
 	if (p->is_done.load(std::memory_order_relaxed)) {
 		return;
 	}
