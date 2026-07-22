@@ -3618,19 +3618,13 @@ gb_internal Type *union_tag_type(Type *u) {
 	return t_uint;
 }
 
-gb_internal bool type_conversion_is_variant(Type *dst, Type *src) {
+gb_internal bool type_conversion_is_variant(Type *src, Type *dst) {
 	dst = base_type(core_broadcastable_elem_type(dst));
 	if (dst == nullptr) { return false; }
 
 	switch (dst->kind) {
 	case Type_Union:
-		if (union_is_variant_of(dst, src)) {
-			return true;
-		}
-		if (dst->Union.variants.count == 1) {
-			return type_conversion_is_variant(dst->Union.variants[0], src);
-		}
-		return false;
+		return union_is_variant_of(dst, src);
 	}
 	return false;
 }
