@@ -1157,7 +1157,7 @@ gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand
 
 		if (dst->Union.variants.count == 1) {
 			Type *vt = dst->Union.variants[0];
-			i64 score = check_distance_between_types(c, operand, vt, allow_array_programming);
+			i64 score = check_distance_between_types(c, operand, vt, allow_array_programming, allow_unions);
 			if (score >= 0) {
 				return score+2;
 			}
@@ -1296,6 +1296,17 @@ gb_internal bool check_is_assignable_to_with_score(CheckerContext *c, Operand *o
 	if (operand->mode == Addressing_Invalid || type == t_invalid) {
 		if (score_) *score_ = 0;
 		return false;
+	}
+
+	// Handle polymorphic procedure used as default parameter
+	if (operand->mode == Addressing_Value && is_type_proc(type) && is_type_proc(operand->type)) {
+		Entity *e = entity_from_expr(operand->expr);
+		if (e != nullptr && e->kind == Entity_Procedure && is_type_polymorphic(e->type) && !is_type_polymorphic(type)) {
+			// Special case: Allow a polymorphic procedure to be used as default value for concrete proc type
+			// during the initial check. It will be properly instantiated when actually used.
+			if (score_) *score_ = assign_score_function(1);
+			return true;
+		}
 	}
 
 	i64 score = check_distance_between_types(c, operand, type, allow_array_programming, allow_unions);
@@ -1509,7 +1520,7 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 	}
 
 	if (check_is_assignable_to(c, operand, type)) {
-		if (operand->mode == Addressing_Constant && type_conversion_is_variant(type, operand->type)) {
+		if (operand->mode == Addressing_Constant && type_conversion_is_variant(operand->type, type)) {
 			Operand o = {};
 			check_expr_with_type_hint(c, &o, operand->expr, type);
 			operand->value = exact_value_variant(operand->expr);
@@ -5411,6 +5422,17 @@ gb_internal void convert_to_typed(CheckerContext *c, Operand *operand, Type *tar
 					operand->mode = Addressing_Value;
 				}
 				convert_to_typed(c, operand, new_type, /*no_final_update*/true);
+				if (operand->mode == Addressing_Constant) {
+					Ast *payload = alloc_ast_node(operand->expr->file(), Ast_BasicLit);
+					payload->BasicLit.token = ast_token(operand->expr);
+					payload->tav.type = operand->type;
+					payload->tav.mode = operand->mode;
+					payload->tav.value = operand->value;
+					operand->value = exact_value_variant(payload);
+					operand->value.variant_type = new_type;
+					operand->type = target_type;
+					update_untyped_expr_value(c, operand->expr, operand->value);
+				}
 				target_type = operand->type;
 				break;
 			} else if (valid_count > 1) {
@@ -13537,7 +13559,7 @@ gb_internal ExprKind check_expr_base(CheckerContext *c, Operand *o, Ast *node, T
 					convert_to_typed(c, o, elem_type);
 				}
 			}
-			if (type_conversion_is_variant(elem_type, o->type)) {
+			if (type_conversion_is_variant(o->type, elem_type)) {
 				o->value.variant_type = o->type;
 			}
 		}
