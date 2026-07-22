@@ -863,6 +863,9 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 		if (bt->Union.variants.count == 1) {
 			Type *t = bt->Union.variants[0];
+			GB_ASSERT_MSG(are_types_identical(t, value_type), "%s vs %s (kind %s value %s)",
+			              temp_canonical_string(t), temp_canonical_string(value_type),
+			              exact_value_kind_string[value.kind], exact_value_to_string(value));
 
 			lbValue cv = lb_const_value(m, t, value, cc);
 			GB_ASSERT(LLVMIsConstant(cv.value));
@@ -902,6 +905,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 		} else {
 			// NOTE(korvahkh): forces calculation of variant_block_size
 			type_size_of(bt);
+-
 			i64 block_size = bt->Union.variant_block_size;
 
 			lbValue cv = lb_const_value(m, value_type, value, cc);
