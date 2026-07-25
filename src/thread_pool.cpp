@@ -10,6 +10,11 @@
 #define TSAN_ACQUIRE(addr)
 // #endif
 
+#if defined(GB_SYSTEM_LINUX)
+#include <string.h>
+#include <sys/utsname.h>
+#endif
+
 struct WorkerTask;
 struct ThreadPool;
 
@@ -38,6 +43,7 @@ struct ThreadPool {
 	gbAllocator       threads_allocator;
 	Slice<Thread>     threads;
 	std::atomic<bool> running;
+	bool              use_wsl_single_wake;
 
 	Futex tasks_available;
 	Futex tasks_left;
@@ -53,6 +59,13 @@ gb_internal void thread_pool_init(ThreadPool *pool, isize worker_count, char con
 
 	// NOTE: this needs to be initialized before any thread starts
 	pool->running.store(true, std::memory_order_seq_cst);
+	pool->use_wsl_single_wake = false;
+#if defined(GB_SYSTEM_LINUX)
+	struct utsname system_info = {};
+	if (uname(&system_info) == 0) {
+		pool->use_wsl_single_wake = strstr(system_info.release, "microsoft") != nullptr;
+	}
+#endif
 
 	// setup the main thread
 	thread_init(pool, &pool->threads[0], 0);
@@ -105,7 +118,11 @@ void thread_pool_queue_push(Thread *thread, WorkerTask task) {
 	thread->pool->tasks_left.fetch_add(1, std::memory_order_release);
 	i32 state = Someone_Waiting;
 	if (thread->pool->tasks_available.compare_exchange_strong(state, Nobody_Waiting)) {
-		futex_broadcast(&thread->pool->tasks_available);
+		if (thread->pool->use_wsl_single_wake) {
+			futex_signal(&thread->pool->tasks_available);
+		} else {
+			futex_broadcast(&thread->pool->tasks_available);
+		}
 	}
 }
 
