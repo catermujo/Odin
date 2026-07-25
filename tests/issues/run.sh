@@ -11,6 +11,15 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+if [[ $($ODIN check ../test_issue_retired_build_define.odin -file -no-entry-point $COMMON_CHECK 2>&1 | grep -c "Syntax Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
+$ODIN check ../test_issue_deferred_when_import -no-entry-point $COMMON_NO_FILE
+
 if [[ $($ODIN check ../test_recursive_type_field_query.odin -file -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
 else

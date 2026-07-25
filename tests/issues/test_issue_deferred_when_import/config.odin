@@ -1,0 +1,4 @@
+package test_issues
+
+DEFERRED_WHEN_IMPORT :: #config(DEFERRED_WHEN_IMPORT, false)
+DEFERRED_WHEN_ACTIVE :: #config(DEFERRED_WHEN_ACTIVE, true)
