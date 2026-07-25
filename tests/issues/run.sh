@@ -95,6 +95,7 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+$ODIN check ../test_issue_deferred_when_import -no-entry-point $COMMON_NO_FILE
 if [[ $($ODIN check ../test_issue_6874.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
