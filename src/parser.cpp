@@ -6681,6 +6681,7 @@ gb_internal void destroy_ast_file(AstFile *f) {
 
 gb_internal bool init_parser(Parser *p) {
 	GB_ASSERT(p != nullptr);
+	p->has_deferred_build_tag_files.store(false, std::memory_order_relaxed);
 	string_set_init(&p->imported_files);
 	array_init(&p->packages, permanent_allocator());
 	return true;
@@ -7163,28 +7164,28 @@ gb_internal void parse_setup_import_decl(Parser *p, AstFile *f, String const &ba
 	try_add_import_path(p, import_path, original_string, ast_token(node).pos);
 }
 
-gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &base_dir, Slice<Ast *> &decls);
+gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &base_dir, Slice<Ast *> &decls, bool resolve_imports);
 
-gb_internal void parse_setup_file_when_stmt(Parser *p, AstFile *f, String const &base_dir, AstWhenStmt *ws) {
+gb_internal void parse_setup_file_when_stmt(Parser *p, AstFile *f, String const &base_dir, AstWhenStmt *ws, bool resolve_imports) {
 	if (ws->body != nullptr) {
 		auto stmts = ws->body->BlockStmt.stmts;
-		parse_setup_file_decls(p, f, base_dir, stmts);
+		parse_setup_file_decls(p, f, base_dir, stmts, resolve_imports);
 	}
 
 	if (ws->else_stmt != nullptr) {
 		switch (ws->else_stmt->kind) {
 		case Ast_BlockStmt: {
 			auto stmts = ws->else_stmt->BlockStmt.stmts;
-			parse_setup_file_decls(p, f, base_dir, stmts);
+			parse_setup_file_decls(p, f, base_dir, stmts, resolve_imports);
 		} break;
 		case Ast_WhenStmt:
-			parse_setup_file_when_stmt(p, f, base_dir, &ws->else_stmt->WhenStmt);
+			parse_setup_file_when_stmt(p, f, base_dir, &ws->else_stmt->WhenStmt, resolve_imports);
 			break;
 		}
 	}
 }
 
-gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &base_dir, Slice<Ast *> &decls) {
+gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &base_dir, Slice<Ast *> &decls, bool resolve_imports) {
 	for_array(i, decls) {
 		Ast *node = decls[i];
 		if (!is_ast_decl(node) &&
@@ -7197,18 +7198,45 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 				Ast *expr = node->ExprStmt.expr;
 				if (expr->kind == Ast_CallExpr &&
 				    expr->CallExpr.proc->kind == Ast_BasicDirective) {
-					f->directive_count += 1;
+					if (!(resolve_imports && (f->flags & AstFile_HasDeferredBuildTags))) {
+						f->directive_count += 1;
+					}
 					continue;
 				}
 			}
 
-			syntax_error(node, "Only declarations are allowed at file scope, got %.*s", LIT(ast_strings[node->kind]));
+				syntax_error(node, "Only declarations are allowed at file scope, got %.*s", LIT(ast_strings[node->kind]));
 		} else if (node->kind == Ast_ImportDecl) {
-			if (node->ImportDecl.fullpath.len == 0) {
-				parse_setup_import_decl(p, f, base_dir, &decls[i]);
+			ast_node(id, ImportDecl, node);
+			if (!resolve_imports) {
+				continue;
 			}
+
+			String original_string = string_trim_whitespace(string_value_from_token(f, id->relpath));
+			if (is_import_path_absolute(original_string)) {
+				syntax_error(node, "Invalid import path: '%.*s'", LIT(original_string));
+				decls[i] = ast_bad_decl(f, id->relpath, id->relpath);
+				continue;
+			}
+
+			String import_path = {};
+			bool ok = determine_path_from_string(false, node, base_dir, original_string, &import_path);
+			if (!ok) {
+				decls[i] = ast_bad_decl(f, id->relpath, id->relpath);
+				continue;
+			}
+			import_path = string_trim_whitespace(import_path);
+
+			id->fullpath = import_path;
+			if (is_package_name_reserved(import_path)) {
+				continue;
+			}
+			try_add_import_path(p, import_path, original_string, ast_token(node).pos);
 		} else if (node->kind == Ast_ForeignImportDecl) {
 			ast_node(fl, ForeignImportDecl, node);
+			if (!resolve_imports) {
+				continue;
+			}
 
 			if (fl->filepaths.count == 0) {
 				syntax_error(decls[i], "No foreign paths found");
@@ -7242,11 +7270,20 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 
 		} else if (node->kind == Ast_WhenStmt) {
 			ast_node(ws, WhenStmt, node);
-			parse_setup_file_when_stmt(p, f, base_dir, ws);
+			parse_setup_file_when_stmt(p, f, base_dir, ws, resolve_imports);
 		}
 
 	end:;
 	}
+}
+
+gb_internal void parse_setup_deferred_file_imports(Parser *p, AstFile *f) {
+	if ((f->flags & AstFile_HasDeferredBuildTags) == 0) {
+		return;
+	}
+
+	String base_dir = f->directory;
+	parse_setup_file_decls(p, f, base_dir, f->decls, true);
 }
 
 //
@@ -8223,6 +8260,9 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 			return false;
 		}
 	}
+	if ((f->flags & AstFile_HasDeferredBuildTags) != 0) {
+		p->has_deferred_build_tag_files.store(true, std::memory_order_relaxed);
+	}
 
 	Ast *pd = ast_package_decl(f, f->package_token, package_name, docs, f->line_comment);
 	expect_semicolon(f);
@@ -8245,7 +8285,7 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 				if (stmt->kind == Ast_WhenStmt || stmt->kind == Ast_ExprStmt || stmt->kind == Ast_ImportDecl || stmt->kind == Ast_ForeignBlockDecl) {
 					f->delayed_decl_count += 1;
 				}
-				if (stmt->kind == Ast_ImportDecl) {
+				if (stmt->kind == Ast_ImportDecl && (f->flags & AstFile_HasDeferredBuildTags) == 0) {
 					u64 import_start     = time_stamp_time_now();
 					u64 import_cpu_start = parse_thread_cpu_time_now();
 					parse_setup_import_decl(p, f, base_dir, &decls[decls.count-1]);
@@ -8259,7 +8299,8 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 
 		setup_start     = time_stamp_time_now();
 		setup_cpu_start = parse_thread_cpu_time_now();
-		parse_setup_file_decls(p, f, base_dir, f->decls);
+		bool resolve_imports = (f->flags & AstFile_HasDeferredBuildTags) == 0;
+		parse_setup_file_decls(p, f, base_dir, f->decls, resolve_imports);
 	}
 
 	u64 end     = time_stamp_time_now();

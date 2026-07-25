@@ -194,6 +194,7 @@ struct AstFile {
 	bool                   collected_entities_out_of_order;
 
 	Array<struct Entity *> type_alias_candidates; // see `correct_type_aliases_in_package`
+	bool global_decl_sources_scanned;
 };
 
 enum AstForeignFileKind {
@@ -254,6 +255,7 @@ struct Parser {
 	std::atomic<isize>     file_to_process_count;
 	std::atomic<isize>     total_token_count;
 	std::atomic<isize>     total_line_count;
+	std::atomic<bool>      has_deferred_build_tag_files;
 
 	std::atomic<isize>     total_seen_load_directive_count;
 

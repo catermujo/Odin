@@ -618,9 +618,10 @@ struct GlobalDeclScanTask {
 gb_internal WORKER_TASK_PROC(scan_global_decl_sources_worker_proc) {
 	GlobalDeclScanTask *task = cast(GlobalDeclScanTask *)data;
 	for (AstFile *f : task->pkg->files) {
-		if (ast_file_is_excluded_by_build_tags(f)) {
+		if (f->global_decl_sources_scanned || ast_file_is_excluded_by_build_tags(f) || (f->flags & AstFile_HasDeferredBuildTags) != 0) {
 			continue;
 		}
+		f->global_decl_sources_scanned = true;
 		scan_global_decl_sources(task->scan, f, f->decls, nullptr, false, EntityVisiblity_Public);
 	}
 	return 0;

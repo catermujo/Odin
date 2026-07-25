@@ -1358,8 +1358,8 @@ gb_internal void check_link_name_uses(Checker *c) {
 			}
 			break;
 		}
-
 	}
+
 }
 
 gb_internal void check_foreign_procedure(CheckerContext *ctx, Entity *e, DeclInfo *d) {
