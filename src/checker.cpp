@@ -6085,6 +6085,9 @@ gb_internal String path_to_entity_name(String name, String fullpath, bool strip_
 
 #if 1
 
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
+
 gb_internal void add_import_dependency_node(Checker *c, Ast *decl, PtrMap<AstPackage *, ImportGraphNode *> *M) {
 	AstPackage *parent_pkg = decl->file()->pkg;
 
@@ -6161,6 +6164,9 @@ gb_internal Array<ImportGraphNode *> generate_import_dependency_graph(Checker *c
 		AstPackage *p = c->parser->packages[i];
 		for_array(j, p->files) {
 			AstFile *f = p->files[j];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			for_array(k, f->decls) {
 				Ast *decl = f->decls[k];
 				add_import_dependency_node(c, decl, &M);
@@ -6363,9 +6369,6 @@ gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind 
 	pi->trigger_trace[0].name = name;
 	pi->trigger_trace_count = count+1;
 }
-
-gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
-gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
 
 gb_internal void scope_copy_trigger_trace_if_shorter(Scope *scope, CheckerContext const *ctx) {
 	if (scope == nullptr || ctx == nullptr || ctx->trigger_trace_count <= 0) {
@@ -7101,22 +7104,44 @@ gb_internal GB_COMPARE_PROC(sort_file_by_name) {
 	return string_compare(x_name, y_name);
 }
 
+gb_internal void check_register_package(Checker *c, AstPackage *p) {
+	if (string_map_get(&c->info.packages, p->fullpath) != nullptr) {
+		return;
+	}
+
+	Scope *scope = create_scope_from_package(&c->builtin_ctx, p);
+	p->decl_info = make_decl_info(scope, c->builtin_ctx.decl);
+	string_map_set(&c->info.packages, p->fullpath, p);
+
+	if (scope->flags&ScopeFlag_Init) {
+		c->info.init_package = p;
+		c->info.init_scope = p->scope;
+	}
+	if (p->kind == Package_Runtime) {
+		GB_ASSERT(c->info.runtime_package == nullptr);
+		c->info.runtime_package = p;
+	}
+}
+
+gb_internal void check_create_file_scopes_for_package(Checker *c, AstPackage *pkg) {
+	array_sort(pkg->files, sort_file_by_name);
+
+	isize total_pkg_decl_count = 0;
+	for_array(j, pkg->files) {
+		AstFile *f = pkg->files[j];
+		string_map_set(&c->info.files, f->fullpath, f);
+
+		create_scope_from_file(nullptr, f);
+		total_pkg_decl_count += f->total_file_decl_count;
+	}
+
+	mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+}
+
 gb_internal void check_create_file_scopes(Checker *c) {
 	for_array(i, c->parser->packages) {
 		AstPackage *pkg = c->parser->packages[i];
-
-		array_sort(pkg->files, sort_file_by_name);
-
-		isize total_pkg_decl_count = 0;
-		for_array(j, pkg->files) {
-			AstFile *f = pkg->files[j];
-			string_map_set(&c->info.files, f->fullpath, f);
-
-			create_scope_from_file(nullptr, f);
-			total_pkg_decl_count += f->total_file_decl_count;
-		}
-
-		mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+		check_create_file_scopes_for_package(c, pkg);
 	}
 }
 
@@ -7208,6 +7233,40 @@ gb_internal void check_export_entities(Checker *c) {
 		thread_pool_add_task(check_export_entities_worker_proc, pkg);
 	}
 	thread_pool_wait();
+}
+
+gb_internal void check_collect_entities_for_package(Checker *c, AstPackage *pkg) {
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
+
+	UntypedExprInfoMap untyped = {};
+	map_init(&untyped);
+	defer (map_destroy(&untyped));
+
+	for_array(i, pkg->files) {
+		AstFile *f = pkg->files[i];
+		if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+			continue;
+		}
+
+		reset_checker_context(&ctx, f, &untyped);
+		check_collect_entities(&ctx, f->decls);
+		add_untyped_expressions(&c->info, &untyped);
+	}
+
+	check_export_entities_in_pkg(&ctx, pkg, &untyped);
+}
+
+gb_internal void check_prepare_new_packages(Checker *c, isize first_package_index) {
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_register_package(c, c->parser->packages[i]);
+	}
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_create_file_scopes_for_package(c, c->parser->packages[i]);
+	}
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_collect_entities_for_package(c, c->parser->packages[i]);
+	}
 }
 
 struct DeferredBuildTagResolverData {
@@ -7317,59 +7376,113 @@ gb_internal bool check_collect_file_decls_from_ast_file(CheckerContext *ctx, Ast
 	return false;
 }
 
-gb_internal bool check_collect_deferred_build_tag_files(Checker *c, CheckerContext *ctx, AstPackage *pkg, UntypedExprInfoMap *untyped) {
+gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> const &files,
+                                                isize first_package_index, CheckerContext *ctx,
+                                                UntypedExprInfoMap *untyped) {
+	for (AstFile *f : files) {
+		parse_setup_deferred_file_imports(c->parser, f);
+	}
+	thread_pool_wait();
+	check_prepare_new_packages(c, first_package_index);
+
+	for (AstFile *f : files) {
+		f->flags &= ~AstFile_HasDeferredBuildTags;
+		if (ast_file_is_excluded_by_build_tags(f)) {
+			continue;
+		}
+		check_collect_file_decls_from_ast_file(ctx, f->pkg, f, untyped);
+	}
+
+	for (AstFile *f : files) {
+		check_export_entities_in_pkg(ctx, f->pkg, untyped);
+	}
+}
+
+gb_internal bool check_prepare_deferred_build_tag_files(Checker *c) {
+	if (!c->parser->has_deferred_build_tag_files.load(std::memory_order_relaxed)) {
+		return false;
+	}
+
+	bool changed = false;
+
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
+
+	UntypedExprInfoMap untyped = {};
+	map_init(&untyped);
+	defer (map_destroy(&untyped));
+
 	for (;;) {
 		bool progress = false;
 		bool pending = false;
+		isize package_count = c->parser->packages.count;
 
-		for_array(i, pkg->files) {
-			AstFile *f = pkg->files[i];
-			if (!ast_file_has_deferred_build_tags(f)) {
-				continue;
-			}
+		Array<AstFile *> active = {};
+		array_init(&active, temporary_allocator(), 0, 0);
 
-			BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, false);
-			if (result == BuildTagCondition_Unknown) {
-				pending = true;
-				continue;
-			}
+		for (isize i = 0; i < package_count; i++) {
+			AstPackage *pkg = c->parser->packages[i];
+			for (AstFile *f : pkg->files) {
+				if (!ast_file_has_deferred_build_tags(f)) {
+					continue;
+				}
 
-			f->flags &= ~AstFile_HasDeferredBuildTags;
-			if (result == BuildTagCondition_False) {
-				f->flags |= AstFile_ExcludedByDeferredBuildTags;
+				BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, false);
+				if (result == BuildTagCondition_Unknown) {
+					pending = true;
+					continue;
+				}
+
+				changed = true;
 				progress = true;
-				continue;
+				if (result == BuildTagCondition_False) {
+					f->flags &= ~AstFile_HasDeferredBuildTags;
+					f->flags |= AstFile_ExcludedByDeferredBuildTags;
+				} else {
+					array_add(&active, f);
+				}
 			}
-
-			if (check_collect_file_decls_from_ast_file(ctx, pkg, f, untyped)) {
-				return true;
-			}
-			progress = true;
 		}
 
-		if (!pending || !progress) {
+		if (active.count > 0) {
+			check_activate_deferred_files(c, active, package_count, &ctx, &untyped);
+		}
+
+		bool new_packages = c->parser->packages.count > package_count;
+		if ((!pending && !new_packages) || !progress) {
 			break;
 		}
 	}
 
-	for_array(i, pkg->files) {
-		AstFile *f = pkg->files[i];
-		if (!ast_file_has_deferred_build_tags(f)) {
-			continue;
-		}
+	isize package_count = c->parser->packages.count;
+	Array<AstFile *> active = {};
+	array_init(&active, temporary_allocator(), 0, 0);
+	for (isize i = 0; i < package_count; i++) {
+		AstPackage *pkg = c->parser->packages[i];
+		for (AstFile *f : pkg->files) {
+			if (!ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 
-		BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, true);
-		f->flags &= ~AstFile_HasDeferredBuildTags;
-		if (result == BuildTagCondition_False) {
-			f->flags |= AstFile_ExcludedByDeferredBuildTags;
-			continue;
+			BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, true);
+			if (result == BuildTagCondition_False) {
+				changed = true;
+				f->flags &= ~AstFile_HasDeferredBuildTags;
+				f->flags |= AstFile_ExcludedByDeferredBuildTags;
+			} else {
+				changed = true;
+				array_add(&active, f);
+			}
 		}
-		if (check_collect_file_decls_from_ast_file(ctx, pkg, f, untyped)) {
-			return true;
+	}
+	if (active.count > 0) {
+		check_activate_deferred_files(c, active, package_count, &ctx, &untyped);
+		if (c->parser->packages.count > package_count) {
+			changed |= check_prepare_deferred_build_tag_files(c);
 		}
 	}
 
-	return false;
+	return changed;
 }
 
 gb_internal void check_import_entities(Checker *c) {
@@ -7454,13 +7567,12 @@ gb_internal void check_import_entities(Checker *c) {
 		if (pkg_index < 0) {
 			continue;
 		}
-		if (check_collect_deferred_build_tag_files(c, &ctx, pkg, &untyped)) {
-			pkg_index = min_pkg_index-1;
-		}
-		if (pkg_index < 0) {
-			continue;
-		}
 		min_pkg_index = pkg_index;
+	}
+
+	if (check_prepare_deferred_build_tag_files(c)) {
+		check_import_entities(c);
+		return;
 	}
 
 	checker_build_active_import_trigger_traces(c);
@@ -8942,18 +9054,7 @@ gb_internal void check_parsed_files(Checker *c) {
 	// Map full filepaths to Scopes
 	for_array(i, c->parser->packages) {
 		AstPackage *p = c->parser->packages[i];
-		Scope *scope = create_scope_from_package(&c->builtin_ctx, p);
-		p->decl_info = make_decl_info(scope, c->builtin_ctx.decl);
-		string_map_set(&c->info.packages, p->fullpath, p);
-
-		if (scope->flags&ScopeFlag_Init) {
-			c->info.init_package = p;
-			c->info.init_scope = scope;
-		}
-		if (p->kind == Package_Runtime) {
-			GB_ASSERT(c->info.runtime_package == nullptr);
-			c->info.runtime_package = p;
-		}
+		check_register_package(c, p);
 	}
 
 	TIME_SECTION("init worker data");
