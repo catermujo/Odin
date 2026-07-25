@@ -237,6 +237,7 @@ struct Parser {
 	std::atomic<isize>     file_to_process_count;
 	std::atomic<isize>     total_token_count;
 	std::atomic<isize>     total_line_count;
+	std::atomic<bool>      has_deferred_build_tag_files;
 
 	std::atomic<isize>     total_seen_load_directive_count;
 
