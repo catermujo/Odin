@@ -468,6 +468,7 @@ enum BuildFlagKind {
 	BuildFlag_DisableAssert,
 	BuildFlag_EmitDowncastAssert,
 	BuildFlag_NoBoundsCheck,
+	BuildFlag_NoInstrumentationForceInline,
 	BuildFlag_WebkitSwitchWorkaround,
 	BuildFlag_NoTypeAssert,
 	BuildFlag_LifetimeMarkers,
@@ -731,6 +732,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_EmitDowncastAssert,      str_lit("emit-downcast-assert"),      BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoBoundsCheck,           str_lit("no-bounds-check"),           BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_NoInstrumentationForceInline, str_lit("no-instrumentation-force-inline"), BuildFlagParam_None, Command__does_check);
 	add_flag(&build_flags, BuildFlag_WebkitSwitchWorkaround,  str_lit("webkit-switch-workaround"),  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoTypeAssert,            str_lit("no-type-assert"),            BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_LifetimeMarkers,         str_lit("lifetime-markers"),          BuildFlagParam_None,    Command__does_build);
@@ -1432,6 +1434,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							break;
 						case BuildFlag_NoBoundsCheck:
 							build_context.no_bounds_check = true;
+							break;
+						case BuildFlag_NoInstrumentationForceInline:
+							build_context.no_instrumentation_force_inline = true;
 							break;
 						case BuildFlag_WebkitSwitchWorkaround:
 							build_context.webkit_switch_workaround = true;
@@ -3178,6 +3183,10 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	if (run_or_build) {
 		if (print_flag("-no-bounds-check")) {
 			print_usage_line(2, "Disables bounds checking program wide.");
+		}
+
+		if (print_flag("-no-instrumentation-force-inline")) {
+			print_usage_line(2, "Skips instrumentation for procedures marked '#force_inline'.");
 		}
 
 		if (print_flag("-webkit-switch-workaround")) {

@@ -552,6 +552,7 @@ struct BuildContext {
 	bool   ignore_unknown_attributes;
 	bool   emit_downcast_assert;
 	bool   no_bounds_check;
+	bool   no_instrumentation_force_inline;
 	bool   no_type_assert;
 	bool   lifetime_markers; // Opt-in to llvm.lifetime.* markers on scoped locals.
 	bool   dynamic_literals;  // Opt-in to `#+feature dynamic-literals` project-wide.
