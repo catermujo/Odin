@@ -1745,6 +1745,11 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		case Instrumentation_Default:  break;
 		case Instrumentation_Disabled: has_instrumentation = false;  break;
 		}
+
+		if (build_context.no_instrumentation_force_inline &&
+		    pl->inlining == ProcInlining_inline) {
+			has_instrumentation = false;
+		}
 	}
 
 	auto const is_valid_instrumentation_call = [](Type *type) -> bool {
