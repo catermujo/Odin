@@ -18,7 +18,8 @@ set -x
 
 $ODIN build ../smoke $COMMON -build-mode:object -out:thumbv6m_smoke_object
 $ODIN build ../smoke $COMMON -build-mode:assembly -out:thumbv6m_smoke_asm
-$ODIN build ../smoke $COMMON -build-mode:llvm-ir -out:thumbv6m_smoke_llvm
+mkdir -p thumbv6m_smoke_llvm
+$ODIN build ../smoke $COMMON -build-mode:llvm-ir -out:thumbv6m_smoke_llvm/
 $ODIN build ../main_export $COMMON -no-entry-point -build-mode:object -out:thumbv6m_main_export_object
 $ODIN build ../rp2040_main $RP2040_COMMON -build-mode:exe -out:thumbv6m_rp2040_exe
 clang --target=thumbv6m-none-eabi -c ../main_export/startup.S -o startup.o
