@@ -518,6 +518,13 @@ gb_internal lbValue lb_expr_untyped_const_to_typed(lbModule *m, Ast *expr, Type 
 gb_internal lbValue lb_const_source_code_location_const(lbModule *m, String const &procedure_, TokenPos const &pos) {
 	String file = get_file_path_string(pos.file_id);
 	String procedure = procedure_;
+	String package_name = m->pkg ? m->pkg->name : String{};
+	if (pos.file_id != 0) {
+		AstFile *ast_file = thread_safe_get_ast_file_from_id(pos.file_id);
+		if (ast_file != nullptr && ast_file->pkg != nullptr) {
+			package_name = ast_file->pkg->name;
+		}
+	}
 
 	i32 line   = pos.line;
 	i32 column = pos.column;
@@ -528,6 +535,7 @@ gb_internal lbValue lb_const_source_code_location_const(lbModule *m, String cons
 	case SourceCodeLocationInfo_Obfuscated:
 		file = obfuscate_string(file, "F");
 		procedure = obfuscate_string(procedure, "P");
+		package_name = obfuscate_string(package_name, "N");
 
 		line = obfuscate_i32(line);
 		column  = obfuscate_i32(column);
@@ -538,17 +546,19 @@ gb_internal lbValue lb_const_source_code_location_const(lbModule *m, String cons
 	case SourceCodeLocationInfo_None:
 		file = str_lit("");
 		procedure = str_lit("");
+		package_name = str_lit("");
 
 		line = 0;
 		column = 0;
 		break;
 	}
 
-	LLVMValueRef fields[4] = {};
+	LLVMValueRef fields[5] = {};
 	fields[0]/*file*/      = lb_find_or_add_entity_string(m, file, false).value;
 	fields[1]/*line*/      = lb_const_int(m, t_i32, line).value;
 	fields[2]/*column*/    = lb_const_int(m, t_i32, column).value;
 	fields[3]/*procedure*/ = lb_find_or_add_entity_string(m, procedure, false).value;
+	fields[4]/*package*/   = lb_find_or_add_entity_string(m, package_name, false).value;
 
 	lbValue res = {};
 	res.value = llvm_const_named_struct(m, t_source_code_location, fields, gb_count_of(fields));
