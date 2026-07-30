@@ -39,7 +39,7 @@ bounds_check_error_contextless :: proc "contextless" (file: string, line, column
 	}
 	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, index, count: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Index ")
 		print_i64(i64(index))
 		print_string(" is out of range 0..<")
@@ -67,7 +67,7 @@ bounds_check_error_with_context :: proc (file: string, line, column: i32, index,
 		if p == nil {
 			p = default_assertion_failure_proc
 		}
-		p("Bounds check failed", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		p("Bounds check failed", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 	}
 	handle_error(file, line, column, index, count)
 }
@@ -79,7 +79,7 @@ array_len_mismatch_error :: proc "contextless" (file: string, line, column: i32,
 	}
 	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, lhs_len, rhs_len: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Array length mismatch: lhs len = ")
 		print_i64(i64(lhs_len))
 		print_string(", rhs len = ")
@@ -91,7 +91,7 @@ array_len_mismatch_error :: proc "contextless" (file: string, line, column: i32,
 }
 
 slice_handle_error_contextless :: proc "contextless" (file: string, line, column: i32, lo, hi: int, len: int) -> ! {
-	print_caller_location(Source_Code_Location{file, line, column, ""})
+	print_caller_location(Source_Code_Location{file, line, column, "", ""})
 	print_string(" Invalid slice indices ")
 	print_i64(i64(lo))
 	print_string(":")
@@ -116,11 +116,11 @@ slice_handle_error_with_context :: proc (file: string, line, column: i32, lo, hi
 	if p == nil {
 		p = default_assertion_failure_proc
 	}
-	p("Invalid slice indices", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+	p("Invalid slice indices", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 }
 
 multi_pointer_slice_handle_error_contextless :: proc "contextless" (file: string, line, column: i32, lo, hi: int) -> ! {
-	print_caller_location(Source_Code_Location{file, line, column, ""})
+	print_caller_location(Source_Code_Location{file, line, column, "", ""})
 	print_string(" Invalid slice indices ")
 	print_i64(i64(lo))
 	print_string(":")
@@ -140,7 +140,7 @@ multi_pointer_slice_handle_error_with_context :: proc (file: string, line, colum
 	if p == nil {
 		p = default_assertion_failure_proc
 	}
-	p("Invalid slice indices", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+	p("Invalid slice indices", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 }
 
 
@@ -201,7 +201,7 @@ matrix_bounds_check_error_contextless :: proc "contextless" (file: string, line,
 	}
 	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, row_index, column_index, row_count, column_count: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Matrix indices [")
 		print_i64(i64(row_index))
 		print_string(", ")
@@ -241,7 +241,7 @@ matrix_bounds_check_error_with_context :: proc (file: string, line, column: i32,
 		if p == nil {
 			p = default_assertion_failure_proc
 		}
-		p("Invalid matrix indices", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		p("Invalid matrix indices", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 	}
 	handle_error(file, line, column, row_index, column_index, row_count, column_count)
 }
@@ -256,7 +256,7 @@ optional_value_check_with_context :: proc "odin" (ok: bool, file: string, line, 
 		if p == nil {
 			p = default_assertion_failure_proc
 		}
-		p("optional value", "Invalid optional value", Source_Code_Location{file, line, column, ""})
+		p("optional value", "Invalid optional value", Source_Code_Location{file, line, column, "", ""})
 	}
 	handle_error(file, line, column)
 }
@@ -267,7 +267,7 @@ optional_value_check_contextless :: proc "contextless" (ok: bool, file: string, 
 	}
 	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Invalid optional value\n")
 		type_assertion_trap_contextless()
 	}
@@ -286,7 +286,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("downcast assertion", "Invalid downcast", Source_Code_Location{file, line, column, ""})
+		p("downcast assertion", "Invalid downcast", Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column)
 	}
@@ -297,7 +297,7 @@ when ODIN_NO_RTTI {
 		}
 		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid downcast\n")
 			downcast_assertion_trap_contextless()
 		}
@@ -314,7 +314,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, ""})
+		p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column)
 	}
@@ -325,7 +325,7 @@ when ODIN_NO_RTTI {
 		}
 		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion\n")
 			type_assertion_trap_contextless()
 		}
@@ -342,7 +342,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, ""})
+			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, "", ""})
 		}
 
 		handle_error(file, line, column)
@@ -354,7 +354,7 @@ when ODIN_NO_RTTI {
 		}
 		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion\n")
 			type_assertion_trap_contextless()
 		}
@@ -480,7 +480,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("downcast assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		p("downcast assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column, from, to, value_lo, value_hi)
 	}
@@ -495,7 +495,7 @@ when ODIN_NO_RTTI {
 			i := 0
 			_ = downcast_assertion_write_message(&i, buf[:], from, to, value_lo, value_hi)
 
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" ")
 			print_string(string(buf[:i]))
 			print_byte('\n')
@@ -526,7 +526,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column, from, to)
 	}
@@ -537,7 +537,7 @@ when ODIN_NO_RTTI {
 		}
 		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32, from, to: typeid) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion from ")
 			print_typeid(from)
 			print_string(" to ")
@@ -613,7 +613,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column, from, to, from_data)
 	}
@@ -628,7 +628,7 @@ when ODIN_NO_RTTI {
 
 			actual := type_assertion_variant_type(from, from_data)
 
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion from ")
 			print_typeid(from)
 			print_string(" to ")
