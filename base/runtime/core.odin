@@ -380,6 +380,7 @@ Source_Code_Location :: struct {
 	file_path:    string,
 	line, column: i32,
 	procedure:    string,
+	package_name: string,
 }
 
 /*
