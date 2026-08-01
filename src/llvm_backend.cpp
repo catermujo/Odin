@@ -17,7 +17,6 @@
 
 #define LLVM_SET_INTERNAL_WEAK_LINKAGE(value) LLVMSetLinkage(value, USE_SEPARATE_MODULES ? LLVMWeakAnyLinkage : LLVMInternalLinkage);
 
-
 #include "llvm_backend.hpp"
 #ifndef CLANGD_TU_llvm_abi
 #include "llvm_abi.cpp"
@@ -2650,8 +2649,7 @@ gb_internal GB_COMPARE_PROC(llvm_global_entity_cmp) {
 		return cast(i32)(x->kind - y->kind);
 	}
 
-	i32 cmp = 0;
-	cmp = token_pos_cmp(x->token.pos, y->token.pos);
+	i32 cmp = token_pos_cmp(x->token.pos, y->token.pos);
 	if (cmp) {
 		return cmp;
 	}
@@ -2664,84 +2662,46 @@ gb_internal GB_COMPARE_PROC(llvm_global_entity_cmp) {
 gb_internal Array<lbModule *> lb_modules_by_cost(lbGenerator *gen);
 
 gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, CheckerInfo *info, bool do_threading) {
-	for (Entity *e : info->entities) {
-		String  name  = e->token.string;
-		Scope * scope = e->scope;
+	CodeGenGlobalPlan plan = {};
+	codegen_build_global_plan(&plan, info, permanent_allocator());
 
-		if ((scope->flags & ScopeFlag_File) == 0) {
-			if (e->kind != Entity_Procedure || (e->flags & EntityFlag_PolyConstArg) == 0) {
-				continue;
-			}
-		} else {
-			GB_ASSERT(scope->parent->flags & ScopeFlag_Pkg);
+	if (build_context.ODIN_DEBUG) {
+		for (Entity *e : plan.constants) {
+			lb_add_debug_info_for_global_constant_from_entity(gen, e);
 		}
+	}
 
-		switch (e->kind) {
-		case Entity_Variable:
-			// NOTE(bill): Handled above as it requires a specific load order
-			continue;
-		case Entity_ProcGroup:
-			continue;
-
-		case Entity_TypeName:
-		case Entity_Procedure:
-			break;
-		case Entity_Constant:
-			if (build_context.ODIN_DEBUG) {
-				lb_add_debug_info_for_global_constant_from_entity(gen, e);
-			}
-			break;
-		}
-
-		bool polymorphic_struct = false;
-		if (e->type != nullptr && e->kind == Entity_TypeName) {
-			Type *bt = base_type(e->type);
-			if (bt->kind == Type_Struct) {
-				polymorphic_struct = is_type_polymorphic(bt);
-			}
-		}
-
-		if (!polymorphic_struct && e->min_dep_count.load(std::memory_order_relaxed) == 0) {
-			// NOTE(bill): Nothing depends upon it so doesn't need to be built
-			continue;
-		}
-
-		// if (!polymorphic_struct && !ptr_set_exists(min_dep_set, e)) {
-		// 	// NOTE(bill): Nothing depends upon it so doesn't need to be built
-		// 	continue;
-		// }
-
-		Entity *codegen_entity = e;
-		if (e->kind == Entity_Procedure) {
-			codegen_entity = strip_entity_wrapping(e);
-			if (codegen_entity == nullptr) {
-				continue;
-			}
-		}
+	for (Entity *e : plan.global_entities) {
 
 		lbModule *m = &gen->default_module;
 		if (USE_SEPARATE_MODULES) {
-			m = lb_module_of_entity(gen, codegen_entity, m);
+			m = lb_module_of_entity(gen, e, m);
 		}
 		GB_ASSERT(m != nullptr);
-
-		if (e->kind == Entity_Procedure) {
-			if (e->Procedure.is_foreign && e->Procedure.is_objc_impl_or_import) {
-				// Do not generate declarations for foreign Objective-C methods. These are called indirectly through the Objective-C runtime.
-				continue;
-			}
-
-			array_add(&m->global_procedures_to_create, codegen_entity);
-		} else if (e->kind == Entity_TypeName) {
+		switch (e->kind) {
+		case Entity_TypeName:
 			array_add(&m->global_types_to_create, e);
+			break;
+		case Entity_Procedure:
+			array_add(&m->global_procedures_to_create, e);
+			break;
+		default:
+			GB_PANIC("unexpected global entity kind");
 		}
 	}
 
 	for (auto const &entry : gen->modules) {
 		lbModule *m = entry.value;
-		array_sort(m->global_types_to_create, llvm_global_entity_cmp);
-		array_sort(m->global_procedures_to_create, llvm_global_entity_cmp);
+		array_sort(m->global_types_to_create, codegen_global_entity_cmp);
+		array_sort(m->global_procedures_to_create, codegen_global_entity_cmp);
 		m->estimated_cost = m->global_types_to_create.count + m->global_procedures_to_create.count;
+
+		for (Entity *e : m->global_types_to_create) {
+			(void)lb_get_entity_name(m, e);
+		}
+		for (Entity *e : m->global_procedures_to_create) {
+			(void)lb_get_entity_name(m, e);
+		}
 	}
 
 	gen->modules_in_parallel = true;
