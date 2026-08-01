@@ -197,6 +197,7 @@ $ODIN test ../test_issue_bool_to_be_conversion.odin $COMMON
 $ODIN test ../test_issue_bool_comparison_truthiness.odin $COMMON
 $ODIN test ../test_issue_const_array_broadcast.odin $COMMON
 $ODIN test ../test_issue_decl_order.odin $COMMON
+$ODIN test ../test_issue_recursive_poly_alias.odin $COMMON
 $ODIN test ../test_issue_distinct_constraint.odin $COMMON
 if [[ $($ODIN check ../test_issue_ambiguous_union_literal.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
