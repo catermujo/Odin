@@ -108,10 +108,11 @@ gb_global Timings global_timings = {0};
 #include "bundle_command.cpp"
 #endif
 
+
+#include "codegen_plan.hpp"
+#include "codegen_plan.cpp"
 #ifndef CLANGD_TU_llvm_backend
-
 #include "llvm_backend.cpp"
-
 #endif
 
 #ifndef CLANGD_TU_bug_report
