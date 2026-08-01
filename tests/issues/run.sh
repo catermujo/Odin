@@ -11,6 +11,8 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN test ../test_issue_recursive_poly_alias.odin -file $COMMON
+
 if [[ $($ODIN check ../test_issue_retired_build_define.odin -file -no-entry-point $COMMON_CHECK 2>&1 | grep -c "Syntax Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else

@@ -11,6 +11,8 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% test ..\test_issue_recursive_poly_alias.odin -file %COMMON%  || exit /b
+
 %ODIN% check ..\test_issue_retired_build_define.odin -file -no-entry-point %COMMON% 2>&1 | find /c "Syntax Error:" | findstr /x "1" || exit /b
 
 %ODIN% check ..\test_issue_deferred_when_import -no-entry-point %COMMON_NO_FILE% || exit /b
