@@ -412,7 +412,7 @@ Output:
 */
 write_byte :: proc(b: ^Builder, x: byte, loc := #caller_location) -> (n: int) {
 	n0 := len(b.buf)
-	append(&b.buf, x, loc)
+	_, _ = append(&b.buf, x, loc)
 	n1 := len(b.buf)
 	return n1-n0
 }
@@ -442,7 +442,7 @@ Returns:
 */
 write_bytes :: proc(b: ^Builder, x: []byte, loc := #caller_location) -> (n: int) {
 	n0 := len(b.buf)
-	append(&b.buf, ..x, loc=loc)
+	_, _ = append(&b.buf, ..x, loc=loc)
 	n1 := len(b.buf)
 	return n1-n0
 }
@@ -543,7 +543,7 @@ Output:
 */
 write_string :: proc(b: ^Builder, s: string, loc := #caller_location) -> (n: int) {
 	n0 := len(b.buf)
-	append(&b.buf, s, loc)
+	_, _ = append(&b.buf, s, loc)
 	n1 := len(b.buf)
 	return n1-n0
 }
