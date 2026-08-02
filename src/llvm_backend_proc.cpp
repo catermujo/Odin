@@ -1,5 +1,6 @@
 gb_internal LLVMValueRef lb_coerce_fields_load(lbProcedure *p, lbValue x, lbArgType const *arg);
 gb_internal LLVMValueRef lb_coerce_fields_store(lbProcedure *p, LLVMValueRef coerced, Type *original_type, lbArgType const *arg);
+gb_global std::atomic<bool> lb_procedure_import_preflight_finished = {false};
 
 gb_internal LLVMValueRef lb_call_intrinsic(lbProcedure *p, const char *name, LLVMValueRef* args, unsigned arg_count, LLVMTypeRef* types, unsigned type_count) {
 	unsigned id = LLVMLookupIntrinsicID(name, gb_strlen(name));
@@ -175,8 +176,14 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 	if (ignore_body) {
 		lbModule *other_module = lb_module_of_entity(m->gen, entity, m);
 		link_name = lb_get_entity_name(other_module, entity);
+		if (lb_procedure_import_preflight_finished.load(std::memory_order_relaxed)) {
+			debugf("Late procedure importer: %.*s in module %p\n", LIT(entity->token.string), m);
+		}
 	} else {
 		link_name = lb_get_entity_name(m, entity);
+		if (lb_procedure_import_preflight_finished.load(std::memory_order_relaxed)) {
+			debugf("Late procedure definition: %.*s in module %p\n", LIT(entity->token.string), m);
+		}
 	}
 	MUTEX_GUARD(&m->procedure_mutex);
 	{
@@ -191,8 +198,10 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 	lbProcedure *p = permanent_alloc_item<lbProcedure>();
 
 	p->module = m;
-	entity->code_gen_module = m;
-	entity->code_gen_procedure = p;
+	if (!ignore_body) {
+		entity->code_gen_module = m;
+		entity->code_gen_procedure = p;
+	}
 	p->entity = entity;
 	p->name = link_name;
 
@@ -3123,7 +3132,7 @@ gb_internal lbValue lb_build_builtin_simd_proc(lbProcedure *p, Ast *expr, TypeAn
 			res.value = lb_call_intrinsic(p, name, args, arg_count, types, type_count);
 			if (align_idx >= 0) {
 				LLVMAttributeRef align_attr = lb_create_enum_attribute(p->module->ctx, "align", alignment);
-				LLVMAddAttributeAtIndex(res.value, align_idx, align_attr);
+				LLVMAddCallSiteAttribute(res.value, LLVMAttributeIndex_FirstArgIndex + align_idx, align_attr);
 			}
 			return res;
 
