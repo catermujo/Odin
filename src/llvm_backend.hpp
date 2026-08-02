@@ -461,6 +461,7 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 gb_internal lbValue lb_emit_epi(lbModule *m, lbValue const &value, isize index);
 gb_internal lbValue lb_emit_array_epi(lbModule *m, lbValue s, isize index);
 gb_internal lbValue lb_emit_struct_ep(lbProcedure *p, lbValue s, i32 index);
+gb_internal LLVMValueRef lb_emit_byte_gep(lbProcedure *p, LLVMValueRef base, LLVMValueRef byte_offset);
 // address of a 'lambda' capture inside a closure body, resolved through the environment pointer.
 gb_internal lbAddr lb_closure_capture_addr(lbProcedure *p, Entity *e);
 // build a closure value: emit the function, allocate+fill the environment, return the {fn, env} pair.

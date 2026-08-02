@@ -1294,7 +1294,7 @@ gb_internal lbValue lb_emit_struct_ep_internal(lbProcedure *p, lbValue s, i32 in
 		    gb_is_between(original_index, 0, t->Struct.fields.count-1)) {
 			i64 offset = type_offset_of(t, original_index);
 			LLVMValueRef byte_offset = LLVMConstInt(lb_type(m, t_int), offset, false);
-			res.value = LLVMBuildGEP2(p->builder, lb_type(m, t_u8), s.value, &byte_offset, 1, "");
+			res.value = lb_emit_byte_gep(p, s.value, byte_offset);
 			res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(m, res.type), "");
 			return res;
 		}
@@ -1775,7 +1775,7 @@ gb_internal lbValue lb_emit_array_ep(lbProcedure *p, lbValue s, lbValue index) {
 	} else if (build_context.optimization_level < 0 && LLVMIsAConstantInt(indices[1])) {
 		u64 byte_offset_value = cast(u64)LLVMConstIntGetSExtValue(indices[1]) * cast(u64)lb_sizeof(lb_type(p->module, ptr));
 		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
-		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), s.value, &byte_offset, 1, "");
+		res.value = lb_emit_byte_gep(p, s.value, byte_offset);
 		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, alloc_type_pointer(ptr)), "");
 	} else if (build_context.optimization_level < 0 && !LLVMIsConstant(indices[1]) && (is_type_array(st) || is_type_enumerated_array(st))) {
 		u64 elem_size = lb_sizeof(lb_type(p->module, ptr));
@@ -1783,7 +1783,7 @@ gb_internal lbValue lb_emit_array_ep(lbProcedure *p, lbValue s, lbValue index) {
 		if (elem_size != 1) {
 			byte_offset = LLVMBuildMul(p->builder, byte_offset, LLVMConstInt(lb_type(p->module, t_int), elem_size, false), "");
 		}
-		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), s.value, &byte_offset, 1, "");
+		res.value = lb_emit_byte_gep(p, s.value, byte_offset);
 		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, alloc_type_pointer(ptr)), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, st), s.value, indices, gb_count_of(indices), "");
