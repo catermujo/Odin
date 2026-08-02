@@ -161,7 +161,8 @@ _builder_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byt
 	b := (^Builder)(stream_data)
 	#partial switch mode {
 	case .Write:
-		n = i64(write_bytes(b, p))
+		written, _ := write_bytes(b, p)
+		n = i64(written)
 		if n < i64(len(p)) {
 			err = .EOF
 		}
