@@ -3405,6 +3405,22 @@ gb_internal LLVMValueRef OdinLLVMBuildTransmute(lbProcedure *p, LLVMValueRef val
 	LLVMTypeKind src_kind = LLVMGetTypeKind(src_type);
 	LLVMTypeKind dst_kind = LLVMGetTypeKind(dst_type);
 
+	if ((src_kind == LLVMStructTypeKind || src_kind == LLVMArrayTypeKind) &&
+	    (dst_kind == LLVMStructTypeKind || dst_kind == LLVMArrayTypeKind) &&
+	    src_size == dst_size &&
+	    LLVMIsALoadInst(val) &&
+	    !LLVMGetVolatile(val) &&
+	    LLVMGetOrdering(val) == LLVMAtomicOrderingNotAtomic &&
+	    LLVMGetFirstUse(val) == nullptr) {
+		LLVMBuilderRef temp_builder = LLVMCreateBuilderInContext(p->module->ctx);
+		LLVMPositionBuilderBefore(temp_builder, val);
+		LLVMValueRef new_val = LLVMBuildLoad2(temp_builder, dst_type, LLVMGetOperand(val, 0), "");
+		LLVMSetAlignment(new_val, LLVMGetAlignment(val));
+		LLVMInstructionSetDebugLoc(new_val, LLVMInstructionGetDebugLoc(val));
+		LLVMDisposeBuilder(temp_builder);
+		return new_val;
+	}
+
 	if (dst_type == LLVMInt1TypeInContext(ctx)) {
 		GB_ASSERT(lb_is_type_kind(src_type, LLVMIntegerTypeKind));
 		return LLVMBuildICmp(p->builder, LLVMIntNE, val, LLVMConstNull(src_type), "");
