@@ -2647,10 +2647,8 @@ gb_internal GB_COMPARE_PROC(llvm_global_entity_cmp) {
 
 gb_internal Array<lbModule *> lb_modules_by_cost(lbGenerator *gen);
 
-gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, CheckerInfo *info) {
+gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, CodeGenGlobalPlan const &plan) {
 	lb_procedure_import_preflight_finished.store(false, std::memory_order_relaxed);
-	CodeGenGlobalPlan plan = {};
-	codegen_build_global_plan(&plan, info, permanent_allocator());
 
 	if (build_context.ODIN_DEBUG) {
 		for (Entity *e : plan.constants) {
@@ -3516,7 +3514,7 @@ gb_internal void lb_verify_generated_procedures(lbGenerator *gen, bool do_thread
 }
 
 
-gb_internal bool lb_generate_code(lbGenerator *gen) {
+gb_internal bool lb_generate_code(lbGenerator *gen, CodeGenGlobalPlan const &plan) {
 	TIME_SECTION("LLVM Initializtion");
 
 	isize thread_count = gb_max(build_context.thread_count, 1);
@@ -3910,7 +3908,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	}
 
 	TIME_SECTION("LLVM Global Procedures and Types");
-	lb_create_global_procedures_and_types(gen, info);
+	lb_create_global_procedures_and_types(gen, plan);
 
 	TIME_SECTION("LLVM Procedure Generation");
 	lb_generate_procedures(gen, do_threading);
