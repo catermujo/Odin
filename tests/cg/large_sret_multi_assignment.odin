@@ -103,6 +103,8 @@ main :: proc() {
 
 	abi_string := abi_string_identity("direct ABI string")
 	assert(abi_string == "direct ABI string")
+	empty_abi_string := abi_string_identity("")
+	assert(empty_abi_string == "")
 
 	ternary_state.before[0] = 13
 	ternary_state.before[1024] = 103
