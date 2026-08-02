@@ -32,6 +32,10 @@ make_optional_large :: proc() -> (Large, u32, bool) #optional_ok {
 	return result, 84, true
 }
 
+abi_string_identity :: proc(value: string) -> string {
+	return value
+}
+
 assign_ternary_large :: proc(flag: bool) {
 	ternary_state.dst = flag ? ternary_state.after : ternary_state.before
 }
@@ -96,6 +100,9 @@ main :: proc() {
 
 	_, attempts = make_large()
 	assert(attempts == 42)
+
+	abi_string := abi_string_identity("direct ABI string")
+	assert(abi_string == "direct ABI string")
 
 	ternary_state.before[0] = 13
 	ternary_state.before[1024] = 103
