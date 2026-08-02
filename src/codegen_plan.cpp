@@ -10,9 +10,29 @@ gb_internal GB_COMPARE_PROC(codegen_global_entity_cmp) {
 	return token_pos_cmp(x->token.pos, y->token.pos);
 }
 
+gb_internal GB_COMPARE_PROC(codegen_procedure_import_cmp) {
+	CodeGenProcedureImport *x = cast(CodeGenProcedureImport *)a;
+	CodeGenProcedureImport *y = cast(CodeGenProcedureImport *)b;
+
+	i32 result = codegen_global_entity_cmp(&x->requester, &y->requester);
+	if (result != 0) {
+		return result;
+	}
+	return codegen_global_entity_cmp(&x->procedure, &y->procedure);
+}
+
+gb_internal bool codegen_is_top_level_named_procedure(Entity *e) {
+	return e != nullptr &&
+	       e->kind == Entity_Procedure &&
+	       e->token.string.len != 0 &&
+	       e->scope != nullptr &&
+	       (e->scope->flags & ScopeFlag_File) != 0;
+}
+
 gb_internal void codegen_build_global_plan(CodeGenGlobalPlan *plan, CheckerInfo *info, gbAllocator allocator) {
 	array_init(&plan->constants, allocator);
 	array_init(&plan->global_entities, allocator);
+	array_init(&plan->procedure_imports, allocator);
 
 	for (Entity *e : info->entities) {
 		Scope *scope = e->scope;
@@ -69,4 +89,37 @@ gb_internal void codegen_build_global_plan(CodeGenGlobalPlan *plan, CheckerInfo 
 		}
 	}
 
+	for (Entity *requester : plan->global_entities) {
+		if (!codegen_is_top_level_named_procedure(requester)) {
+			continue;
+		}
+
+		DeclInfo *decl = decl_info_of_entity(requester);
+		if (decl == nullptr) {
+			continue;
+		}
+
+		rw_mutex_shared_lock(&decl->deps_mutex);
+		FOR_PTR_SET(dep, decl->deps) {
+			Entity *procedure = strip_entity_wrapping(dep);
+			if (!codegen_is_top_level_named_procedure(procedure)) {
+				continue;
+			}
+			array_add(&plan->procedure_imports, {requester, procedure});
+		}
+		rw_mutex_shared_unlock(&decl->deps_mutex);
+	}
+
+	array_sort(plan->procedure_imports, codegen_procedure_import_cmp);
+	isize import_count = 0;
+	for (CodeGenProcedureImport import : plan->procedure_imports) {
+		if (import_count > 0) {
+			CodeGenProcedureImport previous = plan->procedure_imports[import_count-1];
+			if (previous.requester == import.requester && previous.procedure == import.procedure) {
+				continue;
+			}
+		}
+		plan->procedure_imports[import_count++] = import;
+	}
+	array_resize(&plan->procedure_imports, import_count);
 }
