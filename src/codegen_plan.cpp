@@ -32,6 +32,7 @@ gb_internal bool codegen_is_top_level_named_procedure(Entity *e) {
 gb_internal void codegen_build_global_plan(CodeGenGlobalPlan *plan, CheckerInfo *info, gbAllocator allocator) {
 	array_init(&plan->constants, allocator);
 	array_init(&plan->global_entities, allocator);
+	array_init(&plan->initial_procedure_bodies, allocator);
 	array_init(&plan->procedure_imports, allocator);
 
 	for (Entity *e : info->entities) {
@@ -83,11 +84,13 @@ gb_internal void codegen_build_global_plan(CodeGenGlobalPlan *plan, CheckerInfo 
 			break;
 		case Entity_Procedure:
 			array_add(&plan->global_entities, codegen_entity);
+			array_add(&plan->initial_procedure_bodies, codegen_entity);
 			break;
 		default:
 			GB_PANIC("unexpected global entity kind");
 		}
 	}
+	array_sort(plan->initial_procedure_bodies, codegen_global_entity_cmp);
 
 	for (Entity *requester : plan->global_entities) {
 		if (!codegen_is_top_level_named_procedure(requester)) {
