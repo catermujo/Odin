@@ -1600,6 +1600,53 @@ gb_internal lbValue lb_emit_struct_ev(lbProcedure *p, lbValue s, i32 index) {
 
 gb_internal lbValue lb_emit_deep_field_gep(lbProcedure *p, lbValue e, Selection sel) {
 	GB_ASSERT(sel.index.count > 0);
+	if (!sel.is_bit_field && !sel.pseudo_field && sel.index.count > 1 && is_type_pointer(e.type)) {
+		Type *field_type = nullptr;
+		Type *type = type_deref(e.type);
+		while (is_type_pointer(type)) {
+			type = type_deref(type);
+		}
+		type = core_type(type);
+		i64 offset = 0;
+		bool can_fuse = is_type_struct(type) && !is_type_raw_union(type);
+
+		for_array(i, sel.index) {
+			i32 index = sel.index[i];
+			if (!can_fuse || !is_type_struct(type) || is_type_raw_union(type) ||
+			    type->Struct.is_packed || type->Struct.custom_min_field_align != 0 ||
+			    type->Struct.custom_max_field_align != 0 ||
+			    !gb_is_between(index, 0, type->Struct.fields.count-1)) {
+				can_fuse = false;
+				break;
+			}
+
+			offset += type_offset_of(type, index, &field_type);
+			type = core_type(field_type);
+		}
+
+		if (can_fuse) {
+			Type *e_type = type_deref(e.type);
+			while (is_type_pointer(e_type)) {
+				e = lb_emit_load(p, e);
+				e_type = type_deref(e.type);
+			}
+
+			LLVMValueRef index = LLVMConstInt(lb_type(p->module, t_int), offset, false);
+			LLVMTypeRef llvm_u8 = lb_type(p->module, t_u8);
+			lbValue res = {};
+			res.type = alloc_type_pointer(field_type);
+
+			if (lb_is_const(e)) {
+				res.value = LLVMConstGEP2(llvm_u8, e.value, &index, 1);
+				res.value = LLVMConstPointerCast(res.value, lb_type(p->module, res.type));
+			} else {
+				res.value = LLVMBuildGEP2(p->builder, llvm_u8, e.value, &index, 1, "");
+				res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, res.type), "");
+			}
+			return res;
+		}
+	}
+
 	Type *type = type_deref(e.type);
 
 	for_array(i, sel.index) {
