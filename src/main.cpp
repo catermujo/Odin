@@ -4422,6 +4422,7 @@ int main(int arg_count, char const **arg_ptr) {
 	Parser * parser  = permanent_alloc_item<Parser>();
 	Checker *checker = permanent_alloc_item<Checker>();
 	bool failed_to_cache_parsing = false;
+	CodeGenGlobalPlan codegen_plan = {};
 
 	TIME_SECTION("init asm tables");
 	init_asm_tables(build_context.metrics.ptr_size);
@@ -4530,14 +4531,13 @@ int main(int arg_count, char const **arg_ptr) {
 		failed_to_cache_parsing = true;
 	}
 
+	codegen_build_global_plan(&codegen_plan, &checker->info, permanent_allocator());
+
 	{
 		lbGenerator *gen = permanent_alloc_item<lbGenerator>();
 		if (!lb_init_generator(gen, checker)) {
 			return 1;
 		}
-
-		CodeGenGlobalPlan codegen_plan = {};
-		codegen_build_global_plan(&codegen_plan, &checker->info, permanent_allocator());
 
 		gbString label_code_gen = gb_string_make(heap_allocator(), "LLVM API Code Gen");
 		if (gen->modules.count > 1) {
