@@ -2658,6 +2658,26 @@ gb_internal void lb_build_assignment(lbProcedure *p, Array<lbAddr> &lvals, Slice
 		lb_append_tuple_values_for_assignment(p, &inits, &indirect_result_ptrs, init);
 	}
 
+	if (lvals.count > 1) {
+		for_array(i, inits) {
+			lbAddr lval = lvals[i];
+			lbValue init = inits[i];
+			if (indirect_result_ptrs[i].value == nullptr &&
+			    lval.kind == lbAddr_Default &&
+			    lval.addr.value != nullptr &&
+			    LLVMIsALoadInst(init.value) &&
+			    !LLVMGetVolatile(init.value) &&
+			    lb_is_type_aggregate(init.type) &&
+			    type_size_of(init.type) >= 1024 &&
+			    are_types_identical(init.type, lb_addr_type(lval))) {
+				lbAddr snapshot = lb_add_local_generated(p, init.type, false);
+				lbValue source = lb_address_from_load_or_generate_local(p, init);
+				lb_mem_copy_overlapping(p, snapshot.addr, source, lb_const_int(p->module, t_int, type_size_of(init.type)));
+				indirect_result_ptrs[i] = snapshot.addr;
+			}
+		}
+	}
+
 	bool prev_in_assignment = p->in_multi_assignment;
 
 	isize lval_count = 0;
@@ -4074,6 +4094,24 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, Ast *node) {
 			Ast *lhs_expr = unparen_expr(as->lhs[0]);
 			Ast *rhs_expr = unparen_expr(as->rhs[0]);
 			Type *lhs_type = type_of_expr(lhs_expr);
+
+			if (rhs_expr->kind == Ast_TernaryIfExpr && lb_is_type_aggregate(lhs_type)) {
+				ast_node(te, TernaryIfExpr, rhs_expr);
+				Ast *then_expr = unparen_expr(te->x);
+				Ast *else_expr = unparen_expr(te->y);
+				if (then_expr->tav.mode == Addressing_Variable &&
+				    else_expr->tav.mode == Addressing_Variable &&
+				    are_types_identical(lhs_type, type_of_expr(rhs_expr)) &&
+				    are_types_identical(lhs_type, type_of_expr(then_expr)) &&
+				    are_types_identical(lhs_type, type_of_expr(else_expr))) {
+					lbAddr lhs = lb_build_addr(p, lhs_expr);
+					if (lhs.kind == lbAddr_Default) {
+						lbValue source = lb_build_addr_ptr(p, rhs_expr);
+						lb_mem_copy_overlapping(p, lhs.addr, source, lb_const_int(p->module, t_int, type_size_of(lhs_type)));
+						return;
+					}
+				}
+			}
 
 			if (is_type_array(lhs_type) && rhs_expr->kind == Ast_BinaryExpr) {
 				ast_node(be, BinaryExpr, rhs_expr);
