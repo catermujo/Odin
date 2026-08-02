@@ -1584,8 +1584,35 @@ gb_internal LLVMValueRef lb_integer_division_fixed_point_intrinsics(lbProcedure 
 	LLVMValueRef zero = LLVMConstNull(type);
 	LLVMValueRef all_bits = LLVMConstNot(zero);
 	auto behaviour = lb_check_for_integer_division_by_zero_behaviour(p);
+	bool use_sdiv_fix_sat_i64_fallback =
+		str_eq(make_string_c(name), str_lit("llvm.sdiv.fix.sat")) &&
+		type_size_of(platform_type) == 8 &&
+		LLVMIsAConstantInt(scale) &&
+		LLVMConstIntGetZExtValue(scale) == 63;
 
 	auto const do_op = [&]() -> LLVMValueRef {
+		if (use_sdiv_fix_sat_i64_fallback) {
+			lbModule *m = p->module;
+			LLVMTypeRef i128 = lb_type(m, t_i128);
+			LLVMValueRef wide_lhs = LLVMBuildSExt(p->builder, lhs, i128, "");
+			LLVMValueRef wide_rhs = LLVMBuildSExt(p->builder, rhs, i128, "");
+			LLVMValueRef wide_scale = LLVMConstInt(i128, 63, false);
+			LLVMValueRef scaled_lhs = LLVMBuildShl(p->builder, wide_lhs, wide_scale, "");
+
+			auto args = array_make<lbValue>(temporary_allocator(), 2);
+			args[0] = {scaled_lhs, t_i128};
+			args[1] = {wide_rhs, t_i128};
+			lbValue quotient = lb_emit_runtime_call(p, "divti3", args);
+
+			LLVMValueRef min = LLVMConstInt(i128, cast(u64)I64_MIN, true);
+			LLVMValueRef max = lb_const_int(m, t_i128, cast(u64)I64_MAX).value;
+			LLVMValueRef above_max = LLVMBuildICmp(p->builder, LLVMIntSGT, quotient.value, max, "");
+			LLVMValueRef clamped = LLVMBuildSelect(p->builder, above_max, max, quotient.value, "");
+			LLVMValueRef below_min = LLVMBuildICmp(p->builder, LLVMIntSLT, clamped, min, "");
+			clamped = LLVMBuildSelect(p->builder, below_min, min, clamped, "");
+			return LLVMBuildTrunc(p->builder, clamped, type, "");
+		}
+
 		LLVMTypeRef types[1] = {lb_type(p->module, platform_type)};
 
 		LLVMValueRef args[3] = {
