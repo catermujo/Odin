@@ -2373,7 +2373,25 @@ struct lbLLVMEmitWorker {
 	LLVMCodeGenFileType code_gen_file_type;
 	String filepath_obj;
 	lbModule *m;
+	bool profile_enabled;
+	u64 profile_ticks;
 };
+
+gb_internal bool lb_llvm_profile_enabled(void) {
+	gbAllocator a = heap_allocator();
+	char const *profile = gb_get_env("ODIN_LLVM_PROFILE", a);
+	defer (gb_free(a, cast(void *)profile));
+	return profile != nullptr;
+}
+
+gb_internal GB_COMPARE_PROC(lb_llvm_emit_worker_profile_cmp) {
+	auto const *x = *cast(lbLLVMEmitWorker *const *)a;
+	auto const *y = *cast(lbLLVMEmitWorker *const *)b;
+	if (x->profile_ticks != y->profile_ticks) {
+		return x->profile_ticks > y->profile_ticks ? -1 : 1;
+	}
+	return string_compare(x->filepath_obj, y->filepath_obj);
+}
 
 gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 	GB_ASSERT(MULTITHREAD_OBJECT_GENERATION);
@@ -2381,6 +2399,7 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 	char *llvm_error = nullptr;
 
 	auto wd = cast(lbLLVMEmitWorker *)data;
+	u64 start = wd->profile_enabled ? time_stamp_time_now() : 0;
 
 	if (build_context.lto_kind != LTO_None) {
 		if (LLVMWriteBitcodeToFile(wd->m->mod, cast(char *)wd->filepath_obj.text)) {
@@ -2392,6 +2411,9 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 		gb_printf_err("LLVM Error: %s\n", llvm_error);
 		lb_record_worker_failure();
 		return 1;
+	}
+	if (wd->profile_enabled) {
+		wd->profile_ticks = time_stamp_time_now()-start;
 	}
 	debugf("Generated File: %.*s\n", LIT(wd->filepath_obj));
 	return 0;
@@ -2817,6 +2839,12 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 	defer (LLVMDisposeMessage(llvm_error));
 
 	if (do_threading) {
+		bool profile_enabled = lb_llvm_profile_enabled();
+		Array<lbLLVMEmitWorker *> profile_workers = {};
+		if (profile_enabled) {
+			array_init(&profile_workers, heap_allocator());
+		}
+		defer (array_free(&profile_workers));
 		for (auto const &entry : gen->modules) {
 			lbModule *m = entry.value;
 			if (lb_is_module_empty(m)) {
@@ -2833,11 +2861,28 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 			wd->code_gen_file_type = code_gen_file_type;
 			wd->filepath_obj = filepath_obj;
 			wd->m = m;
+			wd->profile_enabled = profile_enabled;
+			if (profile_enabled) {
+				array_add(&profile_workers, wd);
+			}
 			thread_pool_add_task(lb_llvm_emit_worker_proc, wd);
 		}
 
 		thread_pool_wait(&global_thread_pool);
 		lb_exit_if_worker_failed();
+		if (profile_enabled) {
+			array_sort(profile_workers, lb_llvm_emit_worker_profile_cmp);
+			f64 milliseconds_per_tick = 1000.0/cast(f64)time_stamp__freq();
+			isize count = gb_min(profile_workers.count, 20);
+			for (isize i = 0; i < count; i++) {
+				lbLLVMEmitWorker *wd = profile_workers[i];
+				String short_name = remove_directory_from_path(wd->filepath_obj);
+				gb_printf_err("LLVM object worker rank=%td ms=%.3f name=%.*s\n",
+					i+1,
+					cast(f64)wd->profile_ticks*milliseconds_per_tick,
+					LIT(short_name));
+			}
+		}
 	} else {
 		for (auto const &entry : gen->modules) {
 			lbModule *m = entry.value;
