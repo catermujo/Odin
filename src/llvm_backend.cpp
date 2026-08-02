@@ -2320,7 +2320,7 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 		}
 
 		for (Entity *e : m->global_procedures_to_create) {
-			mpsc_enqueue(&m->procedures_to_generate, lb_create_procedure(m, e));
+			(void)lb_create_procedure(m, e);
 		}
 	}
 
@@ -2330,6 +2330,14 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 		if (requester_module != procedure_module) {
 			(void)lb_create_procedure(requester_module, import.procedure, true);
 		}
+	}
+
+	for (Entity *e : plan.initial_procedure_bodies) {
+		lbModule *m = &gen->default_module;
+		if (USE_SEPARATE_MODULES) {
+			m = lb_module_of_entity(gen, e, m);
+		}
+		mpsc_enqueue(&m->procedures_to_generate, lb_create_procedure(m, e));
 	}
 	lb_procedure_import_preflight_finished.store(true, std::memory_order_relaxed);
 	debugf("Procedure import preflight complete\n");
