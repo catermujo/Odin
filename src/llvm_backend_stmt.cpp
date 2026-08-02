@@ -4543,6 +4543,16 @@ gb_internal void lb_build_defer_stmt(lbProcedure *p, lbDefer const &d) {
 	defer (p->context_stack.count = prev_context_stack_count);
 	p->context_stack.count = d.context_stack_count;
 
+	if (p->debug_info == nullptr &&
+	    (last_instr == nullptr || !LLVMIsATerminatorInst(last_instr))) {
+		if (d.kind == lbDefer_Node) {
+			lb_build_stmt(p, d.stmt);
+		} else if (d.kind == lbDefer_Proc) {
+			lb_emit_call(p, d.proc.deferred, d.proc.result_as_args);
+		}
+		return;
+	}
+
 	lbBlock *b = lb_create_block(p, "defer");
 	if (last_instr == nullptr || !LLVMIsATerminatorInst(last_instr)) {
 		lb_emit_jump(p, b);
