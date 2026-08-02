@@ -4536,12 +4536,15 @@ int main(int arg_count, char const **arg_ptr) {
 			return 1;
 		}
 
+		CodeGenGlobalPlan codegen_plan = {};
+		codegen_build_global_plan(&codegen_plan, &checker->info, permanent_allocator());
+
 		gbString label_code_gen = gb_string_make(heap_allocator(), "LLVM API Code Gen");
 		if (gen->modules.count > 1) {
 			label_code_gen = gb_string_append_fmt(label_code_gen, " ( %4td modules )", gen->modules.count);
 		}
 		MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
-		if (lb_generate_code(gen)) {
+		if (lb_generate_code(gen, codegen_plan)) {
 			switch (build_context.build_mode) {
 			case BuildMode_Executable:
 			case BuildMode_StaticLibrary:
