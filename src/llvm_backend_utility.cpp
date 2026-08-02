@@ -1764,13 +1764,19 @@ gb_internal lbValue lb_emit_array_ep(lbProcedure *p, lbValue s, lbValue index) {
 
 	LLVMValueRef indices[2] = {};
 	indices[0] = llvm_zero(p->module);
-	indices[1] = lb_emit_conv(p, index, t_int).value;
+	index = lb_emit_conv(p, index, t_int);
+	indices[1] = index.value;
 
 	Type *ptr = base_array_type(st);
 	lbValue res = {};
 
 	if (LLVMIsConstant(s.value) && LLVMIsConstant(index.value)) {
 		res.value = LLVMConstGEP2(lb_type(p->module, st), s.value, indices, gb_count_of(indices));
+	} else if (build_context.optimization_level < 0 && LLVMIsAConstantInt(indices[1])) {
+		u64 byte_offset_value = cast(u64)LLVMConstIntGetSExtValue(indices[1]) * cast(u64)lb_sizeof(lb_type(p->module, ptr));
+		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
+		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), s.value, &byte_offset, 1, "");
+		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, alloc_type_pointer(ptr)), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, st), s.value, indices, gb_count_of(indices), "");
 	}
