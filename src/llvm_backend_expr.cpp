@@ -2,6 +2,14 @@ gb_internal lbValue lb_emit_arith_matrix(lbProcedure *p, TokenKind op, lbValue l
 gb_internal lbValue lb_build_slice_expr_value(lbProcedure *p, Ast *expr);
 gb_internal lbValue lb_expand_values(lbProcedure *p, lbValue val, Type *type);
 
+gb_internal Type *lb_bool_result_type(Type *type) {
+	type = default_type(type);
+	if (build_context.optimization_level < 0 && is_type_boolean(type)) {
+		return t_llvm_bool;
+	}
+	return type;
+}
+
 gb_internal lbValue lb_emit_logical_binary_expr(lbProcedure *p, TokenKind op, Ast *left, Ast *right, Type *final_type) {
 	lbModule *m = p->module;
 
@@ -24,10 +32,13 @@ gb_internal lbValue lb_emit_logical_binary_expr(lbProcedure *p, TokenKind op, As
 
 	if (done->preds.count == 0) {
 		lb_start_block(p, rhs);
+		lbValue res = {};
 		if (lb_is_expr_untyped_const(right)) {
-			return lb_expr_untyped_const_to_typed(m, right, default_type(final_type));
+			res = lb_expr_untyped_const_to_typed(m, right, default_type(final_type));
+		} else {
+			res = lb_build_expr(p, right);
 		}
-		return lb_build_expr(p, right);
+		return lb_emit_conv(p, res, lb_bool_result_type(final_type));
 	}
 
 	Array<LLVMValueRef> incoming_values = {};
@@ -97,7 +108,7 @@ gb_internal lbValue lb_emit_logical_binary_expr(lbProcedure *p, TokenKind op, As
 		res.value = phi;
 		res.type = t_llvm_bool;
 	}
-	return lb_emit_conv(p, res, default_type(final_type));
+	return lb_emit_conv(p, res, lb_bool_result_type(final_type));
 }
 
 
@@ -199,7 +210,7 @@ gb_internal lbValue lb_emit_unary_arith(lbProcedure *p, TokenKind op, lbValue x,
 		LLVMValueRef zero =  LLVMConstInt(lb_type(p->module, x.type), 0, false);
 		cmp.value = LLVMBuildICmp(p->builder, LLVMIntEQ, x.value, zero, "");
 		cmp.type = t_llvm_bool;
-		return lb_emit_conv(p, cmp, type);
+		return lb_emit_conv(p, cmp, lb_bool_result_type(type));
 	}
 
 	if (op == Token_Sub && is_type_integer(type) && is_type_different_to_arch_endianness(type)) {
@@ -2130,9 +2141,9 @@ gb_internal lbValue lb_build_binary_in(lbProcedure *p, lbValue left, lbValue rig
 			lbValue key = left;
 			lbValue ptr = lb_internal_dynamic_map_get_ptr(p, map_ptr, key);
 			if (op == Token_in) {
-				return lb_emit_conv(p, lb_emit_comp_against_nil(p, Token_NotEq, ptr), t_bool);
+				return lb_emit_conv(p, lb_emit_comp_against_nil(p, Token_NotEq, ptr), lb_bool_result_type(t_bool));
 			} else {
-				return lb_emit_conv(p, lb_emit_comp_against_nil(p, Token_CmpEq, ptr), t_bool);
+				return lb_emit_conv(p, lb_emit_comp_against_nil(p, Token_CmpEq, ptr), lb_bool_result_type(t_bool));
 			}
 		}
 		break;
@@ -2157,9 +2168,9 @@ gb_internal lbValue lb_build_binary_in(lbProcedure *p, lbValue left, lbValue rig
 			lbValue new_value = lb_emit_arith(p, Token_And, old_value, bit, it);
 
 			if (op == Token_in) {
-				return lb_emit_conv(p, lb_emit_comp(p, Token_NotEq, new_value, lb_const_int(p->module, new_value.type, 0)), t_bool);
+				return lb_emit_conv(p, lb_emit_comp(p, Token_NotEq, new_value, lb_const_int(p->module, new_value.type, 0)), lb_bool_result_type(t_bool));
 			} else {
-				return lb_emit_conv(p, lb_emit_comp(p, Token_CmpEq, new_value, lb_const_int(p->module, new_value.type, 0)), t_bool);
+				return lb_emit_conv(p, lb_emit_comp(p, Token_CmpEq, new_value, lb_const_int(p->module, new_value.type, 0)), lb_bool_result_type(t_bool));
 			}
 		}
 		break;
@@ -2225,13 +2236,13 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 			// `x == nil` or `x != nil`
 			lbValue left = lb_build_expr(p, be->left);
 			lbValue cmp = lb_emit_comp_against_nil(p, be->op.kind, left);
-			Type *type = default_type(tv.type);
+			Type *type = lb_bool_result_type(tv.type);
 			return lb_emit_conv(p, cmp, type);
 		} else if (is_type_untyped_nil(be->left->tav.type)) {
 			// `nil == x` or `nil != x`
 			lbValue right = lb_build_expr(p, be->right);
 			lbValue cmp = lb_emit_comp_against_nil(p, be->op.kind, right);
-			Type *type = default_type(tv.type);
+			Type *type = lb_bool_result_type(tv.type);
 			return lb_emit_conv(p, cmp, type);
 		} else if (lb_is_empty_string_constant(be->right) && !is_type_union(be->left->tav.type)) {
 			// `x == ""` or `x != ""`
@@ -2243,7 +2254,7 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 			s = lb_emit_conv(p, s, str_type);
 			lbValue len = lb_string_len(p, s);
 			lbValue cmp = lb_emit_comp(p, be->op.kind, len, lb_const_int(p->module, t_int, 0));
-			Type *type = default_type(tv.type);
+			Type *type = lb_bool_result_type(tv.type);
 			return lb_emit_conv(p, cmp, type);
 		} else if (lb_is_empty_string_constant(be->left) && !is_type_union(be->right->tav.type)) {
 			// `"" == x` or `"" != x`
@@ -2255,7 +2266,7 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 			s = lb_emit_conv(p, s, str_type);
 			lbValue len = lb_string_len(p, s);
 			lbValue cmp = lb_emit_comp(p, be->op.kind, len, lb_const_int(p->module, t_int, 0));
-			Type *type = default_type(tv.type);
+			Type *type = lb_bool_result_type(tv.type);
 			return lb_emit_conv(p, cmp, type);
 		}
 		/*fallthrough*/
@@ -2276,7 +2287,7 @@ gb_internal lbValue lb_build_binary_expr(lbProcedure *p, Ast *expr) {
 			if (left.value == nullptr)  left  = lb_build_expr(p, be->left);
 			if (right.value == nullptr) right = lb_build_expr(p, be->right);
 			lbValue cmp = lb_emit_comp(p, be->op.kind, left, right);
-			Type *type = default_type(tv.type);
+			Type *type = lb_bool_result_type(tv.type);
 			return lb_emit_conv(p, cmp, type);
 		}
 
@@ -2518,6 +2529,11 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 	}
 	if (is_type_untyped_nil(src)) {
 		return lb_const_nil(m, t);
+	}
+	if (is_type_any(dst) && src == t_llvm_bool) {
+		value = lb_emit_conv(p, value, t_bool);
+		src_type = value.type;
+		src = core_type(src_type);
 	}
 
 	if (LLVMIsConstant(value.value)) {
@@ -3544,7 +3560,6 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 		if (is_type_untyped_nil(src)) {
 			return lb_const_nil(p->module, t);
 		}
-
 		Type *st = default_type(src_type);
 
 		lbValue data = lb_address_from_load_or_generate_local(p, value);
@@ -3613,6 +3628,10 @@ gb_internal lbValue lb_emit_c_vararg(lbProcedure *p, lbValue arg, Type *type) {
 	if (core->kind == Type_BitSet) {
 		core = core_type(bit_set_to_int(core));
 		arg  = lb_emit_transmute(p, arg, core);
+	}
+	if (core == t_llvm_bool) {
+		arg = lb_emit_conv(p, arg, t_bool);
+		core = t_bool;
 	}
 
 	Type *promoted = c_vararg_promote_type(core);
