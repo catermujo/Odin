@@ -672,6 +672,11 @@ try_cross_linking:;
 				clang_path = "clang";
 				has_odin_clang_path_env = false;
 			}
+			#if defined(GB_SYSTEM_OSX) && defined(ODIN_LLVM_CLANG_PATH)
+				if (!has_odin_clang_path_env && build_context.sanitizer_flags != SanitizerFlag_NONE) {
+					clang_path = ODIN_LLVM_CLANG_PATH;
+				}
+			#endif
 
 			// NOTE(vassvik): needs to add the root to the library search paths, so that the full filenames of the library
 			//                files can be passed with -l:
