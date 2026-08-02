@@ -1840,6 +1840,14 @@ gb_internal lbValue lb_emit_ptr_offset(lbProcedure *p, lbValue ptr, lbValue inde
 
 	if (lb_is_const(ptr) && lb_is_const(index)) {
 		res.value = LLVMConstGEP2(type, ptr.value, indices, 1);
+	} else if (build_context.optimization_level < 0 && !LLVMIsConstant(index.value)) {
+		u64 elem_size = lb_sizeof(type);
+		LLVMValueRef byte_offset = index.value;
+		if (elem_size != 1) {
+			byte_offset = LLVMBuildMul(p->builder, byte_offset, LLVMConstInt(lb_type(p->module, t_int), elem_size, false), "");
+		}
+		res.value = lb_emit_byte_gep(p, ptr.value, byte_offset);
+		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, res.type), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, type, ptr.value, indices, 1, "");
 	}
