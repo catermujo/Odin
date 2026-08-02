@@ -1287,6 +1287,17 @@ gb_internal lbValue lb_emit_struct_ep_internal(lbProcedure *p, lbValue s, i32 in
 		GB_ASSERT_MSG(count >= cast(unsigned)index, "%u %d %d", count, index, original_index);
 
 		res.type = alloc_type_pointer(result_type);
+		if (build_context.optimization_level < 0 &&
+		    is_type_struct(t) && !is_type_raw_union(t) &&
+		    t->Struct.soa_kind == StructSoa_None && !t->Struct.is_packed &&
+		    t->Struct.custom_min_field_align == 0 && t->Struct.custom_max_field_align == 0 &&
+		    gb_is_between(original_index, 0, t->Struct.fields.count-1)) {
+			i64 offset = type_offset_of(t, original_index);
+			LLVMValueRef byte_offset = LLVMConstInt(lb_type(m, t_int), offset, false);
+			res.value = LLVMBuildGEP2(p->builder, lb_type(m, t_u8), s.value, &byte_offset, 1, "");
+			res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(m, res.type), "");
+			return res;
+		}
 		res.value = LLVMBuildStructGEP2(p->builder, st, s.value, cast(unsigned)index, "");
 		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(m, res.type), "");
 		return res;
