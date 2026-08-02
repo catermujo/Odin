@@ -1788,7 +1788,7 @@ gb_internal lbValue lb_emit_array_ep(lbProcedure *p, lbValue s, lbValue index) {
 		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
 		res.value = lb_emit_byte_gep(p, s.value, byte_offset);
 		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, alloc_type_pointer(ptr)), "");
-	} else if (build_context.optimization_level < 0 && !LLVMIsConstant(indices[1]) && (is_type_array(st) || is_type_enumerated_array(st))) {
+	} else if (build_context.optimization_level < 0 && !LLVMIsConstant(indices[1]) && (is_type_array(st) || is_type_enumerated_array(st) || is_type_matrix(st))) {
 		u64 elem_size = lb_sizeof(lb_type(p->module, ptr));
 		LLVMValueRef byte_offset = indices[1];
 		if (elem_size != 1) {
