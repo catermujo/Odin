@@ -3405,6 +3405,29 @@ gb_internal LLVMValueRef OdinLLVMBuildTransmute(lbProcedure *p, LLVMValueRef val
 	LLVMTypeKind src_kind = LLVMGetTypeKind(src_type);
 	LLVMTypeKind dst_kind = LLVMGetTypeKind(dst_type);
 
+	LLVMTypeRef llvm_i64 = LLVMInt64TypeInContext(ctx);
+	if (src_type == lb_type(p->module, t_string) &&
+	    LLVMIsConstant(val) &&
+	    build_context.metrics.ptr_size == 8 &&
+	    build_context.metrics.int_size == 8 &&
+	    dst_kind == LLVMArrayTypeKind &&
+	    LLVMGetArrayLength(dst_type) == 2 &&
+	    OdinLLVMGetArrayElementType(dst_type) == llvm_i64) {
+		if (LLVMIsNull(val)) {
+			return LLVMConstNull(dst_type);
+		}
+
+		LLVMValueRef data = LLVMGetAggregateElement(val, 0);
+		LLVMValueRef len = LLVMGetAggregateElement(val, 1);
+		if (data != nullptr && len != nullptr) {
+			LLVMValueRef values[2] = {
+				LLVMConstPtrToInt(data, llvm_i64),
+				len,
+			};
+			return LLVMConstArray(llvm_i64, values, gb_count_of(values));
+		}
+	}
+
 	if ((src_kind == LLVMStructTypeKind || src_kind == LLVMArrayTypeKind) &&
 	    (dst_kind == LLVMStructTypeKind || dst_kind == LLVMArrayTypeKind) &&
 	    src_size == dst_size &&
