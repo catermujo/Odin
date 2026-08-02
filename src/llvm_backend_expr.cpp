@@ -6723,8 +6723,11 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 	}
 
 	bool is_raw_union = st->is_raw_union;
+	bool materialize_large_fields = !is_raw_union && lb_sizeof(lb_type(p->module, type)) > 64;
 
-	lb_build_addr_compound_lit_store_constant(p, v, type, expr);
+	if (!materialize_large_fields) {
+		lb_build_addr_compound_lit_store_constant(p, v, type, expr);
+	}
 	lbValue comp_lit_ptr = lb_addr_get_ptr(p, v);
 
 	if (cl->elems[0]->kind == Ast_FieldValue) {
@@ -6739,7 +6742,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 
 			elem = fv->value;
 			if (sel.index.count > 1) {
-				if (lb_is_nested_possibly_constant(type, sel, elem)) {
+				if (!materialize_large_fields && lb_is_nested_possibly_constant(type, sel, elem)) {
 					continue;
 				}
 				field_expr = lb_build_expr(p, elem);
@@ -6769,7 +6772,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 
 			field = st->fields[index];
 			Type *ft = field->type;
-			if (!is_raw_union && !is_type_typeid(ft) && lb_is_elem_const(elem, ft)) {
+			if (!materialize_large_fields && !is_raw_union && !is_type_typeid(ft) && lb_is_elem_const(elem, ft)) {
 				continue;
 			}
 
@@ -6816,7 +6819,7 @@ gb_internal void lb_build_addr_struct_compound_lit_populate(lbProcedure *p, Ast 
 
 		Entity *field = st->fields[index];
 		Type *ft = field->type;
-		if (!is_type_typeid(ft) && lb_is_elem_const(elem, ft)) {
+		if (!materialize_large_fields && !is_type_typeid(ft) && lb_is_elem_const(elem, ft)) {
 			continue;
 		}
 
