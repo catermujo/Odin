@@ -96,6 +96,7 @@ LLVM_VERSION="$($LLVM_CONFIG --version)"
 LLVM_VERSION_MAJOR="$(echo $LLVM_VERSION | awk -F. '{print $1}')"
 LLVM_VERSION_MINOR="$(echo $LLVM_VERSION | awk -F. '{print $2}')"
 LLVM_VERSION_PATCH="$(echo $LLVM_VERSION | awk -F. '{print $3}')"
+CPPFLAGS="$CPPFLAGS -DODIN_LLVM_CLANG_PATH=\"$($LLVM_CONFIG --bindir)/clang\""
 
 if [ $LLVM_VERSION_MAJOR -lt $MINIMUM_LLVM_VERSION ]; then
 	error "Unsupported LLVM version $LLVM_VERSION: must be 17, 18, 19, 20, 21 or 22"
