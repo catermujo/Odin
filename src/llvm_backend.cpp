@@ -2625,20 +2625,6 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 }
 
 
-gb_internal WORKER_TASK_PROC(lb_generate_procedures_and_types_per_module) {
-	lbModule *m = cast(lbModule *)data;
-	for (Entity *e : m->global_types_to_create) {
-		(void)lb_get_entity_name(m, e);
-		(void)lb_type(m, e->type);
-	}
-
-	for (Entity *e : m->global_procedures_to_create) {
-		(void)lb_get_entity_name(m, e);
-		mpsc_enqueue(&m->procedures_to_generate, lb_create_procedure(m, e));
-	}
-	return 0;
-}
-
 gb_internal GB_COMPARE_PROC(llvm_global_entity_cmp) {
 	Entity *x = *cast(Entity **)a;
 	Entity *y = *cast(Entity **)b;
@@ -2661,7 +2647,8 @@ gb_internal GB_COMPARE_PROC(llvm_global_entity_cmp) {
 
 gb_internal Array<lbModule *> lb_modules_by_cost(lbGenerator *gen);
 
-gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, CheckerInfo *info, bool do_threading) {
+gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, CheckerInfo *info) {
+	lb_procedure_import_preflight_finished.store(false, std::memory_order_relaxed);
 	CodeGenGlobalPlan plan = {};
 	codegen_build_global_plan(&plan, info, permanent_allocator());
 
@@ -2705,19 +2692,26 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 	}
 
 	gen->modules_in_parallel = true;
-	if (do_threading) {
-		for (lbModule *m : lb_modules_by_cost(gen)) {
-			thread_pool_add_task(lb_generate_procedures_and_types_per_module, m);
-		}
-	} else {
-		for (auto const &entry : gen->modules) {
-			lbModule *m = entry.value;
-			lb_generate_procedures_and_types_per_module(m);
+	for (auto const &entry : gen->modules) {
+		lbModule *m = entry.value;
+		for (Entity *e : m->global_types_to_create) {
+			(void)lb_type(m, e->type);
 		}
 
+		for (Entity *e : m->global_procedures_to_create) {
+			mpsc_enqueue(&m->procedures_to_generate, lb_create_procedure(m, e));
+		}
 	}
 
-	thread_pool_wait();
+	for (CodeGenProcedureImport const &import : plan.procedure_imports) {
+		lbModule *requester_module = lb_module_of_entity(gen, import.requester, &gen->default_module);
+		lbModule *procedure_module = lb_module_of_entity(gen, import.procedure, &gen->default_module);
+		if (requester_module != procedure_module) {
+			(void)lb_create_procedure(requester_module, import.procedure, true);
+		}
+	}
+	lb_procedure_import_preflight_finished.store(true, std::memory_order_relaxed);
+	debugf("Procedure import preflight complete\n");
 }
 
 gb_internal void lb_generate_procedure(lbModule *m, lbProcedure *p);
@@ -3908,7 +3902,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	}
 
 	TIME_SECTION("LLVM Global Procedures and Types");
-	lb_create_global_procedures_and_types(gen, info, do_threading);
+	lb_create_global_procedures_and_types(gen, info);
 
 	TIME_SECTION("LLVM Procedure Generation");
 	lb_generate_procedures(gen, do_threading);
