@@ -1287,11 +1287,22 @@ gb_internal lbValue lb_emit_struct_ep_internal(lbProcedure *p, lbValue s, i32 in
 		GB_ASSERT_MSG(count >= cast(unsigned)index, "%u %d %d", count, index, original_index);
 
 		res.type = alloc_type_pointer(result_type);
+		bool is_plain_struct =
+			is_type_struct(t) && !is_type_raw_union(t) &&
+			t->Struct.soa_kind == StructSoa_None && !t->Struct.is_packed &&
+			t->Struct.custom_min_field_align == 0 && t->Struct.custom_max_field_align == 0 &&
+			gb_is_between(original_index, 0, t->Struct.fields.count-1);
+		bool is_plain_pair =
+			(is_type_slice(t) || is_type_string(t) || is_type_string16(t) || is_type_any(t)) &&
+			gb_is_between(original_index, 0, 1);
+		bool is_plain_dynamic_array =
+			is_type_dynamic_array(t) && gb_is_between(original_index, 0, 3);
+		bool is_plain_fixed_capacity_dynamic_array =
+			is_type_fixed_capacity_dynamic_array(t) && gb_is_between(original_index, 0, 1);
+
 		if (build_context.optimization_level < 0 &&
-		    is_type_struct(t) && !is_type_raw_union(t) &&
-		    t->Struct.soa_kind == StructSoa_None && !t->Struct.is_packed &&
-		    t->Struct.custom_min_field_align == 0 && t->Struct.custom_max_field_align == 0 &&
-		    gb_is_between(original_index, 0, t->Struct.fields.count-1)) {
+		    (is_plain_struct || is_plain_pair || is_plain_dynamic_array ||
+		     is_plain_fixed_capacity_dynamic_array)) {
 			i64 offset = type_offset_of(t, original_index);
 			LLVMValueRef byte_offset = LLVMConstInt(lb_type(m, t_int), offset, false);
 			res.value = lb_emit_byte_gep(p, s.value, byte_offset);
