@@ -1915,6 +1915,14 @@ gb_internal lbValue lb_emit_matrix_ep(lbProcedure *p, lbValue s, lbValue row, lb
 	lbValue res = {};
 	if (lb_is_const(s)) {
 		res.value = LLVMConstGEP2(type, s.value, indices, gb_count_of(indices));
+	} else if (build_context.optimization_level < 0) {
+		u64 elem_size = lb_sizeof(lb_type(p->module, ptr));
+		LLVMValueRef byte_offset = index;
+		if (elem_size != 1) {
+			byte_offset = LLVMBuildMul(p->builder, byte_offset, LLVMConstInt(lb_type(p->module, t_int), elem_size, false), "");
+		}
+		res.value = lb_emit_byte_gep(p, s.value, byte_offset);
+		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, alloc_type_pointer(ptr)), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, type, s.value, indices, gb_count_of(indices), "");
 	}
