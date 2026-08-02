@@ -6,6 +6,7 @@ struct CodeGenProcedureImport {
 struct CodeGenGlobalPlan {
 	Array<Entity *>                 constants;
 	Array<Entity *>                 global_entities;
+	Array<Entity *>                 initial_procedure_bodies;
 	Array<CodeGenProcedureImport> procedure_imports;
 };
 
