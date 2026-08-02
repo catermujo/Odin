@@ -3972,6 +3972,7 @@ gb_internal bool is_literal_type(Ast *node) {
 	switch (node->kind) {
 	case Ast_BadExpr:
 	case Ast_Ident:
+	case Ast_TypeidType:
 	case Ast_SelectorExpr:
 	case Ast_ArrayType:
 	case Ast_StructType:
