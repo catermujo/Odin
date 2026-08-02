@@ -1351,7 +1351,7 @@ gb_internal lbValue lb_emit_conjugate(lbProcedure *p, lbValue val, Type *type) {
 	return lb_emit_load(p, res);
 }
 
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining, ProcTailing tailing, lbValue *sret_dst, Ast *call_expression) {
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining, ProcTailing tailing, lbValue *sret_dst, Ast *call_expression, bool preserve_indirect_results) {
 	lbModule *m = p->module;
 
 	Type *pt = base_type(value.type);
@@ -1484,15 +1484,19 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 			rt = reduce_tuple_to_single_type(rt->Tuple.variables[rt->Tuple.variables.count-1]->type);
 		}
 
+		lbValue return_ptr = {};
 		if (return_by_pointer) {
-			lbValue return_ptr = {};
 			if (sret_dst != nullptr) {
 				return_ptr = *sret_dst;
 			} else {
 				return_ptr = lb_add_local_generated(p, rt, true).addr;
 			}
 			lb_emit_call_internal(p, value, return_ptr, processed_args, nullptr, context_ptr, inlining, tailing, closure_env);
-			result = lb_emit_load(p, return_ptr);
+			if (preserve_indirect_results && split_returns) {
+				result.type = rt;
+			} else {
+				result = lb_emit_load(p, return_ptr);
+			}
 		} else if (rt != nullptr) {
 			result = lb_emit_call_internal(p, value, {}, processed_args, rt, context_ptr, inlining, tailing, closure_env);
 			if (ft->ret.coerce_offsets.count > 0) {
@@ -1529,19 +1533,30 @@ gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> c
 			isize ret_count = original_rt->Tuple.variables.count;
 
 			auto tuple_fix_values = slice_make<lbValue>(permanent_allocator(), ret_count);
+			auto indirect_result_ptrs = slice_make<lbValue>(permanent_allocator(), ret_count);
 			auto tuple_geps = slice_make<lbValue>(permanent_allocator(), ret_count);
 
 			isize offset = ft->original_arg_count - ignored_args;
 			for (isize j = 0; j < ret_count-1; j++) {
 				lbValue ret_arg_ptr = processed_args[offset + j];
-				lbValue ret_arg = lb_emit_load(p, ret_arg_ptr);
-				tuple_fix_values[j] = ret_arg;
+				Type *partial_return_type = original_rt->Tuple.variables[j]->type;
+				if (preserve_indirect_results) {
+					tuple_fix_values[j].type = partial_return_type;
+					indirect_result_ptrs[j] = ret_arg_ptr;
+				} else {
+					tuple_fix_values[j] = lb_emit_load(p, ret_arg_ptr);
+				}
 			}
-			tuple_fix_values[ret_count-1] = result;
+			if (preserve_indirect_results && return_by_pointer) {
+				tuple_fix_values[ret_count-1].type = rt;
+				indirect_result_ptrs[ret_count-1] = return_ptr;
+			} else {
+				tuple_fix_values[ret_count-1] = result;
+			}
 
 			result = lb_emit_load(p, result_ptr);
 
-			lbTupleFix tf = {tuple_fix_values};
+			lbTupleFix tf = {tuple_fix_values, indirect_result_ptrs};
 			map_set(&p->tuple_fix_map, result_ptr.value, tf);
 			map_set(&p->tuple_fix_map, result.value, tf);
 		}
@@ -5185,13 +5200,13 @@ gb_internal lbValue lb_handle_param_value(lbProcedure *p, Type *parameter_type, 
 }
 
 
-gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbValue *sret_dst = nullptr);
+gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbValue *sret_dst = nullptr, bool preserve_indirect_results = false);
 
-gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_dst) {
+gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_dst, bool preserve_indirect_results) {
 	expr = unparen_expr(expr);
 	ast_node(ce, CallExpr, expr);
 
-	lbValue res = lb_build_call_expr_internal(p, expr, sret_dst);
+	lbValue res = lb_build_call_expr_internal(p, expr, sret_dst, preserve_indirect_results);
 
 	if (ce->optional_ok_one) {
 		GB_ASSERT(is_type_tuple(res.type));
@@ -5324,7 +5339,7 @@ gb_internal lbValue lb_build_variadic_slice(lbProcedure *p, Type *slice_type, Sl
 	return lb_addr_load(p, slice);
 }
 
-gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbValue *sret_dst) {
+gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbValue *sret_dst, bool preserve_indirect_results) {
 	lbModule *m = p->module;
 
 	TypeAndValue tv = type_and_value_of_expr(expr);
@@ -5635,6 +5650,6 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr, lbVal
 		GB_ASSERT(value.value == nullptr);
 		return lb_emit_asm_template_call(p, asm_template, call_args);
 	} else {
-		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst, expr);
+		return lb_emit_call(p, value, call_args, inlining, tailing, sret_dst, expr, preserve_indirect_results);
 	}
 }

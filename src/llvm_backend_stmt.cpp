@@ -2604,6 +2604,41 @@ gb_internal isize lb_append_tuple_values(lbProcedure *p, Array<lbValue> *dst_val
 	return dst_values->count - init_count;
 }
 
+gb_internal isize lb_append_tuple_values_for_assignment(lbProcedure *p, Array<lbValue> *dst_values, Array<lbValue> *indirect_result_ptrs, lbValue src_value) {
+	isize init_count = dst_values->count;
+	if (is_type_tuple(src_value.type)) {
+		lbTupleFix *tf = map_get(&p->tuple_fix_map, src_value.value);
+		if (tf != nullptr && tf->indirect_result_ptrs.count > 0) {
+			GB_ASSERT(tf->values.count == tf->indirect_result_ptrs.count);
+			for_array(i, tf->values) {
+				array_add(dst_values, tf->values[i]);
+				array_add(indirect_result_ptrs, tf->indirect_result_ptrs[i]);
+			}
+			return dst_values->count - init_count;
+		}
+	}
+
+	lb_append_tuple_values(p, dst_values, src_value);
+	for (isize i = init_count; i < dst_values->count; i++) {
+		array_add(indirect_result_ptrs, {});
+	}
+	return dst_values->count - init_count;
+}
+
+gb_internal void lb_store_assignment_value(lbProcedure *p, lbAddr lval, lbValue init, lbValue indirect_result_ptr) {
+	if (lval.addr.value == nullptr) {
+		return;
+	}
+	if (indirect_result_ptr.value != nullptr && lval.kind == lbAddr_Default && are_types_identical(init.type, lb_addr_type(lval))) {
+		lb_mem_copy_non_overlapping(p, lval.addr, indirect_result_ptr, lb_const_int(p->module, t_int, type_size_of(init.type)));
+		return;
+	}
+	if (indirect_result_ptr.value != nullptr) {
+		init = lb_emit_load(p, indirect_result_ptr);
+	}
+	lb_addr_store(p, lval, init);
+}
+
 
 gb_internal void lb_build_assignment(lbProcedure *p, Array<lbAddr> &lvals, Slice<Ast *> const &values) {
 	if (values.count == 0) {
@@ -2611,10 +2646,16 @@ gb_internal void lb_build_assignment(lbProcedure *p, Array<lbAddr> &lvals, Slice
 	}
 
 	auto inits = array_make<lbValue>(permanent_allocator(), 0, lvals.count);
+	auto indirect_result_ptrs = array_make<lbValue>(permanent_allocator(), 0, lvals.count);
+	Ast *single_rhs = values.count == 1 ? unparen_expr(values[0]) : nullptr;
+	bool preserve_indirect_results = single_rhs != nullptr &&
+	                                 lvals.count > 1 &&
+	                                 single_rhs->kind == Ast_CallExpr &&
+	                                 !single_rhs->CallExpr.optional_ok_one;
 
 	for (Ast *rhs : values) {
-		lbValue init = lb_build_expr(p, rhs);
-		lb_append_tuple_values(p, &inits, init);
+		lbValue init = preserve_indirect_results ? lb_build_call_expr(p, rhs, nullptr, true) : lb_build_expr(p, rhs);
+		lb_append_tuple_values_for_assignment(p, &inits, &indirect_result_ptrs, init);
 	}
 
 	bool prev_in_assignment = p->in_multi_assignment;
@@ -2629,10 +2670,9 @@ gb_internal void lb_build_assignment(lbProcedure *p, Array<lbAddr> &lvals, Slice
 	p->in_multi_assignment = lval_count > 1;
 
 	GB_ASSERT(lvals.count == inits.count);
+	GB_ASSERT(inits.count == indirect_result_ptrs.count);
 	for_array(i, inits) {
-		lbAddr lval = lvals[i];
-		lbValue init = inits[i];
-		lb_addr_store(p, lval, init);
+		lb_store_assignment_value(p, lvals[i], inits[i], indirect_result_ptrs[i]);
 	}
 
 	p->in_multi_assignment = prev_in_assignment;
