@@ -407,6 +407,22 @@ gb_internal void lb_make_global_private_const(lbAddr const &addr) {
 	lb_make_global_private_const(addr.addr.value);
 }
 
+gb_internal LLVMValueRef lb_emit_byte_gep(lbProcedure *p, LLVMValueRef base, LLVMValueRef byte_offset) {
+	if (LLVMIsAConstantInt(byte_offset) &&
+	    LLVMGetValueKind(base) == LLVMInstructionValueKind &&
+	    LLVMGetInstructionOpcode(base) == LLVMGetElementPtr &&
+	    !LLVMIsInBounds(base) &&
+	    LLVMGetNumOperands(base) == 2 &&
+	    LLVMGetGEPSourceElementType(base) == lb_type(p->module, t_u8) &&
+	    LLVMIsAConstantInt(LLVMGetOperand(base, 1))) {
+		LLVMValueRef old_byte_offset = LLVMGetOperand(base, 1);
+		base = LLVMGetOperand(base, 0);
+		byte_offset = LLVMConstInt(lb_type(p->module, t_int),
+		                              LLVMConstIntGetZExtValue(old_byte_offset) + LLVMConstIntGetZExtValue(byte_offset), false);
+	}
+	return LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), base, &byte_offset, 1, "");
+}
+
 
 
 // This emits a GEP at 0, index
@@ -428,7 +444,7 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 	           (is_type_array(type) || is_type_enumerated_array(type))) {
 		u64 byte_offset_value = cast(u64)index * cast(u64)lb_sizeof(lb_type(p->module, ptr));
 		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
-		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), value.value, &byte_offset, 1, "");
+		res.value = lb_emit_byte_gep(p, value.value, byte_offset);
 		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, res.type), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, llvm_type, value.value, indices, gb_count_of(indices), "");
