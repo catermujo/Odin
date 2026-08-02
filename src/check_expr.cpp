@@ -12537,6 +12537,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 		}
 
 		i64 max = 0;
+		bool has_mixed_elements = false;
 
 		Type *bet = base_type(elem_type);
 		if (!elem_type_can_be_constant(bet)) {
@@ -12685,6 +12686,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 
 				if (e->kind == Ast_FieldValue) {
 					error(e, "Mixture of 'field = value' and value elements in a literal is not allowed");
+					has_mixed_elements = true;
 					continue;
 				}
 
@@ -12707,7 +12709,61 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 		}
 
 		bool was_error = false;
-		if (cl->elems.count > 0 && cl->elems[0]->kind != Ast_FieldValue) {
+		bool is_complete_positional = cl->elems.count > 0 &&
+		                              cl->elems[0]->kind != Ast_FieldValue &&
+		                              !has_mixed_elements &&
+		                              !is_partial &&
+		                              !t->EnumeratedArray.is_sparse &&
+		                              max == t->EnumeratedArray.count;
+		if (is_complete_positional) {
+			Type *enum_type = base_type(index_type);
+			GB_ASSERT(enum_type->kind == Type_Enum);
+
+			for_array(i, cl->elems) {
+				i64 index = total_lo + i;
+				isize field_count = 0;
+				for (Entity *f : enum_type->Enum.fields) {
+					if (f->kind == Entity_Constant && exact_value_to_i64(f->Constant.value) == index) {
+						field_count += 1;
+					}
+				}
+				if (field_count != 1) {
+					is_complete_positional = false;
+					break;
+				}
+			}
+		}
+		if (is_complete_positional) {
+			Type *enum_type = base_type(index_type);
+
+			auto elems = array_make<Ast *>(ast_allocator(node->thread_safe_file()), 0, cl->elems.count);
+			for_array(i, cl->elems) {
+				i64 index = total_lo + i;
+				Entity *field = nullptr;
+				for (Entity *f : enum_type->Enum.fields) {
+					if (f->kind == Entity_Constant && exact_value_to_i64(f->Constant.value) == index) {
+						field = f;
+						break;
+					}
+				}
+				if (field == nullptr) {
+					is_complete_positional = false;
+					break;
+				}
+
+				Ast *field_expr = clone_ast(field->identifier.load(), node->thread_safe_file());
+				add_type_and_value(c, field_expr, Addressing_Constant, index_type, field->Constant.value);
+
+				Token eq = cl->open;
+				eq.kind = Token_Eq;
+				eq.string = str_lit("=");
+				array_add(&elems, ast_field_value(node->thread_safe_file(), field_expr, cl->elems[i], eq));
+			}
+			if (is_complete_positional) {
+				cl->elems = slice_from_array(elems);
+			}
+		}
+		if (cl->elems.count > 0 && cl->elems[0]->kind != Ast_FieldValue && !is_complete_positional) {
 			if (0 < max && max < t->EnumeratedArray.count) {
 				error(node, "Expected %lld values for this enumerated array literal, got %lld", cast(long long)t->EnumeratedArray.count, cast(long long)max);
 				was_error = true;
@@ -12718,7 +12774,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 		}
 
 		// NOTE(bill): Check for missing cases when `#partial literal` is not present
-		if (cl->elems.count > 0 && !was_error && !is_partial) {
+		if (cl->elems.count > 0 && !was_error && !is_partial && !is_complete_positional) {
 			TEMPORARY_ALLOCATOR_GUARD();
 
 			Type *et = base_type(index_type);
