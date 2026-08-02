@@ -424,6 +424,12 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 	res.type = alloc_type_pointer(ptr);
 	if (LLVMIsConstant(value.value)) {
 		res.value = LLVMConstGEP2(llvm_type, value.value, indices, gb_count_of(indices));
+	} else if (build_context.optimization_level < 0 &&
+	           (is_type_array(type) || is_type_enumerated_array(type))) {
+		u64 byte_offset_value = cast(u64)index * cast(u64)lb_sizeof(lb_type(p->module, ptr));
+		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
+		res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), value.value, &byte_offset, 1, "");
+		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, res.type), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, llvm_type, value.value, indices, gb_count_of(indices), "");
 	}
