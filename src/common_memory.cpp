@@ -77,6 +77,9 @@ gb_global isize DEFAULT_PAGE_SIZE = 4096;
 
 gb_internal MemoryBlock *virtual_memory_alloc(isize size, bool commit);
 gb_internal void virtual_memory_dealloc(MemoryBlock *block);
+#if defined(GB_SYSTEM_WINDOWS)
+gb_internal void virtual_memory_commit(MemoryBlock *block);
+#endif
 gb_internal void *arena_alloc(Arena *arena, isize min_size, isize alignment);
 gb_internal void arena_free_all(Arena *arena);
 
@@ -116,7 +119,12 @@ gb_internal void *arena_alloc(Arena *arena, isize min_size, isize alignment) {
 		
 		isize block_size = gb_max(size, arena->minimum_block_size);
 		
-		MemoryBlock *new_block = virtual_memory_alloc(block_size, true);
+		#if defined(GB_SYSTEM_WINDOWS)
+		bool commit = false;
+		#else
+		bool commit = true;
+		#endif
+		MemoryBlock *new_block = virtual_memory_alloc(block_size, commit);
 		new_block->prev = arena->curr_block;
 		arena->curr_block = new_block;
 	}
@@ -129,6 +137,10 @@ gb_internal void *arena_alloc(Arena *arena, isize min_size, isize alignment) {
 	
 	curr_block->used += size;
 	GB_ASSERT(curr_block->used <= curr_block->size);
+
+	#if defined(GB_SYSTEM_WINDOWS)
+	virtual_memory_commit(curr_block);
+	#endif
 
 	// NOTE(bill): memory will be zeroed by default due to virtual memory 
 	return ptr;	
@@ -247,6 +259,13 @@ gb_internal bool  platform_virtual_memory_commit_internal(void *data, isize comm
 
 	gb_internal PlatformMemoryBlock *platform_virtual_memory_alloc(isize total_size, bool commit) {
 		PlatformMemoryBlock *pmblock = cast(PlatformMemoryBlock *)platform_virtual_memory_alloc_internal(total_size, commit);
+		if (pmblock == nullptr) {
+			return nullptr;
+		}
+		if (!commit) {
+			bool ok = platform_virtual_memory_commit_internal(pmblock, DEFAULT_PAGE_SIZE);
+			GB_ASSERT_MSG(ok, "Out of Virtual Memory, oh no...");
+		}
 		global_platform_memory_total_usage.fetch_add(total_size);
 		return pmblock;
 	}
@@ -352,7 +371,11 @@ gb_internal MemoryBlock *virtual_memory_alloc(isize size, bool commit) {
 	GB_ASSERT(pmblock->block.used == 0);
 	GB_ASSERT(pmblock->block.prev == nullptr);
 	
+	#if defined(GB_SYSTEM_WINDOWS)
+	if (do_protection && commit) {
+	#else
 	if (do_protection) {
+	#endif
 		platform_virtual_memory_protect(cast(u8 *)pmblock + protect_offset, page_size);
 	}
 	
@@ -369,6 +392,31 @@ gb_internal MemoryBlock *virtual_memory_alloc(isize size, bool commit) {
 	
 	return &pmblock->block;
 }
+
+#if defined(GB_SYSTEM_WINDOWS)
+gb_internal void virtual_memory_commit(MemoryBlock *block) {
+	// VirtualAlloc commits pages eagerly when MEM_RESERVE|MEM_COMMIT is used.
+	// Growing arenas reserve 8 MiB blocks, so commit only pages reached by this
+	// allocation to avoid exhausting the process commit limit on large inputs.
+	PlatformMemoryBlock *pmblock = cast(PlatformMemoryBlock *)block;
+	uintptr block_start = cast(uintptr)pmblock;
+	uintptr block_base  = cast(uintptr)block->base;
+	isize base_offset = cast(isize)(block_base - block_start);
+	isize current_commit_end = base_offset + block->committed;
+	isize needed_commit_end  = align_formula_isize(base_offset + block->used, DEFAULT_PAGE_SIZE);
+
+	if (needed_commit_end > current_commit_end) {
+		isize commit_start = current_commit_end;
+		if (block->committed == 0) {
+			commit_start = base_offset - base_offset % DEFAULT_PAGE_SIZE;
+		}
+		isize commit_amount = needed_commit_end - commit_start;
+		bool ok = platform_virtual_memory_commit_internal(cast(u8 *)pmblock + commit_start, commit_amount);
+		GB_ASSERT_MSG(ok, "Out of Virtual Memory, oh no...");
+		block->committed = needed_commit_end - base_offset;
+	}
+}
+#endif
 
 gb_internal void virtual_memory_dealloc(MemoryBlock *block_to_free) {
 	PlatformMemoryBlock *block = cast(PlatformMemoryBlock *)block_to_free;
@@ -795,4 +843,3 @@ gb_internal isize resize_array_raw(T **array, gbAllocator const &a, isize old_co
 	*array = new_data;
 	return new_count;
 }
-
