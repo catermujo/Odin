@@ -2400,7 +2400,7 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 					cc.link_section = e->Variable.link_section;
 
 					ExactValue v = tav.value;
-					lbValue init = lb_const_value(m, e->type, v, cc);
+					lbValue init = lb_const_value(m, e->type, v, tav.type, cc, decl->init_expr);
 
 					LLVMDeleteGlobal(g.value);
 					g.value = nullptr;
