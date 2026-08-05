@@ -967,7 +967,7 @@ gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand
 	if (allow_array_programming) {
 		if (is_type_array(dst)) {
 			Type *elem = base_array_type(dst);
-			i64 distance = check_distance_between_types(c, operand, elem, allow_array_programming);
+			i64 distance = check_distance_between_types(c, operand, elem, allow_array_programming, allow_unions);
 			if (distance >= 0) {
 				return distance + 6;
 			}
@@ -975,7 +975,7 @@ gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand
 
 		if (is_type_simd_vector(dst)) {
 			Type *dst_elem = base_array_type(dst);
-			i64 distance = check_distance_between_types(c, operand, dst_elem, allow_array_programming);
+			i64 distance = check_distance_between_types(c, operand, dst_elem, allow_array_programming, allow_unions);
 			if (distance >= 0) {
 				return distance + 6;
 			}
@@ -988,7 +988,7 @@ gb_internal i64 check_distance_between_types(CheckerContext *c, Operand *operand
 		}
 		if (dst->Matrix.row_count == dst->Matrix.column_count) {
 			Type *dst_elem = base_array_type(dst);
-			i64 distance = check_distance_between_types(c, operand, dst_elem, allow_array_programming);
+			i64 distance = check_distance_between_types(c, operand, dst_elem, allow_array_programming, allow_unions);
 			if (distance >= 0) {
 				return distance + 7;
 			}
@@ -1272,6 +1272,7 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 			Operand o = {};
 			check_expr_with_type_hint(c, &o, operand->expr, type);
 			operand->value = exact_value_variant(operand->expr);
+			operand->value.variant_type = operand->type;
 		}
 		if (operand->mode == Addressing_Type && is_type_typeid(type)) {
 		 	add_type_info_type(c, operand->type);
@@ -3292,11 +3293,10 @@ gb_internal void add_comparison_procedures_for_fields(CheckerContext *c, Type *t
 gb_internal Operand make_operand_from_node(Ast *node);
 
 gb_internal bool is_comparison_constant(Operand *x, Operand *y) {
-	if (!is_type_constant_type(x->type) || !is_type_constant_type(y->type)) {
-		return false;
-	}
-	if (x->value.kind == ExactValue_Compound) {
-		if (y->value.kind != ExactValue_Compound) {
+	bool x_compound = x->value.kind == ExactValue_Compound;
+	bool y_compound = y->value.kind == ExactValue_Compound;
+	if (x_compound || y_compound) {
+		if (!x_compound || !y_compound) {
 			return false;
 		}
 		ast_node(x_cl, CompoundLit, x->value.value_compound);
@@ -3305,23 +3305,56 @@ gb_internal bool is_comparison_constant(Operand *x, Operand *y) {
 		if (x_cl->elems.count != y_cl->elems.count) {
 			return false;
 		}
-		if (x_cl->elems.count > 0 &&
-			(x_cl->elems[0]->kind == Ast_FieldValue ||
-			 y_cl->elems[0]->kind == Ast_FieldValue)) {
-			return false;
-		}
 
 		for (isize i = 0; i < x_cl->elems.count; i++) {
-			Operand lhs = make_operand_from_node(x_cl->elems[i]);
-			Operand rhs = make_operand_from_node(y_cl->elems[i]);
+			Ast *lhs_node = x_cl->elems[i];
+			Ast *rhs_node = y_cl->elems[i];
+			if (lhs_node->kind == Ast_FieldValue || rhs_node->kind == Ast_FieldValue) {
+				if (lhs_node->kind != Ast_FieldValue || rhs_node->kind != Ast_FieldValue) {
+					return false;
+				}
+				lhs_node = lhs_node->FieldValue.value;
+				rhs_node = rhs_node->FieldValue.value;
+			}
+			Operand lhs = make_operand_from_node(lhs_node);
+			Operand rhs = make_operand_from_node(rhs_node);
 			if (!is_comparison_constant(&lhs, &rhs)) {
 				return false;
 			}
 		}
-	} else if (y->value.kind == ExactValue_Compound) {
-		return false;
+		return true;
 	}
-	return true;
+
+	if (x->value.kind == ExactValue_Variant || y->value.kind == ExactValue_Variant) {
+		if (x->value.kind == ExactValue_Variant) {
+			Ast *node = x->value.value_variant;
+			if (node == nullptr || node->tav.mode != Addressing_Constant) {
+				return false;
+			}
+			Operand child = make_operand_from_node(node);
+			child.value = node->tav.value;
+			if (!is_comparison_constant(&child, y)) {
+				return false;
+			}
+		}
+		if (y->value.kind == ExactValue_Variant) {
+			Ast *node = y->value.value_variant;
+			if (node == nullptr || node->tav.mode != Addressing_Constant) {
+				return false;
+			}
+			Operand child = make_operand_from_node(node);
+			child.value = node->tav.value;
+			if (!is_comparison_constant(x, &child)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	if (is_type_constant_type(x->type) && is_type_constant_type(y->type)) {
+		return true;
+	}
+	return x->value.variant_type != nullptr || y->value.variant_type != nullptr;
 }
 
 gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Operand *y, TokenKind op) {
@@ -3490,8 +3523,8 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 							break;
 						}
 					}
-				} else {
-					x->value = exact_value_bool(compare_exact_values(op, x->value, y->value));
+					} else {
+						x->value = exact_value_bool(compare_exact_values(op, x->value, y->value));
 				}
 			} else {
 				x->mode = Addressing_Value;
@@ -13163,7 +13196,6 @@ gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, E
 	if (x_cl->elems.count != y_cl->elems.count) {
 		return false;
 	}
-
 	bool test = op == Token_CmpEq;
 	bool has_field_values =
 		x_cl->elems.count > 0 && x_cl->elems[0]->kind == Ast_FieldValue ||
@@ -13208,18 +13240,81 @@ gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, E
 	for (isize i = 0; i < x_cl->elems.count; i++) {
 		Ast *lhs = x_cl->elems[i];
 		Ast *rhs = y_cl->elems[i];
-		if (compare_exact_values(op, lhs->tav.value, rhs->tav.value) != test) {
+		if (lhs->kind == Ast_FieldValue) {
+			lhs = lhs->FieldValue.value;
+		}
+		if (rhs->kind == Ast_FieldValue) {
+			rhs = rhs->FieldValue.value;
+		}
+
+		ExactValue lhs_value = lhs->tav.value;
+		ExactValue rhs_value = rhs->tav.value;
+		if (lhs->kind == Ast_CallExpr && lhs->CallExpr.proc != nullptr &&
+		    lhs->CallExpr.proc->tav.mode == Addressing_Type && lhs->CallExpr.args.count == 1) {
+			lhs_value = exact_value_variant(lhs);
+			lhs_value.variant_type = type_of_expr(lhs->CallExpr.args[0]);
+		}
+		if (rhs->kind == Ast_CallExpr && rhs->CallExpr.proc != nullptr &&
+		    rhs->CallExpr.proc->tav.mode == Addressing_Type && rhs->CallExpr.args.count == 1) {
+			rhs_value = exact_value_variant(rhs);
+			rhs_value.variant_type = type_of_expr(rhs->CallExpr.args[0]);
+		}
+
+		if (compare_exact_values(op, lhs_value, rhs_value) != test) {
 			return !test;
 		}
 	}
 	return test;
 }
 
-gb_internal bool compare_exact_values_variant(TokenKind op, ExactValue x, ExactValue y) {
-	Ast *lhs = x.value_variant;
-	Ast *rhs = y.value_variant;
+gb_internal Type *exact_value_variant_source_type(ExactValue const &value) {
+	if (value.variant_type != nullptr) {
+		return value.variant_type;
+	}
+	if (value.kind != ExactValue_Variant || value.value_variant == nullptr) {
+		return nullptr;
+	}
 
-	return compare_exact_values(op, lhs->tav.value, rhs->tav.value);
+	Ast *expr = unparen_expr(value.value_variant);
+	if (expr->kind == Ast_AutoCast) {
+		return type_of_expr(expr->AutoCast.expr);
+	}
+	if (expr->kind == Ast_TypeCast) {
+		return type_of_expr(expr->TypeCast.expr);
+	}
+	if (expr->kind == Ast_CallExpr &&
+	    expr->CallExpr.proc->tav.mode == Addressing_Type &&
+	    expr->CallExpr.args.count == 1) {
+		return type_of_expr(expr->CallExpr.args[0]);
+	}
+
+	ExactValue payload = expr->tav.value;
+	return payload.variant_type;
+}
+
+gb_internal bool compare_exact_values_variant(TokenKind op, ExactValue x, ExactValue y) {
+	ExactValue lhs = x;
+	ExactValue rhs = y;
+	Type *lhs_type = exact_value_variant_source_type(lhs);
+	Type *rhs_type = exact_value_variant_source_type(rhs);
+	if (lhs_type != nullptr && rhs_type != nullptr && !are_types_identical(lhs_type, rhs_type)) {
+		return op == Token_NotEq;
+	}
+
+	if (lhs.kind == ExactValue_Variant) {
+		if (lhs.value_variant == nullptr) {
+			return op == Token_NotEq;
+		}
+		lhs = lhs.value_variant->tav.value;
+	}
+	if (rhs.kind == ExactValue_Variant) {
+		if (rhs.value_variant == nullptr) {
+			return op == Token_NotEq;
+		}
+		rhs = rhs.value_variant->tav.value;
+	}
+
+	return compare_exact_values(op, lhs, rhs);
 }
 
 gb_internal void match_exact_values_variant(ExactValue *x, ExactValue *y) {

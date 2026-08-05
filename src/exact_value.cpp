@@ -996,6 +996,13 @@ gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, E
 gb_internal bool compare_exact_values_variant(TokenKind op, ExactValue x, ExactValue y);
 
 gb_internal bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) {
+	if (x.kind == ExactValue_Variant || y.kind == ExactValue_Variant) {
+		if (op != Token_CmpEq && op != Token_NotEq) {
+			return false;
+		}
+		return compare_exact_values_variant(op, x, y);
+	}
+
 	match_exact_values(&x, &y);
 
 	switch (x.kind) {

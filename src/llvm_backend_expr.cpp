@@ -4493,6 +4493,17 @@ gb_internal lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 	return res;
 }
 
+gb_internal Type *lb_build_expr_original_const_type(Ast *expr) {
+	expr = unparen_expr(expr);
+	Type *type = type_of_expr(expr);
+	if (is_type_union(type) && expr->kind == Ast_CallExpr) {
+		if (expr->CallExpr.proc->tav.mode == Addressing_Type) {
+			return type_of_expr(expr->CallExpr.args[0]);
+		}
+	}
+	return nullptr;
+}
+
 gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	lbModule *m = p->module;
 
@@ -4505,8 +4516,12 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 
 
 	if (tv.value.kind != ExactValue_Invalid) {
+		Type *original_type = lb_build_expr_original_const_type(expr);
+		if (tv.value.variant_type != nullptr) {
+			original_type = tv.value.variant_type;
+		}
 		// NOTE(bill): Short on constant values
-		return lb_const_value(p->module, type, tv.value, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL);
+		return lb_const_value(p->module, type, tv.value, original_type, LB_CONST_CONTEXT_DEFAULT_ALLOW_LOCAL, expr);
 	} else if (tv.mode == Addressing_Type) {
 		// NOTE(bill, 2023-01-16): is this correct? I hope so at least
 		return lb_typeid(m, tv.type);
@@ -7019,4 +7034,3 @@ gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr) {
 
 	return {};
 }
-
