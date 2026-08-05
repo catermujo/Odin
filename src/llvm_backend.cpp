@@ -3463,7 +3463,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 						cc.link_section = e->Variable.link_section;
 
 						ExactValue v = tav.value;
-						lbValue init = lb_const_value(m, e->type, v, cc);
+						lbValue init = lb_const_value(m, e->type, v, tav.type, cc, decl->init_expr);
 
 
 						LLVMDeleteGlobal(g.value);
