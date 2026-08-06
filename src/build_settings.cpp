@@ -2,7 +2,9 @@
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
+#ifndef CLANGD_TU_build_cpuid
 #include "build_cpuid.cpp"
+#endif
 
 // #if defined(GB_SYSTEM_WINDOWS)
 // #define DEFAULT_TO_THREADED_CHECKER
@@ -137,7 +139,9 @@ struct MicroarchFeatureList {
 #else
 	#include <llvm/Config/llvm-config.h>
 #endif
+#ifndef CLANGD_TU_build_settings_microarch
 #include "build_settings_microarch.cpp"
+#endif
 
 gb_global TargetEndianKind target_endians[TargetArch_COUNT] = {
 	TargetEndian_Little,
