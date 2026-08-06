@@ -19,16 +19,36 @@
 
 
 #include "llvm_backend.hpp"
+#ifndef CLANGD_TU_llvm_abi
 #include "llvm_abi.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_opt
 #include "llvm_backend_opt.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_general
 #include "llvm_backend_general.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_debug
 #include "llvm_backend_debug.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_const
 #include "llvm_backend_const.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_type
 #include "llvm_backend_type.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_utility
 #include "llvm_backend_utility.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_expr
 #include "llvm_backend_expr.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_stmt
 #include "llvm_backend_stmt.cpp"
+#endif
+#ifndef CLANGD_TU_llvm_backend_proc
 #include "llvm_backend_proc.cpp"
+#endif
 #include "llvm_backend_asm.cpp"
 
 gb_internal String get_default_microarchitecture() {
@@ -2499,7 +2519,11 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	LLVMPassBuilderOptionsRef pb_options = LLVMCreatePassBuilderOptions();
 	defer (LLVMDisposePassBuilderOptions(pb_options));
 
+	#ifndef CLANGD_TU_llvm_backend_passes
+
 	#include "llvm_backend_passes.cpp"
+
+	#endif
 
 	// asan - Linux, Darwin, Windows
 	// msan - linux

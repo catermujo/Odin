@@ -1,4 +1,6 @@
+#ifndef CLANGD_TU_parser_pos
 #include "parser_pos.cpp"
+#endif
 
 gb_global std::atomic<bool> g_parsing_done;
 

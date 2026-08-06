@@ -82,13 +82,33 @@ void restore_old_codepage() {}
 #endif
 
 
+#ifndef CLANGD_TU_unicode
+
+
+
 #include "unicode.cpp"
+
+
+
+#endif
+#ifndef CLANGD_TU_array
 #include "array.cpp"
+#endif
+#ifndef CLANGD_TU_threading
 #include "threading.cpp"
+#endif
+#ifndef CLANGD_TU_common_memory
 #include "common_memory.cpp"
+#endif
+#ifndef CLANGD_TU_queue
 #include "queue.cpp"
+#endif
+#ifndef CLANGD_TU_string
 #include "string.cpp"
+#endif
+#ifndef CLANGD_TU_range_cache
 #include "range_cache.cpp"
+#endif
 
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(push)
@@ -376,14 +396,34 @@ gb_global String global_module_path = {0};
 gb_global bool global_module_path_set = false;
 
 
+#ifndef CLANGD_TU_ptr_map
+
+
 #include "ptr_map.cpp"
+
+
+#endif
+#ifndef CLANGD_TU_ptr_set
 #include "ptr_set.cpp"
+#endif
+#ifndef CLANGD_TU_string_map
 #include "string_map.cpp"
+#endif
+#ifndef CLANGD_TU_string16_map
 #include "string16_map.cpp"
+#endif
+#ifndef CLANGD_TU_string_set
 #include "string_set.cpp"
+#endif
+#ifndef CLANGD_TU_priority_queue
 #include "priority_queue.cpp"
+#endif
+#ifndef CLANGD_TU_thread_pool
 #include "thread_pool.cpp"
+#endif
+#ifndef CLANGD_TU_string_interner
 #include "string_interner.cpp"
+#endif
 
 
 gb_internal String obfuscate_string(String const &s, char const *prefix) {
@@ -811,7 +851,11 @@ gb_internal char **command_line_to_spawn_argv(const char *cmd_line, int *_argc) 
 
 #endif
 
+#ifndef CLANGD_TU_path
+
 #include "path.cpp"
+
+#endif
 
 struct LoadedFile {
 	void *handle;
