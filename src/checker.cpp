@@ -1,7 +1,13 @@
 #define DEBUG_CHECK_ALL_PROCEDURES 1
 
+#ifndef CLANGD_TU_entity
+
 #include "entity.cpp"
+
+#endif
+#ifndef CLANGD_TU_types
 #include "types.cpp"
+#endif
 
 
 gb_internal u64 type_hash_canonical_type(Type *type);
@@ -4594,12 +4600,28 @@ gb_internal DECL_ATTRIBUTE_PROC(asm_decl_attribute) {
 	return false;
 }
 
+#ifndef CLANGD_TU_check_expr
+
+
 #include "check_expr.cpp"
+
+
+#endif
+#ifndef CLANGD_TU_check_builtin
 #include "check_builtin.cpp"
+#endif
+#ifndef CLANGD_TU_check_type
 #include "check_type.cpp"
+#endif
+#ifndef CLANGD_TU_name_canonicalization
 #include "name_canonicalization.cpp"
+#endif
+#ifndef CLANGD_TU_check_decl
 #include "check_decl.cpp"
+#endif
+#ifndef CLANGD_TU_check_stmt
 #include "check_stmt.cpp"
+#endif
 
 
 

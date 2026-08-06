@@ -1,17 +1,29 @@
 // #define NO_ARRAY_BOUNDS_CHECK
+#ifndef CLANGD_TU_common
 #include "common.cpp"
+#endif
+#ifndef CLANGD_TU_timings
 #include "timings.cpp"
+#endif
+#ifndef CLANGD_TU_tokenizer
 #include "tokenizer.cpp"
+#endif
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(push)
 	#pragma warning(disable: 4505)
 #endif
+#ifndef CLANGD_TU_big_int
 #include "big_int.cpp"
+#endif
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(pop)
 #endif
+#ifndef CLANGD_TU_exact_value
 #include "exact_value.cpp"
+#endif
+#ifndef CLANGD_TU_build_settings
 #include "build_settings.cpp"
+#endif
 gb_global ThreadPool global_thread_pool;
 gb_internal void init_global_thread_pool(void) {
 	isize thread_count = gb_max(build_context.thread_count, 1);
@@ -70,23 +82,47 @@ gb_global Timings global_timings = {0};
 
 #include "asm_tables.cpp"
 
+#ifndef CLANGD_TU_parser
 #include "parser.cpp"
+
+#endif
+#ifndef CLANGD_TU_checker
 #include "checker.cpp"
+#endif
+#ifndef CLANGD_TU_docs
 #include "docs.cpp"
+#endif
+
+#ifndef CLANGD_TU_cached
 
 #include "cached.cpp"
 
+#endif
+
+#ifndef CLANGD_TU_linker
+
 #include "linker.cpp"
+
+#endif
+#ifndef CLANGD_TU_bundle_command
 #include "bundle_command.cpp"
+#endif
+
+#ifndef CLANGD_TU_llvm_backend
 
 #include "llvm_backend.cpp"
 
+#endif
+
+#ifndef CLANGD_TU_bug_report
+
 #include "bug_report.cpp"
+
+#endif
 
 #if defined(GB_SYSTEM_OSX) || defined(GB_SYSTEM_UNIX)
 int run_subprocess(const char *name, const char **args, bool honor_path = false);
 #endif
-
 // NOTE(bill): 'name' is used in debugging and profiling modes
 gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char const *name, char const *fmt, va_list va) {
 	isize const cmd_cap = 64<<20; // 64 MiB should be more than enough
