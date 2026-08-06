@@ -280,7 +280,11 @@ gb_internal gb_inline bool token_is_shift(TokenKind t) {
 
 gb_internal gb_inline void print_token(Token t) { gb_printf("%.*s\n", LIT(t.string)); }
 
+#ifndef CLANGD_TU_error
+
 #include "error.cpp"
+
+#endif
 
 
 enum TokenizerInitError {
