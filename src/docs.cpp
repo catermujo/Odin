@@ -98,8 +98,14 @@ gb_internal GB_COMPARE_PROC(cmp_ast_package_by_name) {
 	return string_compare(x->name, y->name);
 }
 
+#ifndef CLANGD_TU_docs_format
+
 #include "docs_format.cpp"
+
+#endif
+#ifndef CLANGD_TU_docs_writer
 #include "docs_writer.cpp"
+#endif
 
 gb_internal void print_doc_line(i32 indent, String const &data) {
 	while (indent --> 0) {
