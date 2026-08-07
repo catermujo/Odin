@@ -3023,6 +3023,24 @@ gb_internal void check_with_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) 
 // NOTE(bill): This is very basic escape analysis
 // This needs to be improved tremendously, and a lot of it done during the
 // middle-end (or LLVM side) to improve checks and error messages
+gb_internal bool is_expr_based_on_pointer(Ast *expr) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr) {
+		return false;
+	}
+
+	switch (expr->kind) {
+	case_ast_node(se, SelectorExpr, expr);
+		return is_expr_based_on_pointer(se->expr);
+	case_end;
+	case_ast_node(de, DerefExpr, expr);
+		return is_type_pointer(type_of_expr(de->expr));
+	case_end;
+	}
+
+	return is_type_pointer(type_of_expr(expr));
+}
+
 void check_unsafe_return(Operand const &o, Type *type, Ast *expr) {
 	auto const unsafe_return_error = [](Operand const &o, char const *msg, Type *extra_type=nullptr) {
 		gbString s = expr_to_string(o.expr);
@@ -3056,7 +3074,7 @@ void check_unsafe_return(Operand const &o, Type *type, Ast *expr) {
 		} else if (x->kind == Ast_IndexExpr) {
 			Entity *f = entity_of_node(x->IndexExpr.expr);
 			if (f && (is_type_array_like(f->type) || is_type_matrix(f->type))) {
-				if (is_entity_local_variable(f)) {
+				if (is_entity_local_variable(f) && !is_expr_based_on_pointer(x->IndexExpr.expr)) {
 					unsafe_return_error(o, "the address of an indexed variable", f->type);
 				}
 			}
