@@ -2497,14 +2497,58 @@ void lb_remove_unused_functions_and_globals(lbGenerator *gen) {
 	}
 }
 
+gb_internal String lb_filepath_obj_for_module(lbModule *m);
+
 struct lbLLVMModulePassWorkerData {
 	lbModule *m;
 	LLVMTargetMachineRef target_machine;
 	bool do_threading;
+	bool profile_enabled;
+	u64 profile_ticks;
+	String filepath_obj;
+	isize function_count;
+	isize global_count;
+	isize basic_block_count;
+	isize instruction_count;
 };
+
+gb_internal void lb_llvm_profile_module_stats(LLVMModuleRef mod, isize *function_count, isize *global_count, isize *basic_block_count, isize *instruction_count) {
+	isize functions = 0;
+	isize globals = 0;
+	isize basic_blocks = 0;
+	isize instructions = 0;
+
+	for (auto fn = LLVMGetFirstFunction(mod); fn != nullptr; fn = LLVMGetNextFunction(fn)) {
+		functions += 1;
+		for (auto block = LLVMGetFirstBasicBlock(fn); block != nullptr; block = LLVMGetNextBasicBlock(block)) {
+			basic_blocks += 1;
+			for (auto inst = LLVMGetFirstInstruction(block); inst != nullptr; inst = LLVMGetNextInstruction(inst)) {
+				instructions += 1;
+			}
+		}
+	}
+	for (auto global = LLVMGetFirstGlobal(mod); global != nullptr; global = LLVMGetNextGlobal(global)) {
+		globals += 1;
+	}
+
+	*function_count = functions;
+	*global_count = globals;
+	*basic_block_count = basic_blocks;
+	*instruction_count = instructions;
+}
+
+gb_internal GB_COMPARE_PROC(lb_llvm_module_pass_worker_profile_cmp) {
+	auto const *x = *cast(lbLLVMModulePassWorkerData *const *)a;
+	auto const *y = *cast(lbLLVMModulePassWorkerData *const *)b;
+	if (x->profile_ticks != y->profile_ticks) {
+		return x->profile_ticks > y->profile_ticks ? -1 : 1;
+	}
+	return string_compare(x->filepath_obj, y->filepath_obj);
+}
 
 gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	auto wd = cast(lbLLVMModulePassWorkerData *)data;
+	u64 start = wd->profile_enabled ? time_stamp_time_now() : 0;
 
 	LLVMPassManagerRef module_pass_manager = LLVMCreatePassManager();
 	LLVMRunPassManager(module_pass_manager, wd->m->mod);
@@ -2587,6 +2631,15 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 		}
 		lb_record_worker_failure();
 		return 1;
+	}
+
+	if (wd->profile_enabled) {
+		wd->profile_ticks = time_stamp_time_now()-start;
+		lb_llvm_profile_module_stats(wd->m->mod,
+			&wd->function_count,
+			&wd->global_count,
+			&wd->basic_block_count,
+			&wd->instruction_count);
 	}
 
 	if (LLVM_IGNORE_VERIFICATION) {
@@ -2706,6 +2759,13 @@ gb_internal void lb_llvm_function_passes(lbGenerator *gen, bool do_threading) {
 
 
 gb_internal void lb_llvm_module_passes_and_verification(lbGenerator *gen, bool do_threading) {
+	bool profile_enabled = lb_llvm_profile_enabled();
+	Array<lbLLVMModulePassWorkerData *> profile_workers = {};
+	if (profile_enabled) {
+		array_init(&profile_workers, heap_allocator());
+	}
+	defer (array_free(&profile_workers));
+
 	if (do_threading) {
 		for (auto const &entry : gen->modules) {
 			lbModule *m = entry.value;
@@ -2713,6 +2773,11 @@ gb_internal void lb_llvm_module_passes_and_verification(lbGenerator *gen, bool d
 			wd->m = m;
 			wd->target_machine = m->target_machine;
 			wd->do_threading = true;
+			wd->profile_enabled = profile_enabled;
+			if (profile_enabled) {
+				wd->filepath_obj = lb_filepath_obj_for_module(m);
+				array_add(&profile_workers, wd);
+			}
 
 			thread_pool_add_task(lb_llvm_module_pass_worker_proc, wd);
 		}
@@ -2724,11 +2789,34 @@ gb_internal void lb_llvm_module_passes_and_verification(lbGenerator *gen, bool d
 			wd->m = m;
 			wd->target_machine = m->target_machine;
 			wd->do_threading = false;
+			wd->profile_enabled = profile_enabled;
+			if (profile_enabled) {
+				wd->filepath_obj = lb_filepath_obj_for_module(m);
+				array_add(&profile_workers, wd);
+			}
 			lb_llvm_module_pass_worker_proc(wd);
 		}
 	}
 
 	lb_exit_if_worker_failed();
+
+	if (profile_enabled) {
+		array_sort(profile_workers, lb_llvm_module_pass_worker_profile_cmp);
+		f64 milliseconds_per_tick = 1000.0/cast(f64)time_stamp__freq();
+		isize count = gb_min(profile_workers.count, 20);
+		for (isize i = 0; i < count; i++) {
+			lbLLVMModulePassWorkerData *wd = profile_workers[i];
+			String short_name = remove_directory_from_path(wd->filepath_obj);
+			gb_printf_err("LLVM module pass worker rank=%td ms=%.3f functions=%td globals=%td blocks=%td instructions=%td name=%.*s\n",
+				i+1,
+				cast(f64)wd->profile_ticks*milliseconds_per_tick,
+				wd->function_count,
+				wd->global_count,
+				wd->basic_block_count,
+				wd->instruction_count,
+				LIT(short_name));
+		}
+	}
 }
 
 gb_internal String lb_filepath_ll_for_module(lbModule *m) {
