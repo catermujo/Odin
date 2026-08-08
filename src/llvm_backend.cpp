@@ -2771,6 +2771,207 @@ retry:;
 	}
 }
 
+struct lbExcessiveInliningWarning {
+	Token token;
+	String name;
+	isize body_instruction_count;
+	isize call_count;
+	isize estimated_instruction_count;
+	isize instance_count;
+};
+
+gb_internal isize lb_llvm_function_instruction_count(LLVMValueRef function) {
+	isize count = 0;
+	for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function);
+	     block != nullptr;
+	     block = LLVMGetNextBasicBlock(block)) {
+		for (LLVMValueRef instruction = LLVMGetFirstInstruction(block);
+		     instruction != nullptr;
+		     instruction = LLVMGetNextInstruction(instruction)) {
+			count += 1;
+		}
+	}
+	return count;
+}
+
+gb_internal void lb_collect_llvm_call_counts(lbModule *m, StringMap<isize> *call_counts) {
+	for (LLVMValueRef function = LLVMGetFirstFunction(m->mod);
+	     function != nullptr;
+	     function = LLVMGetNextFunction(function)) {
+		for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function);
+		     block != nullptr;
+		     block = LLVMGetNextBasicBlock(block)) {
+			for (LLVMValueRef instruction = LLVMGetFirstInstruction(block);
+			     instruction != nullptr;
+			     instruction = LLVMGetNextInstruction(instruction)) {
+				LLVMOpcode opcode = LLVMGetInstructionOpcode(instruction);
+				if (opcode != LLVMCall && opcode != LLVMInvoke && opcode != LLVMCallBr) {
+					continue;
+				}
+
+				LLVMValueRef called_value = LLVMGetCalledValue(instruction);
+				if (called_value == nullptr) {
+					continue;
+				}
+
+				size_t name_len = 0;
+				char const *name = LLVMGetValueName2(called_value, &name_len);
+				if (name == nullptr || name_len == 0) {
+					continue;
+				}
+
+				String call_name = make_string(cast(u8 const *)name, cast(isize)name_len);
+				isize *count = string_map_get(call_counts, call_name);
+				if (count != nullptr) {
+					*count += 1;
+				} else {
+					isize one = 1;
+					string_map_set(call_counts, call_name, one);
+				}
+			}
+		}
+	}
+}
+
+gb_internal void lb_snapshot_force_inline_call_counts(lbGenerator *gen) {
+	for (auto const &entry : gen->modules) {
+		lbModule *m = entry.value;
+		StringMap<isize> call_counts = {};
+		string_map_init(&call_counts, 256);
+		lb_collect_llvm_call_counts(m, &call_counts);
+
+		for (auto const &procedure_entry : m->procedures) {
+			lbProcedure *p = procedure_entry.value;
+			if (p == nullptr) {
+				continue;
+			}
+			p->force_inline_call_count = 0;
+			if (isize *count = string_map_get(&call_counts, p->name)) {
+				p->force_inline_call_count = *count;
+			}
+		}
+
+		string_map_destroy(&call_counts);
+	}
+}
+
+gb_internal GB_COMPARE_PROC(lb_excessive_inline_warning_cmp) {
+	auto const *x = cast(lbExcessiveInliningWarning const *)a;
+	auto const *y = cast(lbExcessiveInliningWarning const *)b;
+	if (x->estimated_instruction_count != y->estimated_instruction_count) {
+		return x->estimated_instruction_count > y->estimated_instruction_count ? -1 : 1;
+	}
+	if (x->body_instruction_count != y->body_instruction_count) {
+		return x->body_instruction_count > y->body_instruction_count ? -1 : 1;
+	}
+	return string_compare(x->name, y->name);
+}
+
+gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
+	if (build_context.no_warn_excessive_inlining) {
+		return;
+	}
+
+	// These thresholds describe generated LLVM IR, not source lines. The
+	// expansion threshold catches helpers called many times, while the body
+	// threshold catches a large force-inline body even when called once.
+	enum {
+		BodyInstructionThreshold       = 512,
+		ExpansionInstructionThreshold  = 4096,
+	};
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	Array<lbExcessiveInliningWarning> warnings = {};
+	array_init(&warnings, temporary_allocator());
+	StringMap<isize> warning_indices = {};
+	string_map_init(&warning_indices, 64);
+	defer (string_map_destroy(&warning_indices));
+
+	for (auto const &entry : gen->modules) {
+		lbModule *m = entry.value;
+		// Resolve each procedure again after the module pass. LLVM may replace
+		// the original LLVMValueRef while retaining the function's link name.
+		for (auto const &procedure_entry : m->procedures) {
+			lbProcedure *p = procedure_entry.value;
+			if (p == nullptr || p->entity == nullptr) {
+				continue;
+			}
+			LLVMValueRef function = LLVMGetNamedFunction(m->mod,
+				alloc_cstring(temporary_allocator(), p->name));
+			if (function == nullptr) {
+				continue;
+			}
+			if (!lb_proc_has_attribute(m, function, "alwaysinline")) {
+				continue;
+			}
+			if (LLVMGetFirstBasicBlock(function) == nullptr) {
+				continue;
+			}
+			if (lb_force_inline_function_disabled() || lb_force_inline_callsite_disabled()) {
+				continue;
+			}
+			if (lb_force_inline_name_disabled(p->name)) {
+				continue;
+			}
+
+			isize body_instruction_count = lb_llvm_function_instruction_count(function);
+			isize call_count = p->force_inline_call_count;
+			if (call_count == 0) {
+				continue;
+			}
+			isize estimated_instruction_count = body_instruction_count * call_count;
+
+			Token token = p->body != nullptr ? ast_token(p->body) : p->entity->token;
+			if (token.pos.file_id == 0) {
+				token = p->entity->token;
+			}
+			if (token.pos.file_id == 0) {
+				continue;
+			}
+			TokenPos pos = token.pos;
+			String file_path = get_file_path_string(pos.file_id);
+			gbString key_buffer = gb_string_make(temporary_allocator(), "");
+			key_buffer = gb_string_append_fmt(key_buffer, "%.*s:%d:%d", LIT(file_path), pos.line, pos.column);
+			String key = copy_string(temporary_allocator(), make_string(cast(u8 *)key_buffer, gb_string_length(key_buffer)));
+			isize *warning_index = string_map_get(&warning_indices, key);
+			if (warning_index != nullptr) {
+				lbExcessiveInliningWarning &existing = warnings[*warning_index];
+				existing.body_instruction_count = gb_max(existing.body_instruction_count, body_instruction_count);
+				existing.call_count += call_count;
+				existing.estimated_instruction_count += estimated_instruction_count;
+				existing.instance_count += 1;
+				continue;
+			}
+
+			lbExcessiveInliningWarning warning = {};
+			warning.token = token;
+			warning.name = p->entity->token.string;
+			warning.body_instruction_count = body_instruction_count;
+			warning.call_count = call_count;
+			warning.estimated_instruction_count = estimated_instruction_count;
+			warning.instance_count = 1;
+			string_map_set(&warning_indices, key, cast(isize)warnings.count);
+			array_add(&warnings, warning);
+		}
+	}
+
+	array_sort(warnings, lb_excessive_inline_warning_cmp);
+	isize report_order = warnings.count;
+	for (lbExcessiveInliningWarning const &item : warnings) {
+		if (item.body_instruction_count < BodyInstructionThreshold &&
+		    item.estimated_instruction_count < ExpansionInstructionThreshold) {
+			continue;
+		}
+		warning_with_sort(item.token, report_order--,
+			"#force_inline procedure '%.*s' has %td LLVM instructions after module optimization and %td pre-module call sites (estimated %td expanded instructions across %td generated instance(s)); remove '#force_inline' if this is not intentional, or use '-no-warn-excessive-inlining'",
+			LIT(item.name),
+			item.body_instruction_count,
+			item.call_count,
+			item.estimated_instruction_count,
+			item.instance_count);
+	}
+}
+
 gb_internal void lb_debug_info_complete_types_and_finalize(lbGenerator *gen) {
 	for (auto const &entry : gen->modules) {
 		lbModule *m = entry.value;
@@ -3909,8 +4110,16 @@ gb_internal bool lb_generate_code(lbGenerator *gen, CodeGenGlobalPlan const &pla
 	TIME_SECTION("LLVM Remove Unused Functions and Globals");
 	lb_remove_unused_functions_and_globals(gen);
 
+	TIME_SECTION("LLVM Force-Inline Call Counts");
+	if (!build_context.no_warn_excessive_inlining) {
+		lb_snapshot_force_inline_call_counts(gen);
+	}
+
 	TIME_SECTION("LLVM Module Pass and Verification");
 	lb_llvm_module_passes_and_verification(gen, do_threading);
+
+	TIME_SECTION("LLVM Excessive Force-Inline Warnings");
+	lb_warn_excessive_force_inline(gen);
 
 	TIME_SECTION("LLVM Correct Entity Linkage");
 	lb_correct_entity_linkage(gen);

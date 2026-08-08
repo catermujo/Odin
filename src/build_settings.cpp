@@ -553,6 +553,7 @@ struct BuildContext {
 	bool   emit_downcast_assert;
 	bool   no_bounds_check;
 	bool   no_instrumentation_force_inline;
+	bool   no_warn_excessive_inlining;
 	bool   no_type_assert;
 	bool   dynamic_literals;  // Opt-in to `#+feature dynamic-literals` project-wide.
 	bool   no_output_files;
