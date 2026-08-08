@@ -286,7 +286,7 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 
 	switch (p->inlining) {
 	case ProcInlining_inline:
-		if (!lb_force_inline_disabled()) {
+		if (!lb_force_inline_function_disabled() && !lb_force_inline_name_disabled(p->name)) {
 			lb_add_attribute_to_proc(m, p->value, "alwaysinline");
 		}
 		break;
@@ -1263,11 +1263,19 @@ gb_internal lbValue lb_emit_call_internal(lbProcedure *p, lbValue value, lbValue
 		switch (inlining) {
 		case ProcInlining_none:
 			break;
-		case ProcInlining_inline:
-			if (!lb_force_inline_disabled()) {
+		case ProcInlining_inline: {
+			bool disable_force_inline = lb_force_inline_callsite_disabled();
+			if (!disable_force_inline) {
+				size_t name_len = 0;
+				char const *name = LLVMGetValueName2(value.value, &name_len);
+				disable_force_inline = name != nullptr &&
+					lb_force_inline_name_disabled(make_string(cast(u8 const *)name, cast(isize)name_len));
+			}
+			if (!disable_force_inline) {
 				LLVMAddCallSiteAttribute(ret, LLVMAttributeIndex_FunctionIndex, lb_create_enum_attribute(p->module->ctx, "alwaysinline"));
 			}
 			break;
+		}
 		case ProcInlining_no_inline:
 			LLVMAddCallSiteAttribute(ret, LLVMAttributeIndex_FunctionIndex, lb_create_enum_attribute(p->module->ctx, "noinline"));
 			break;

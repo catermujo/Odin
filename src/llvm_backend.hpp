@@ -416,6 +416,7 @@ gb_internal LLVMAttributeRef lb_create_enum_attribute(LLVMContextRef ctx, char c
 gb_internal LLVMAttributeRef lb_create_enum_attribute_with_type(LLVMContextRef ctx, char const *name, LLVMTypeRef type);
 gb_internal void lb_add_proc_attribute_at_index(lbProcedure *p, isize index, char const *name, u64 value);
 gb_internal void lb_add_proc_attribute_at_index(lbProcedure *p, isize index, char const *name);
+gb_internal bool lb_force_inline_name_disabled(String name);
 gb_internal void lb_add_nocapture_proc_attribute_at_index(lbProcedure *p, isize index);
 gb_internal lbProcedure *lb_create_procedure(lbModule *module, Entity *entity, bool ignore_body=false);
 
