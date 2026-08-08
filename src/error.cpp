@@ -8,6 +8,8 @@ struct ErrorValue {
 	TokenPos       pos;
 	TokenPos       end;
 	Array<u8>      msg;
+	bool           has_sort_key;
+	isize          sort_key;
 	bool           seen_newline;
 };
 
@@ -799,7 +801,7 @@ gb_internal void error_va(TokenPos const &pos, TokenPos end, char const *fmt, va
 	mutex_unlock(&global_error_collector.mutex);
 }
 
-gb_internal void warning_va(TokenPos const &pos, TokenPos end, char const *fmt, va_list va) {
+gb_internal void warning_va_internal(TokenPos const &pos, TokenPos end, bool has_sort_key, isize sort_key, char const *fmt, va_list va) {
 	if (global_error_context.mute_depth > 0) {
 		return;
 	}
@@ -820,6 +822,11 @@ gb_internal void warning_va(TokenPos const &pos, TokenPos end, char const *fmt, 
 	mutex_lock(&global_error_collector.mutex);
 
 	push_error_value(pos, ErrorValue_Warning);
+	if (has_sort_key) {
+		ErrorValue *ev = get_error_value();
+		ev->has_sort_key = true;
+		ev->sort_key = sort_key;
+	}
 
 	if (pos.line == 0) {
 		error_out_empty();
@@ -840,6 +847,14 @@ gb_internal void warning_va(TokenPos const &pos, TokenPos end, char const *fmt, 
 	}
 	try_pop_error_value();
 	mutex_unlock(&global_error_collector.mutex);
+}
+
+gb_internal void warning_va(TokenPos const &pos, TokenPos end, char const *fmt, va_list va) {
+	warning_va_internal(pos, end, false, 0, fmt, va);
+}
+
+gb_internal void warning_va_with_sort(TokenPos const &pos, TokenPos end, isize sort_key, char const *fmt, va_list va) {
+	warning_va_internal(pos, end, true, sort_key, fmt, va);
 }
 
 
@@ -1009,6 +1024,13 @@ gb_internal void warning(Token const &token, char const *fmt, ...) {
 	va_end(va);
 }
 
+gb_internal void warning_with_sort(Token const &token, isize sort_key, char const *fmt, ...) {
+	va_list va;
+	va_start(va, fmt);
+	warning_va_with_sort(token.pos, {}, sort_key, fmt, va);
+	va_end(va);
+}
+
 gb_internal void error(Token const &token, char const *fmt, ...) {
 	va_list va;
 	va_start(va, fmt);
@@ -1175,6 +1197,14 @@ gb_internal void print_all_errors(void) {
 
 	// stable, so that of the errors at the same position, the first reported is kept, see the merging below
 	natural_merge_sort(global_error_collector.error_values.data, global_error_collector.error_values.count, [](ErrorValue const &x, ErrorValue const &y) -> int {
+		if (x.has_sort_key || y.has_sort_key) {
+			if (x.has_sort_key != y.has_sort_key) {
+				return x.has_sort_key ? 1 : -1;
+			}
+			if (x.sort_key != y.sort_key) {
+				return x.sort_key > y.sort_key ? -1 : 1;
+			}
+		}
 		return token_pos_cmp(x.pos, y.pos);
 	});
 
