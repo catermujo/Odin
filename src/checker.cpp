@@ -8939,40 +8939,57 @@ gb_internal void check_update_dependency_tree_for_procedures(Checker *c) {
 	}
 }
 #else
-gb_internal void check_walk_all_dependencies(DeclInfo *decl);
+gb_internal void check_add_dependency_root(DeclInfo *decl, PtrSet<DeclInfo *> *roots, Array<DeclInfo *> *root_list) {
+	if (decl == nullptr) {
+		return;
+	}
+	while (decl->parent != nullptr) {
+		decl = decl->parent;
+	}
+	if (!ptr_set_update(roots, decl)) {
+		array_add(root_list, decl);
+	}
+}
 
-gb_internal WORKER_TASK_PROC(check_walk_all_dependencies_worker_proc) {
+gb_internal void check_walk_all_dependencies_sequential(DeclInfo *decl) {
+	if (decl == nullptr) {
+		return;
+	}
+	for (DeclInfo *child = decl->next_child; child != nullptr; child = child->next_sibling) {
+		check_walk_all_dependencies_sequential(child);
+	}
+	add_deps_from_child_to_parent(decl);
+}
+
+gb_internal WORKER_TASK_PROC(check_dependency_root_worker) {
 	if (data == nullptr) {
 		return 0;
 	}
-	DeclInfo *decl = cast(DeclInfo *)data;
-
-	for (DeclInfo *child = decl->next_child; child != nullptr; child = child->next_sibling) {
-		thread_pool_add_task(check_walk_all_dependencies_worker_proc, child);
-		check_walk_all_dependencies(child);
-	}
-
-	add_deps_from_child_to_parent(decl);
+	check_walk_all_dependencies_sequential(cast(DeclInfo *)data);
 	return 0;
 }
 
-gb_internal void check_walk_all_dependencies(DeclInfo *decl) {
-	if (decl != nullptr) {
-		thread_pool_add_task(check_walk_all_dependencies_worker_proc, decl);
-	}
-}
-
 gb_internal void check_update_dependency_tree_for_procedures(Checker *c) {
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	Array<DeclInfo *> roots = {};
+	array_init(&roots, temporary_allocator(), 0, c->nested_proc_lits.count + c->info.entities.count);
+	PtrSet<DeclInfo *> root_set = {};
+	ptr_set_init(&root_set, c->nested_proc_lits.count + c->info.entities.count);
+	defer (ptr_set_destroy(&root_set));
+
 	mutex_lock(&c->nested_proc_lits_mutex);
 	for (DeclInfo *decl : c->nested_proc_lits) {
-		check_walk_all_dependencies(decl);
+		check_add_dependency_root(decl, &root_set, &roots);
 	}
 	mutex_unlock(&c->nested_proc_lits_mutex);
 	for (Entity *e : c->info.entities) {
-		DeclInfo *decl = e->decl_info;
-		check_walk_all_dependencies(decl);
+		check_add_dependency_root(e->decl_info, &root_set, &roots);
 	}
 
+	for (DeclInfo *root : roots) {
+		thread_pool_add_task(check_dependency_root_worker, root);
+	}
 	thread_pool_wait();
 }
 #endif
