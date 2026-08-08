@@ -18,6 +18,17 @@
 #define LLVM_SET_INTERNAL_WEAK_LINKAGE(value) LLVMSetLinkage(value, USE_SEPARATE_MODULES ? LLVMWeakAnyLinkage : LLVMInternalLinkage);
 
 #include "llvm_backend.hpp"
+
+gb_internal bool lb_force_inline_disabled(void) {
+	static bool disabled = []() {
+		gbAllocator a = heap_allocator();
+		char const *value = gb_get_env("ODIN_DISABLE_FORCE_INLINE", a);
+		defer (gb_free(a, cast(void *)value));
+		return value != nullptr;
+	}();
+	return disabled;
+}
+
 #ifndef CLANGD_TU_llvm_abi
 #include "llvm_abi.cpp"
 #endif
@@ -457,7 +468,9 @@ gb_internal lbValue lb_simple_compare_hash(lbProcedure *p, Type *type, lbValue d
 }
 
 gb_internal void lb_add_callsite_force_inline(lbProcedure *p, lbValue ret_value) {
-	LLVMAddCallSiteAttribute(ret_value.value, LLVMAttributeIndex_FunctionIndex, lb_create_enum_attribute(p->module->ctx, "alwaysinline"));
+	if (!lb_force_inline_disabled()) {
+		LLVMAddCallSiteAttribute(ret_value.value, LLVMAttributeIndex_FunctionIndex, lb_create_enum_attribute(p->module->ctx, "alwaysinline"));
+	}
 }
 
 gb_internal lbValue lb_hasher_proc_for_type(lbModule *m, Type *type) {
