@@ -19,13 +19,40 @@
 
 #include "llvm_backend.hpp"
 
-gb_internal bool lb_force_inline_disabled(void) {
-	static bool disabled = []() {
+gb_internal bool lb_environment_flag_enabled(char const *name) {
 		gbAllocator a = heap_allocator();
-		char const *value = gb_get_env("ODIN_DISABLE_FORCE_INLINE", a);
+		char const *value = gb_get_env(name, a);
 		defer (gb_free(a, cast(void *)value));
 		return value != nullptr;
+	}
+
+gb_internal String lb_force_inline_filter(void) {
+	static String filter = []() -> String {
+		gbAllocator a = heap_allocator();
+		char const *value = gb_get_env("ODIN_DISABLE_FORCE_INLINE_MATCH", a);
+		defer (gb_free(a, cast(void *)value));
+		if (value == nullptr) {
+			return {};
+		}
+		return copy_string(permanent_allocator(), make_string_c(value));
 	}();
+	return filter;
+}
+
+gb_internal bool lb_force_inline_name_disabled(String name) {
+	String filter = lb_force_inline_filter();
+	return filter.len > 0 && string_contains_string(name, filter);
+}
+
+gb_internal bool lb_force_inline_function_disabled(void) {
+	static bool disabled = lb_environment_flag_enabled("ODIN_DISABLE_FORCE_INLINE") ||
+	                       lb_environment_flag_enabled("ODIN_DISABLE_FORCE_INLINE_FUNCTION");
+	return disabled;
+}
+
+gb_internal bool lb_force_inline_callsite_disabled(void) {
+	static bool disabled = lb_environment_flag_enabled("ODIN_DISABLE_FORCE_INLINE") ||
+	                       lb_environment_flag_enabled("ODIN_DISABLE_FORCE_INLINE_CALLSITE");
 	return disabled;
 }
 
@@ -468,7 +495,7 @@ gb_internal lbValue lb_simple_compare_hash(lbProcedure *p, Type *type, lbValue d
 }
 
 gb_internal void lb_add_callsite_force_inline(lbProcedure *p, lbValue ret_value) {
-	if (!lb_force_inline_disabled()) {
+	if (!lb_force_inline_callsite_disabled() && !lb_force_inline_name_disabled(p->name)) {
 		LLVMAddCallSiteAttribute(ret_value.value, LLVMAttributeIndex_FunctionIndex, lb_create_enum_attribute(p->module->ctx, "alwaysinline"));
 	}
 }
