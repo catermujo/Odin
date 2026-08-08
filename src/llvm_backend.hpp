@@ -344,6 +344,7 @@ struct lbProcedure {
 	bool         is_export;
 	bool         is_entry_point;
 	bool         is_startup;
+	isize        force_inline_call_count; // Snapshot before module passes for excessive inlining diagnostics.
 
 	lbFunctionType *abi_function_type;
 
