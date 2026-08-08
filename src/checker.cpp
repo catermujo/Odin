@@ -9086,6 +9086,16 @@ gb_internal void check_sort_init_and_fini_procedures(Checker *c) {
 	remove_neighbouring_duplicate_entires_from_sorted_array(&c->info.fini_procedures);
 }
 
+gb_internal void add_type_info_for_type_definitions(Checker *c) {
+	for (Entity *e : c->info.definitions) {
+		if (e->kind == Entity_TypeName && e->type != nullptr && is_type_typed(e->type)) {
+			if (e->min_dep_count.load(std::memory_order_relaxed) > 0) {
+				add_type_info_type(&c->builtin_ctx, e->type);
+			}
+		}
+	}
+}
+
 gb_internal WORKER_TASK_PROC(check_scope_usage_file_worker) {
 	Checker *c = global_checker_ptr.load(std::memory_order_relaxed);
 	AstFile *f = cast(AstFile *)data;
