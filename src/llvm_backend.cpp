@@ -2778,20 +2778,65 @@ struct lbExcessiveInliningWarning {
 	isize call_count;
 	isize estimated_instruction_count;
 	isize instance_count;
+	isize non_inlined_call_count;
+	bool  has_branching;
+	bool  has_pointer_or_memory_access;
 };
 
-gb_internal isize lb_llvm_function_instruction_count(LLVMValueRef function) {
-	isize count = 0;
+struct lbLLVMFunctionMetrics {
+	isize instruction_count;
+	isize non_inlined_call_count;
+	bool  has_branching;
+	bool  has_pointer_or_memory_access;
+};
+
+gb_internal lbLLVMFunctionMetrics lb_llvm_function_metrics(LLVMValueRef function) {
+	lbLLVMFunctionMetrics metrics = {};
 	for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function);
 	     block != nullptr;
 	     block = LLVMGetNextBasicBlock(block)) {
 		for (LLVMValueRef instruction = LLVMGetFirstInstruction(block);
 		     instruction != nullptr;
 		     instruction = LLVMGetNextInstruction(instruction)) {
-			count += 1;
+			metrics.instruction_count += 1;
+
+			LLVMOpcode opcode = LLVMGetInstructionOpcode(instruction);
+			switch (opcode) {
+			case LLVMBr:
+			case LLVMSwitch:
+			case LLVMIndirectBr:
+			case LLVMInvoke:
+			case LLVMCallBr:
+				metrics.has_branching = true;
+				break;
+			default:
+				break;
+			}
+
+			switch (opcode) {
+			case LLVMCall:
+			case LLVMInvoke:
+			case LLVMCallBr:
+				metrics.non_inlined_call_count += 1;
+				break;
+			default:
+				break;
+			}
+
+			switch (opcode) {
+			case LLVMLoad:
+			case LLVMStore:
+			case LLVMFence:
+			case LLVMAtomicRMW:
+			case LLVMAtomicCmpXchg:
+				metrics.has_pointer_or_memory_access = true;
+				break;
+			default:
+				break;
+			}
 		}
 	}
-	return count;
+	return metrics;
 }
 
 gb_internal void lb_collect_llvm_call_counts(lbModule *m, StringMap<isize> *call_counts) {
@@ -2872,12 +2917,12 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 		return;
 	}
 
-	// These thresholds describe generated LLVM IR, not source lines. The
-	// expansion threshold catches helpers called many times, while the body
-	// threshold catches a large force-inline body even when called once.
+	// These thresholds describe generated LLVM IR, not source lines. Small leaf
+	// helpers can be called many times intentionally; warn only when a body is
+	// large and has structural cost that makes forced inlining expensive.
 	enum {
-		BodyInstructionThreshold       = 512,
-		ExpansionInstructionThreshold  = 4096,
+		MinimumInstructionThreshold = 256,
+		NonInlinedCallThreshold     = 2,
 	};
 
 	TEMPORARY_ALLOCATOR_GUARD();
@@ -2917,7 +2962,8 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 				continue;
 			}
 
-			isize body_instruction_count = lb_llvm_function_instruction_count(function);
+			lbLLVMFunctionMetrics metrics = lb_llvm_function_metrics(function);
+			isize body_instruction_count = metrics.instruction_count;
 			isize call_count = p->force_inline_call_count;
 			if (call_count == 0) {
 				continue;
@@ -2943,6 +2989,9 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 				existing.call_count += call_count;
 				existing.estimated_instruction_count += estimated_instruction_count;
 				existing.instance_count += 1;
+				existing.non_inlined_call_count = gb_max(existing.non_inlined_call_count, metrics.non_inlined_call_count);
+				existing.has_branching |= metrics.has_branching;
+				existing.has_pointer_or_memory_access |= metrics.has_pointer_or_memory_access;
 				continue;
 			}
 
@@ -2953,6 +3002,9 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 			warning.call_count = call_count;
 			warning.estimated_instruction_count = estimated_instruction_count;
 			warning.instance_count = 1;
+			warning.non_inlined_call_count = metrics.non_inlined_call_count;
+			warning.has_branching = metrics.has_branching;
+			warning.has_pointer_or_memory_access = metrics.has_pointer_or_memory_access;
 			string_map_set(&warning_indices, key, cast(isize)warnings.count);
 			array_add(&warnings, warning);
 		}
@@ -2961,17 +3013,22 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 	array_sort(warnings, lb_excessive_inline_warning_cmp);
 	isize report_order = warnings.count;
 	for (lbExcessiveInliningWarning const &item : warnings) {
-		if (item.body_instruction_count < BodyInstructionThreshold &&
-		    item.estimated_instruction_count < ExpansionInstructionThreshold) {
+		if (item.body_instruction_count < MinimumInstructionThreshold ||
+		    (!item.has_branching &&
+		     !item.has_pointer_or_memory_access &&
+		     item.non_inlined_call_count <= NonInlinedCallThreshold)) {
 			continue;
 		}
 		warning_with_sort(item.token, report_order--,
-			"#force_inline procedure '%.*s' has %td LLVM instructions after module optimization and %td pre-module call sites (estimated %td expanded instructions across %td generated instance(s)); remove '#force_inline' if this is not intentional, use '@(no_warn_excessive_inlining)' for a known false positive, or use '-no-warn-excessive-inlining'",
+			"#force_inline procedure '%.*s' has %td LLVM instructions after module optimization and %td pre-module call sites (estimated %td expanded instructions across %td generated instance(s)); final IR structural cost: branching=%s, pointer/memory access=%s, %td non-inlined call(s); remove '#force_inline' if this is not intentional, use '@(no_warn_excessive_inlining)' for a known false positive, or use '-no-warn-excessive-inlining'",
 			LIT(item.name),
 			item.body_instruction_count,
 			item.call_count,
 			item.estimated_instruction_count,
-			item.instance_count);
+			item.instance_count,
+			item.has_branching ? "yes" : "no",
+			item.has_pointer_or_memory_access ? "yes" : "no",
+			item.non_inlined_call_count);
 	}
 }
 
