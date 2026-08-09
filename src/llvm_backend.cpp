@@ -2922,6 +2922,7 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 	// large and has structural cost that makes forced inlining expensive.
 	enum {
 		MinimumInstructionThreshold = 256,
+		MinimumCallSiteCount        = 2,
 		NonInlinedCallThreshold     = 2,
 	};
 
@@ -3013,7 +3014,8 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 	array_sort(warnings, lb_excessive_inline_warning_cmp);
 	isize report_order = warnings.count;
 	for (lbExcessiveInliningWarning const &item : warnings) {
-		if (item.body_instruction_count < MinimumInstructionThreshold ||
+		if (item.call_count < MinimumCallSiteCount ||
+		    item.body_instruction_count < MinimumInstructionThreshold ||
 		    (!item.has_branching &&
 		     !item.has_pointer_or_memory_access &&
 		     item.non_inlined_call_count <= NonInlinedCallThreshold)) {
