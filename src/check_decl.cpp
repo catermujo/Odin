@@ -1824,6 +1824,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 	e->Procedure.no_sanitize_address = ac.no_sanitize_address;
 	e->Procedure.no_sanitize_memory  = ac.no_sanitize_memory;
 	e->Procedure.no_sanitize_thread  = ac.no_sanitize_thread;
+	e->Procedure.no_warn_excessive_inlining = ac.no_warn_excessive_inlining;
 
 	e->Procedure.fast_math_flags = ac.fast_math_flags;
 
