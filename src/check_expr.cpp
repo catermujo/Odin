@@ -1063,6 +1063,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	entity->Procedure.synchronizes_shared = base_entity->Procedure.synchronizes_shared;
 	entity->Procedure.fast_math_flags     = base_entity->Procedure.fast_math_flags;
 	entity->Procedure.generated_from_polymorphic = true;
+	entity->Procedure.no_warn_excessive_inlining = base_entity->Procedure.no_warn_excessive_inlining;
 
 	if (base_entity->flags & EntityFlag_Cold) {
 		entity->flags |= EntityFlag_Cold;
