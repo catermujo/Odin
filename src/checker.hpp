@@ -183,6 +183,7 @@ struct AttributeContext {
 	i64 foreign_import_priority_index;
 	String extra_linker_flags;
 	InstrumentationFlag no_instrumentation;
+	bool    no_warn_excessive_inlining : 1;
 
 	String  objc_class;
 	String  objc_name;
