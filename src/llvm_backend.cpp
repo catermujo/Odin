@@ -2896,6 +2896,9 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 			if (p == nullptr || p->entity == nullptr) {
 				continue;
 			}
+			if (p->entity->Procedure.no_warn_excessive_inlining) {
+				continue;
+			}
 			LLVMValueRef function = LLVMGetNamedFunction(m->mod,
 				alloc_cstring(temporary_allocator(), p->name));
 			if (function == nullptr) {
@@ -2963,7 +2966,7 @@ gb_internal void lb_warn_excessive_force_inline(lbGenerator *gen) {
 			continue;
 		}
 		warning_with_sort(item.token, report_order--,
-			"#force_inline procedure '%.*s' has %td LLVM instructions after module optimization and %td pre-module call sites (estimated %td expanded instructions across %td generated instance(s)); remove '#force_inline' if this is not intentional, or use '-no-warn-excessive-inlining'",
+			"#force_inline procedure '%.*s' has %td LLVM instructions after module optimization and %td pre-module call sites (estimated %td expanded instructions across %td generated instance(s)); remove '#force_inline' if this is not intentional, use '@(no_warn_excessive_inlining)' for a known false positive, or use '-no-warn-excessive-inlining'",
 			LIT(item.name),
 			item.body_instruction_count,
 			item.call_count,
