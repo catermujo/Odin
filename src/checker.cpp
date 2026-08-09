@@ -4817,6 +4817,12 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		}
 		ac->entry_point_only = true;
 		return true;
+	} else if (name == "no_warn_excessive_inlining") {
+		if (value != nullptr) {
+			error(value, "'%.*s' expects no parameter", LIT(name));
+		}
+		ac->no_warn_excessive_inlining = true;
+		return true;
 	} else if (name == "no_instrumentation") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind == ExactValue_Invalid) {
