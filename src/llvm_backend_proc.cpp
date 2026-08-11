@@ -2946,10 +2946,10 @@ gb_internal lbValue lb_build_builtin_simd_proc(lbProcedure *p, Ast *expr, TypeAn
 
 					LLVMValueRef nma = nullptr; // -(half_val * guess) * guess + 1.5
 					{
-						char const *name = "llvm.fma";
-						LLVMTypeRef types[1] = {lb_type(p->module, vt)};
-						LLVMValueRef args[3] = { half_guess, guess, three_halfs };
-						nma = lb_call_intrinsic(p, name, args, gb_count_of(args), types, gb_count_of(types));
+						lbValue x = {half_guess, vt};
+						lbValue y = {guess, vt};
+						lbValue z = {three_halfs, vt};
+						nma = lb_emit_mul_add(p, x, y, z, vt).value;
 					}
 
 					// guess = guess * nma
@@ -4029,16 +4029,7 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 			lbValue y = lb_emit_conv(p, lb_build_expr(p, ce->args[1]), type);
 			lbValue z = lb_emit_conv(p, lb_build_expr(p, ce->args[2]), type);
 
-
-			char const *name = "llvm.fma";
-			LLVMTypeRef types[1] = {lb_type(p->module, type)};
-
-			LLVMValueRef args[3] = { x.value, y.value, z.value };
-
-			lbValue res = {};
-			res.value = lb_call_intrinsic(p, name, args, gb_count_of(args), types, gb_count_of(types));
-			res.type = type;
-			return res;
+			return lb_emit_mul_add(p, x, y, z, type);
 		}
 
 	case BuiltinProc_mem_copy:
