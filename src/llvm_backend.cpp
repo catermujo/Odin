@@ -249,9 +249,11 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 		LLVMValueRef other_global = nullptr;
 		if (ec.e->kind == Entity_Variable) {
 			other_global = LLVMGetNamedGlobal(ec.other_module->mod, ec.cname);
-			if (other_global && (LLVMGetInitializer(other_global) != nullptr || LLVMIsExternallyInitialized(other_global))) {
+			// Foreign globals belong to the linked library and must stay externally linked.
+			if (other_global && !ec.e->Variable.is_foreign &&
+			    (LLVMGetInitializer(other_global) != nullptr || LLVMIsExternallyInitialized(other_global))) {
 				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
-				if (!ec.e->Variable.is_export && !ec.e->Variable.is_foreign) {
+				if (!ec.e->Variable.is_export) {
 					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
 				}
 			}
