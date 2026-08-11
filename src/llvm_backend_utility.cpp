@@ -2192,7 +2192,9 @@ gb_internal lbValue lb_emit_mul_add(lbProcedure *p, lbValue a, lbValue b, lbValu
 	b = lb_emit_conv(p, b, t);
 	c = lb_emit_conv(p, c, t);
 	
-	bool is_possible = !is_type_different_to_arch_endianness(t) && is_type_float(t);
+	bool is_float_or_float_vector = is_type_float(t) ||
+		(is_type_simd_vector(t) && is_type_float(base_array_type(t)));
+	bool is_possible = !is_type_different_to_arch_endianness(t) && is_float_or_float_vector;
 	
 	if (is_possible) {
 		switch (build_context.metrics.arch) {
