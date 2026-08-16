@@ -12,6 +12,9 @@ set -x
 
 $ODIN run ../test_issue_reference_range_alias.odin $COMMON -debug
 
+$ODIN run ../test_issue_nonconstant_global_broadcast.odin $COMMON
+$ODIN run ../test_issue_nonconstant_global_union.odin $COMMON
+
 if [[ $($ODIN check ../test_issue_retired_build_define.odin -no-entry-point $COMMON_CHECK 2>&1 | grep -c "Syntax Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else

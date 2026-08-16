@@ -2612,7 +2612,6 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 	if (p->objc_names) {
 		LLVMBuildCall2(p->builder, lb_type_internal_for_procedures_raw(main_module, p->objc_names->type), p->objc_names->value, nullptr, 0, "");
 	}
-
 	for (lbProcedure *init : main_module->gen->global_init_procedures) {
 		lbValue value = {init->value, init->type};
 		if (init->module != main_module) {
