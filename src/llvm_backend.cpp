@@ -2159,11 +2159,16 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 				warning(init_expr, "[Possible Code Generation Issue] Non-constant initialization is large (%lld bytes), and might cause problems with LLVM", cast(long long)sz);
 			}
 
-			LLVMTypeRef vt = llvm_addr_type(p->module, var.var);
-			lbValue src0 = lb_emit_conv(p, var.init, t);
-			LLVMValueRef src = OdinLLVMBuildTransmute(p, src0.value, vt);
-			LLVMValueRef dst = var.var.value;
-			LLVMBuildStore(p->builder, src, dst);
+			if (sz > 64) {
+				lbValue dst = {var.var.value, alloc_type_pointer(t)};
+				lbValue src = lb_address_from_load_or_generate_local(p, var.init);
+				lb_mem_copy_overlapping(p, dst, src, lb_const_int(p->module, t_int, sz), false);
+			} else {
+				lbValue src0 = lb_emit_conv(p, var.init, t);
+				LLVMTypeRef vt = llvm_addr_type(p->module, var.var);
+				LLVMValueRef src = OdinLLVMBuildTransmute(p, src0.value, vt);
+				LLVMBuildStore(p->builder, src, var.var.value);
+			}
 		}
 
 		var.is_initialized = true;
@@ -2221,7 +2226,7 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 			continue;
 		}
 
-		if (false && type_size_of(e->type) > 8) {
+		if (type_size_of(e->type) > 8) {
 			String ename = lb_get_entity_name(m, e);
 			gbString name = gb_string_make(permanent_allocator(), "");
 			name = gb_string_appendc(name, "__$startup$");
@@ -2229,8 +2234,10 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 
 			lbProcedure *dummy = lb_create_dummy_procedure(m, make_string_c(name), dummy_type);
 			dummy->is_startup = true;
+			lb_add_attribute_to_proc(m, dummy->value, "optnone");
+			lb_add_attribute_to_proc(m, dummy->value, "noinline");
 			LLVMSetVisibility(dummy->value, LLVMHiddenVisibility);
-			LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
+			LLVM_SET_INTERNAL_WEAK_LINKAGE(dummy->value);
 
 			lb_begin_procedure_body(dummy);
 			lb_init_global_var(m, dummy, e, init_expr, var);
