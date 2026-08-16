@@ -11,6 +11,10 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% run ..\test_issue_nonconstant_global_broadcast.odin -file %COMMON%  || exit /b
+%ODIN% run ..\test_issue_nonconstant_global_union.odin -file %COMMON%  || exit /b
+
+
 
 %ODIN% build ..\test_issue_shared_runtime\library.odin -file %COMMON% -debug -o:minimal -build-mode:dll -out:shared_runtime.dll || exit /b
 %ODIN% build ..\test_issue_shared_runtime\host.odin -file %COMMON% -debug -o:minimal -out:shared_runtime_host.exe || exit /b
