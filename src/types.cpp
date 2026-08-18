@@ -818,18 +818,6 @@ gb_global Type *t_atomic_memory_order = nullptr;
 
 
 
-enum OdinFastMathFlag : u8 {
-	OdinFastMath_Allow_Reassoc    = 0,
-	OdinFastMath_No_NaNs          = 1,
-	OdinFastMath_No_Infs          = 2,
-	OdinFastMath_No_Signed_Zeros  = 3,
-	OdinFastMath_Allow_Reciprocal = 4,
-	OdinFastMath_Allow_Contract   = 5,
-	OdinFastMath_Approx_Func      = 6,
-
-	OdinFastMath_COUNT,
-};
-
 char const *OdinFastMathFlag_strings[OdinFastMath_COUNT] = {
 	"Allow_Reassoc",
 	"No_NaNs",

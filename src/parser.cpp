@@ -93,6 +93,13 @@ gb_internal u64 ast_file_vet_flags(AstFile *f) {
 	return 0;
 }
 
+gb_internal u64 ast_file_fast_math_flags(AstFile *f) {
+	if (f != nullptr) {
+		return f->fast_math_flags;
+	}
+	return 0;
+}
+
 gb_internal bool ast_file_vet_style(AstFile *f) {
 	return (ast_file_vet_flags(f) & VetFlag_Style) != 0;
 }
@@ -7826,6 +7833,66 @@ gb_internal u64 parse_vet_tag(Token token_for_pos, String s, u64 base_vet_flags)
 	return vet_flags;
 }
 
+gb_internal u64 get_fast_math_flag_from_name(String const &name) {
+	if (name == "allow-reassoc") {
+		return 1ull << OdinFastMath_Allow_Reassoc;
+	} else if (name == "no-nans") {
+		return 1ull << OdinFastMath_No_NaNs;
+	} else if (name == "no-infs") {
+		return 1ull << OdinFastMath_No_Infs;
+	} else if (name == "no-signed-zeros") {
+		return 1ull << OdinFastMath_No_Signed_Zeros;
+	} else if (name == "allow-reciprocal") {
+		return 1ull << OdinFastMath_Allow_Reciprocal;
+	} else if (name == "allow-contract") {
+		return 1ull << OdinFastMath_Allow_Contract;
+	} else if (name == "approx-func") {
+		return 1ull << OdinFastMath_Approx_Func;
+	}
+	return 0;
+}
+
+gb_internal u64 parse_fast_math_tag(Token token_for_pos, String s) {
+	String const prefix = str_lit("fast-math");
+	GB_ASSERT(string_starts_with(s, prefix));
+	if (build_require_space_after(s, prefix)) {
+		syntax_error(token_for_pos, "Expected a space after #+%.*s", LIT(prefix));
+		return 0;
+	}
+	s = string_trim_whitespace(substring(s, prefix.len, s.len));
+
+	u64 fast_math_flags = 0;
+	if (s.len == 0) {
+		fast_math_flags = (1ull << OdinFastMath_COUNT) - 1;
+	}
+
+	while (s.len > 0) {
+		String p = string_trim_whitespace(vet_tag_get_token(s, &s, /*allow_colon*/false));
+		if (p.len == 0) {
+			break;
+		}
+
+		u64 flag = get_fast_math_flag_from_name(p);
+		if (flag != 0) {
+			fast_math_flags |= flag;
+		} else {
+			ERROR_BLOCK();
+			syntax_error(token_for_pos, "Invalid fast math flag name: %.*s", LIT(p));
+			error_line("\tExpected one of the following\n");
+			error_line("\tallow-reassoc\n");
+			error_line("\tno-nans\n");
+			error_line("\tno-infs\n");
+			error_line("\tno-signed-zeros\n");
+			error_line("\tallow-reciprocal\n");
+			error_line("\tallow-contract\n");
+			error_line("\tapprox-func\n");
+			return fast_math_flags;
+		}
+	}
+
+	return fast_math_flags;
+}
+
 gb_internal u64 parse_feature_tag(Token token_for_pos, String s) {
 	String const prefix = str_lit("feature");
 	GB_ASSERT(string_starts_with(s, prefix));
@@ -8035,6 +8102,8 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 	} else if (string_starts_with(lc, str_lit("feature"))) {
 		f->feature_flags |= parse_feature_tag(tok, lc);
 		f->feature_flags_set = true;
+	} else if (string_starts_with(lc, str_lit("fast-math"))) {
+		f->fast_math_flags |= parse_fast_math_tag(tok, lc);
 	} else if (lc == "lazy") {
 		if (build_context.ignore_lazy) {
 			// Ignore
