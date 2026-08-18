@@ -1503,6 +1503,8 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 
 	TypeProc *pt = &proc_type->Proc;
 	AttributeContext ac = make_attribute_context(e->Procedure.link_prefix, e->Procedure.link_suffix);
+	AstFile *file = e->token.pos.file_id ? global_files[e->token.pos.file_id] : nullptr;
+	ac.fast_math_flags = ast_file_fast_math_flags(file);
 	if (d != nullptr) {
 		check_decl_attributes(ctx, d->attributes, proc_decl_attribute, &ac);
 	}
