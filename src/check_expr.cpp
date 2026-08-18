@@ -123,6 +123,7 @@ gb_internal bool is_diverging_expr(Ast *expr);
 gb_internal isize get_procedure_param_count_excluding_defaults(Type *pt, isize *param_count_);
 
 gb_internal bool is_expr_inferred_fixed_array(Ast *type_expr);
+gb_internal bool defer_polymorphic_compound_literal(CheckerContext *c, Operand *o, Ast *expr, Type *type_hint);
 
 gb_internal Entity *find_polymorphic_record_entity(GenTypesData *found_gen_types, isize param_count, Array<Operand> const &ordered_operands);
 
@@ -6842,20 +6843,30 @@ gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize
 		Operand o = {};
 
 		Type *type_hint = nullptr;
+		Type *polymorphic_type_hint = nullptr;
 
 		if (lhs != nullptr) {
 			if (tuple_index < variadic_index) {
 				// NOTE(bill): override DeclInfo for dependency
 				Entity *e = lhs[tuple_index];
 				if (e != nullptr) {
-					type_hint = e->type;
+					if (is_type_polymorphic(e->type)) {
+						polymorphic_type_hint = e->type;
+					} else {
+						type_hint = e->type;
+					}
 				}
 			} else if (is_variadic) {
 				Entity *e = lhs[variadic_index];
 				if (e != nullptr) {
 					GB_ASSERT(e->flags & EntityFlag_Ellipsis);
 					GB_ASSERT(is_type_slice(e->type));
-					type_hint = e->type->Slice.elem;
+					Type *elem = e->type->Slice.elem;
+					if (is_type_polymorphic(elem)) {
+						polymorphic_type_hint = elem;
+					} else {
+						type_hint = elem;
+					}
 				}
 			}
 		}
@@ -6868,7 +6879,9 @@ gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize
 			o.expr = rhs;
 			add_type_and_value(c, rhs, o.mode, o.type, o.value);
 		} else {
-			check_expr_base(c, &o, rhs, type_hint);
+			if (!defer_polymorphic_compound_literal(c, &o, rhs, polymorphic_type_hint)) {
+				check_expr_base(c, &o, rhs, type_hint);
+			}
 		}
 		if (o.mode == Addressing_NoValue) {
 			error_operand_no_value(&o);
@@ -7351,6 +7364,32 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 			}
 		}
 
+		if (gen_entity != nullptr) {
+			for (isize i = 0; i < pt->param_count; i++) {
+				Operand *o = &ordered_operands[i];
+				if (o->mode == Addressing_Invalid || o->type == nullptr || !is_type_polymorphic(o->type)) {
+					continue;
+				}
+
+				Entity *e = pt->params->Tuple.variables[i];
+				if (is_type_polymorphic(e->type)) {
+					continue;
+				}
+				Ast *expr = unparen_expr(o->expr);
+				if (expr == nullptr || expr->kind != Ast_CompoundLit) {
+					continue;
+				}
+
+				Operand checked = {};
+				check_expr_with_type_hint(c, &checked, o->expr, e->type);
+				if (checked.mode == Addressing_Invalid) {
+					err = CallArgumentError_WrongTypes;
+				} else {
+					*o = checked;
+				}
+			}
+		}
+
 		for (isize i = 0; i < pt->param_count; i++) {
 			Operand *o = &ordered_operands[i];
 			if (o->mode == Addressing_Invalid) {
@@ -7476,6 +7515,26 @@ gb_internal bool is_call_expr_field_value(AstCallExpr *ce) {
 	return ce->args[0]->kind == Ast_FieldValue;
 }
 
+gb_internal bool defer_polymorphic_compound_literal(CheckerContext *c, Operand *o, Ast *expr, Type *type_hint) {
+	if (type_hint == nullptr || !is_type_polymorphic(type_hint)) {
+		return false;
+	}
+	Ast *unwrapped = unparen_expr(expr);
+	if (unwrapped == nullptr || unwrapped->kind != Ast_CompoundLit) {
+		return false;
+	}
+	ast_node(cl, CompoundLit, unwrapped);
+	if (cl->type != nullptr) {
+		return false;
+	}
+
+	o->mode = Addressing_Value;
+	o->type = type_hint;
+	o->expr = expr;
+	add_type_and_value(c, expr, o->mode, o->type, o->value);
+	return true;
+}
+
 gb_internal Entity **populate_proc_parameter_list(CheckerContext *c, Type *proc_type, isize *lhs_count_) {
 	Entity **lhs = nullptr;
 	isize lhs_count = -1;
@@ -7493,7 +7552,8 @@ gb_internal Entity **populate_proc_parameter_list(CheckerContext *c, Type *proc_
 			lhs_count = pt->params->Tuple.variables.count;
 		}
 	} else {
-		// NOTE(bill): Create 'lhs' list in order to ignore parameters which are polymorphic
+		// Keep the parameter entities so polymorphic compound literals can be checked after
+		// the call's type arguments have been inferred.
 		if (pt->params == nullptr)  {
 			lhs_count = 0;
 		} else {
@@ -7502,9 +7562,7 @@ gb_internal Entity **populate_proc_parameter_list(CheckerContext *c, Type *proc_
 		lhs = gb_alloc_array(permanent_allocator(), Entity *, lhs_count);
 		for (isize i = 0; i < lhs_count; i++) {
 			Entity *e = pt->params->Tuple.variables[i];
-			if (!is_type_polymorphic(e->type)) {
-				lhs[i] = e;
-			}
+			lhs[i] = e;
 		}
 	}
 
@@ -9393,7 +9451,9 @@ gb_internal CallArgumentData check_call_arguments(CheckerContext *c, Operand *op
 			}
 
 			Operand o = {};
-			check_expr_with_type_hint(c, &o, value, type_hint);
+			if (!defer_polymorphic_compound_literal(c, &o, value, type_hint)) {
+				check_expr_with_type_hint(c, &o, value, type_hint);
+			}
 			if (o.mode == Addressing_Invalid) {
 				any_failure = true;
 			}
