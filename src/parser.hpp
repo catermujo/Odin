@@ -89,6 +89,18 @@ struct ImportedFile {
 	isize       index;
 };
 
+enum OdinFastMathFlag : u8 {
+	OdinFastMath_Allow_Reassoc    = 0,
+	OdinFastMath_No_NaNs          = 1,
+	OdinFastMath_No_Infs          = 2,
+	OdinFastMath_No_Signed_Zeros  = 3,
+	OdinFastMath_Allow_Reciprocal = 4,
+	OdinFastMath_Allow_Contract   = 5,
+	OdinFastMath_Approx_Func      = 6,
+
+	OdinFastMath_COUNT,
+};
+
 enum AstFileFlag : u32 {
 	AstFile_IsPrivatePkg = 1<<0,
 	AstFile_IsPrivateFile = 1<<1,
@@ -130,6 +142,7 @@ struct AstFile {
 
 	u64          vet_flags;
 	u64          feature_flags;
+	u64          fast_math_flags;
 	bool         vet_flags_set;
 	bool         feature_flags_set;
 
