@@ -82,19 +82,19 @@ gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 
 	u64 fast_math_flags = e->Procedure.fast_math_flags;
 	LLVMFastMathFlags llvm_flags = 0;
-	if (fast_math_flags & OdinFastMath_Allow_Reassoc)    llvm_flags |= LLVMFastMathAllowReassoc;
-	if (fast_math_flags & OdinFastMath_No_NaNs)          llvm_flags |= LLVMFastMathNoNaNs;
-	if (fast_math_flags & OdinFastMath_No_Infs)          llvm_flags |= LLVMFastMathNoInfs;
-	if (fast_math_flags & OdinFastMath_No_Signed_Zeros)  llvm_flags |= LLVMFastMathNoSignedZeros;
-	if (fast_math_flags & OdinFastMath_Allow_Reciprocal) llvm_flags |= LLVMFastMathAllowReciprocal;
-	if (fast_math_flags & OdinFastMath_Allow_Contract)   llvm_flags |= LLVMFastMathAllowContract;
-	if (fast_math_flags & OdinFastMath_Approx_Func)      llvm_flags |= LLVMFastMathApproxFunc;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Reassoc))    llvm_flags |= LLVMFastMathAllowReassoc;
+	if (fast_math_flags & (1ull << OdinFastMath_No_NaNs))          llvm_flags |= LLVMFastMathNoNaNs;
+	if (fast_math_flags & (1ull << OdinFastMath_No_Infs))          llvm_flags |= LLVMFastMathNoInfs;
+	if (fast_math_flags & (1ull << OdinFastMath_No_Signed_Zeros))  llvm_flags |= LLVMFastMathNoSignedZeros;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Reciprocal)) llvm_flags |= LLVMFastMathAllowReciprocal;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Contract))   llvm_flags |= LLVMFastMathAllowContract;
+	if (fast_math_flags & (1ull << OdinFastMath_Approx_Func))      llvm_flags |= LLVMFastMathApproxFunc;
 
 	if (llvm_flags == 0) {
 		return;
 	}
 
-	if (fast_math_flags & OdinFastMath_Allow_Contract) {
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Contract)) {
 		char const *name = "fp-contract";
 		char const *value = "fast";
 		LLVMAttributeRef attr = LLVMCreateStringAttribute(
