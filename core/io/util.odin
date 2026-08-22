@@ -278,10 +278,14 @@ write_quoted_string :: proc(w: Writer, str: string, quote: byte = '"', n_written
 			r, width = utf8.decode_rune_in_string(s)
 		}
 		if width == 1 && r == utf8.RUNE_ERROR {
-			write_byte(w, '\\', &n)                   or_return
-			write_byte(w, 'x', &n)                    or_return
-			write_byte(w, DIGITS_LOWER[s[0]>>4], &n)  or_return
-			write_byte(w, DIGITS_LOWER[s[0]&0xf], &n) or_return
+			if for_json {
+				write_string(w, `\ufffd`, &n) or_return
+			} else {
+				write_byte(w, '\\', &n)                   or_return
+				write_byte(w, 'x', &n)                    or_return
+				write_byte(w, DIGITS_LOWER[s[0]>>4], &n)  or_return
+				write_byte(w, DIGITS_LOWER[s[0]&0xf], &n) or_return
+			}
 			continue
 		}
 
