@@ -12,6 +12,21 @@ import "core:mem/virtual"
 import "base:runtime"
 
 @test
+marshal_replaces_invalid_utf8_with_valid_json :: proc(t: ^testing.T) {
+	invalid_bytes := []byte{'0', '3', '@', 0xd0, 0xe4}
+	invalid := transmute(string)invalid_bytes
+	encoded, marshal_error := json.marshal(invalid)
+	testing.expect(t, marshal_error == nil)
+	if marshal_error != nil do return
+	defer delete(encoded)
+	testing.expect_value(t, transmute(string)encoded, `"03@��"`)
+
+	value, parse_error := json.parse(encoded)
+	defer json.destroy_value(value)
+	testing.expect(t, parse_error == nil)
+}
+
+@test
 parse_json :: proc(t: ^testing.T) {
    
 	json_data := `
