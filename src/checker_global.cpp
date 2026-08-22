@@ -1718,6 +1718,10 @@ gb_internal void check_all_global_entities(Checker *c) {
 	checker_global_entity_timing_reset();
 	checker_global_entity_timing_state.enabled = build_context.show_more_timings;
 	checker_global_variable_timing_state.enabled = build_context.show_more_timings;
+	// Entity collection is threaded and the MPSC queue is ordered by worker
+	// completion. Global checking must not depend on that scheduling order;
+	// proc-group aliases need their target groups resolved consistently first.
+	array_sort(c->info.entities, check_global_entity_cmp);
 
 	// NOTE(bill): the runtime types the checker looks up by name rather than through a declaration
 	init_preload(c);
