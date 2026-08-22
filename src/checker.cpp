@@ -844,6 +844,55 @@ gb_internal GB_COMPARE_PROC(entity_variable_pos_cmp) {
 	return token_pos_cmp(x->token.pos, y->token.pos);
 }
 
+gb_internal GB_COMPARE_PROC(check_global_entity_cmp) {
+	Entity *x = *cast(Entity **)a;
+	Entity *y = *cast(Entity **)b;
+	if (x == y) {
+		return 0;
+	}
+
+	if (x->pkg != y->pkg) {
+		if (x->pkg == nullptr) {
+			return -1;
+		}
+		if (y->pkg == nullptr) {
+			return +1;
+		}
+
+		int cmp = isize_cmp(x->pkg->order, y->pkg->order);
+		if (cmp != 0) {
+			return cmp;
+		}
+		cmp = string_compare(x->pkg->name, y->pkg->name);
+		if (cmp != 0) {
+			return cmp;
+		}
+	}
+
+	if (x->file != y->file) {
+		String path_x = x->file ? x->file->fullpath : String{};
+		String path_y = y->file ? y->file->fullpath : String{};
+		int cmp = string_compare(path_x, path_y);
+		if (cmp != 0) {
+			return cmp;
+		}
+	}
+
+	int cmp = u64_cmp(x->order_in_src, y->order_in_src);
+	if (cmp != 0) {
+		return cmp;
+	}
+	cmp = token_pos_cmp(x->token.pos, y->token.pos);
+	if (cmp != 0) {
+		return cmp;
+	}
+	cmp = i32_cmp(cast(i32)(x->kind), cast(i32)(y->kind));
+	if (cmp != 0) {
+		return cmp;
+	}
+	return string_compare(x->token.string, y->token.string);
+}
+
 
 
 gb_internal u64 check_vet_flags(CheckerContext *c) {
@@ -5975,6 +6024,11 @@ gb_internal void check_all_global_entities(Checker *c) {
 	checker_global_entity_timing_reset();
 	checker_global_entity_timing_state.enabled = build_context.show_more_timings;
 	checker_global_variable_timing_state.enabled = build_context.show_more_timings;
+
+	// Entity collection is threaded and the MPSC queue is ordered by worker
+	// completion. Global checking must not depend on that scheduling order;
+	// proc-group aliases need their target groups resolved consistently first.
+	array_sort(c->info.entities, check_global_entity_cmp);
 
 	// NOTE(bill): This must be single threaded
 	// Don't bother trying
