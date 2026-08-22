@@ -5,6 +5,7 @@ import "core:slice"
 import "core:testing"
 import "core:math/rand"
 import "core:log"
+import "core:mem"
 
 @test
 test_sort_with_indices :: proc(t: ^testing.T) {
@@ -334,4 +335,237 @@ test_linear_search_reverse :: proc(t: ^testing.T) {
 	index, found = slice.linear_search_reverse_proc(s, less_than_80)
 	testing.expect(t, found)
 	testing.expect_value(t, index, 2)
+}
+
+@test
+test_diff :: proc(t: ^testing.T) {
+	script: []slice.Diff(rune)
+	err: mem.Allocator_Error
+
+	{
+		a := []rune{'A', 'B', 'C', 'A', 'B', 'B', 'A'}
+		b := []rune{'C', 'B', 'A', 'B', 'A', 'C'}
+		script, err = slice.diff(a, b)
+		defer delete(script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 7) {return}
+		ai, bi, cost := 0, 0, 0
+		for edit in script {
+			n := len(edit.values)
+			switch edit.kind {
+			case .Keep:
+				testing.expect(t, ai + n <= len(a) && bi + n <= len(b))
+				testing.expect(t, slice.equal(edit.values, a[ai:ai + n]))
+				testing.expect(t, slice.equal(edit.values, b[bi:bi + n]))
+				ai += n
+				bi += n
+			case .Delete:
+				testing.expect(t, ai + n <= len(a))
+				testing.expect(t, slice.equal(edit.values, a[ai:ai + n]))
+				ai += n
+				cost += n
+			case .Insert:
+				testing.expect(t, bi + n <= len(b))
+				testing.expect(t, slice.equal(edit.values, b[bi:bi + n]))
+				bi += n
+				cost += n
+			}
+		}
+		testing.expect_value(t, ai, len(a))
+		testing.expect_value(t, bi, len(b))
+		testing.expect_value(t, cost, 5)
+	}
+
+	{
+		script, err = slice.diff([]rune{0}, []rune{0, 0})
+		defer delete(script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 2) {return}
+		testing.expect_value(t, script[0].kind, slice.Diff_Kind.Keep)
+		testing.expect_value(t, script[0].begin, 0)
+		testing.expect_value(t, script[0].end, 1)
+		testing.expect_value(t, script[0].values[0], rune(0))
+		testing.expect_value(t, script[1].kind, slice.Diff_Kind.Insert)
+		testing.expect_value(t, script[1].begin, 1)
+		testing.expect_value(t, script[1].end, 2)
+		testing.expect_value(t, script[1].values[0], rune(0))
+	}
+
+	{
+		int_script: []slice.Diff(int)
+		int_script, err = slice.diff(
+			[]int{0, 0, 1, 1, 0, 0},
+			[]int{1, 0, 0, 0, 0, 1},
+		)
+		defer delete(int_script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(int_script), 5) {return}
+		testing.expect_value(t, int_script[0].kind, slice.Diff_Kind.Insert)
+		testing.expect_value(t, int_script[0].begin, 0)
+		testing.expect_value(t, int_script[0].end, 1)
+		testing.expect_value(t, int_script[0].values[0], 1)
+		testing.expect_value(t, int_script[1].kind, slice.Diff_Kind.Keep)
+		testing.expect_value(t, int_script[1].begin, 0)
+		testing.expect_value(t, int_script[1].end, 2)
+		testing.expect_value(t, int_script[2].kind, slice.Diff_Kind.Delete)
+		testing.expect_value(t, int_script[2].begin, 2)
+		testing.expect_value(t, int_script[2].end, 4)
+		testing.expect_value(t, int_script[3].kind, slice.Diff_Kind.Keep)
+		testing.expect_value(t, int_script[3].begin, 4)
+		testing.expect_value(t, int_script[3].end, 6)
+		testing.expect_value(t, int_script[4].kind, slice.Diff_Kind.Insert)
+		testing.expect_value(t, int_script[4].begin, 5)
+		testing.expect_value(t, int_script[4].end, 6)
+	}
+
+	{
+		int_script: []slice.Diff(int)
+		int_script, err = slice.diff([]int{0}, []int{1, 1, 1, 1, 1})
+		defer delete(int_script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(int_script), 2) {return}
+		testing.expect_value(t, int_script[0].kind, slice.Diff_Kind.Delete)
+		testing.expect_value(t, int_script[0].begin, 0)
+		testing.expect_value(t, int_script[0].end, 1)
+		testing.expect_value(t, int_script[0].values[0], 0)
+		testing.expect_value(t, int_script[1].kind, slice.Diff_Kind.Insert)
+		testing.expect_value(t, int_script[1].begin, 0)
+		testing.expect_value(t, int_script[1].end, 5)
+		if !testing.expect_value(t, len(int_script[1].values), 5) {return}
+		testing.expect_value(t, int_script[1].values[0], 1)
+		testing.expect_value(t, int_script[1].values[4], 1)
+	}
+
+	{
+		script, err = slice.diff([]rune{}, []rune{'A', 'B', 'C'})
+		defer delete(script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 1) {return}
+		testing.expect_value(t, script[0].kind, slice.Diff_Kind.Insert)
+		testing.expect_value(t, script[0].begin, 0)
+		testing.expect_value(t, script[0].end, 3)
+		if !testing.expect_value(t, len(script[0].values), 3) {return}
+		testing.expect_value(t, script[0].values[0], 'A')
+		testing.expect_value(t, script[0].values[1], 'B')
+		testing.expect_value(t, script[0].values[2], 'C')
+	}
+
+	{
+		script, err = slice.diff([]rune{'A', 'B', 'C'}, []rune{})
+		defer delete(script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 1) {return}
+		testing.expect_value(t, script[0].kind, slice.Diff_Kind.Delete)
+		testing.expect_value(t, script[0].begin, 0)
+		testing.expect_value(t, script[0].end, 3)
+		if !testing.expect_value(t, len(script[0].values), 3) {return}
+		testing.expect_value(t, script[0].values[0], 'A')
+		testing.expect_value(t, script[0].values[1], 'B')
+		testing.expect_value(t, script[0].values[2], 'C')
+	}
+
+	{
+		script, err = slice.diff([]rune{'O', 'd', 'i', 'n'}, []rune{'O', 'd', 'i', 'n'})
+		defer delete(script)
+
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 1) {return}
+		testing.expect_value(t, script[0].kind, slice.Diff_Kind.Keep)
+		testing.expect_value(t, script[0].begin, 0)
+		testing.expect_value(t, script[0].end, 4)
+		if !testing.expect_value(t, len(script[0].values), 4) {return}
+		testing.expect_value(t, script[0].values[0], 'O')
+		testing.expect_value(t, script[0].values[1], 'd')
+		testing.expect_value(t, script[0].values[2], 'i')
+		testing.expect_value(t, script[0].values[3], 'n')
+	}
+
+	{
+		script, err = slice.diff([]rune{}, []rune{})
+		defer delete(script)
+		testing.expect_value(t, err, nil)
+		if !testing.expect_value(t, len(script), 0) {return}
+	}
+
+	{
+		a := []int{0}
+		b := []int{1, 1, 1, 1, 1}
+		saw_oom, saw_success: bool
+
+		// Sweep every allocation failure point in this small diff. The tracking
+		// allocator proves that error cleanup releases all allocations, including
+		// a snapshot whose trace append fails.
+		for fail_after in 0..<64 {
+			tracking: mem.Tracking_Allocator
+			mem.tracking_allocator_init(&tracking, context.allocator)
+
+			failing := Failing_Allocator{
+				backing = mem.tracking_allocator(&tracking),
+				fail_after = fail_after,
+			}
+			failing_allocator := failing_allocator(&failing)
+			failure_script, failure_err := slice.diff(a, b, failing_allocator)
+			delete(failure_script, failing_allocator)
+
+			if failure_err == nil {
+				saw_success = true
+			} else if failure_err == .Out_Of_Memory {
+				saw_oom = true
+			}
+			testing.expect(t, failure_err == nil || failure_err == .Out_Of_Memory)
+			testing.expect_value(t, tracking.current_memory_allocated, i64(0))
+			testing.expect_value(t, len(tracking.allocation_map), 0)
+
+			mem.tracking_allocator_destroy(&tracking)
+		}
+
+		testing.expect(t, saw_oom)
+		testing.expect(t, saw_success)
+	}
+}
+
+Failing_Allocator :: struct {
+	backing:           mem.Allocator,
+	fail_after:        int,
+	allocation_count: int,
+}
+
+failing_allocator :: proc(data: ^Failing_Allocator) -> mem.Allocator {
+	return mem.Allocator{
+		procedure = failing_allocator_proc,
+		data = data,
+	}
+}
+
+failing_allocator_proc :: proc(
+	allocator_data: rawptr,
+	mode: mem.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	loc := #caller_location,
+) -> ([]byte, mem.Allocator_Error) {
+	failing := (^Failing_Allocator)(allocator_data)
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed {
+		if failing.allocation_count >= failing.fail_after {
+			return nil, .Out_Of_Memory
+		}
+		failing.allocation_count += 1
+	}
+
+	return failing.backing.procedure(
+		failing.backing.data,
+		mode,
+		size,
+		alignment,
+		old_memory,
+		old_size,
+		loc,
+	)
 }
