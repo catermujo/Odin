@@ -10,6 +10,7 @@ build_wasm() {
 	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_image.c        -o ../lib/stb_image_wasm.o        -DSTBI_NO_STDIO
 	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_image_write.c  -o ../lib/stb_image_write_wasm.o  -DSTBI_WRITE_NO_STDIO 
 	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_image_resize.c -o ../lib/stb_image_resize_wasm.o
+	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_image_resize2.c -o ../lib/stb_image_resize2_wasm.o
 	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_truetype.c     -o ../lib/stb_truetype_wasm.o
 	# Pretends to be emscripten so stb vorbis takes the right code path for including alloca.h
 	$cc -c -Os --target=wasm32 --sysroot="$ODIN_ROOT"/vendor/libc-shim stb_vorbis.c       -o ../lib/stb_vorbis_wasm.o       -DSTB_VORBIS_NO_STDIO -D__EMSCRIPTEN__
@@ -19,10 +20,11 @@ build_wasm() {
 
 build_unix() {
 	mkdir -p ../lib
-	$cc -c -O2 -Os -fPIC stb_image.c stb_image_write.c stb_image_resize.c stb_truetype.c stb_rect_pack.c stb_vorbis.c stb_sprintf.c
+	$cc -c -O2 -Os -fPIC stb_image.c stb_image_write.c stb_image_resize.c stb_image_resize2.c stb_truetype.c stb_rect_pack.c stb_vorbis.c stb_sprintf.c
 	$ar rcs ../lib/stb_image.a        stb_image.o
 	$ar rcs ../lib/stb_image_write.a  stb_image_write.o
 	$ar rcs ../lib/stb_image_resize.a stb_image_resize.o
+	$ar rcs ../lib/stb_image_resize2.a stb_image_resize2.o
 	$ar rcs ../lib/stb_truetype.a     stb_truetype.o
 	$ar rcs ../lib/stb_rect_pack.a    stb_rect_pack.o
 	$ar rcs ../lib/stb_vorbis.a       stb_vorbis.o
@@ -47,6 +49,9 @@ build_darwin() {
 	$cc -arch x86_64 -c -O2 -Os -fPIC stb_image_resize.c -o stb_image_resize-x86_64.o -mmacosx-version-min=10.12
 	$cc -arch arm64  -c -O2 -Os -fPIC stb_image_resize.c -o stb_image_resize-arm64.o -mmacosx-version-min=10.12
 	lipo -create stb_image_resize-x86_64.o stb_image_resize-arm64.o -output ../lib/darwin/stb_image_resize.a
+	$cc -arch x86_64 -c -O2 -Os -fPIC stb_image_resize2.c -o stb_image_resize2-x86_64.o -mmacosx-version-min=10.12
+	$cc -arch arm64  -c -O2 -Os -fPIC stb_image_resize2.c -o stb_image_resize2-arm64.o -mmacosx-version-min=10.12
+	lipo -create stb_image_resize2-x86_64.o stb_image_resize2-arm64.o -output ../lib/darwin/stb_image_resize2.a
 	$cc -arch x86_64 -c -O2 -Os -fPIC stb_truetype.c -o stb_truetype-x86_64.o -mmacosx-version-min=10.12
 	$cc -arch arm64  -c -O2 -Os -fPIC stb_truetype.c -o stb_truetype-arm64.o -mmacosx-version-min=10.12
 	lipo -create stb_truetype-x86_64.o stb_truetype-arm64.o -output ../lib/darwin/stb_truetype.a
