@@ -1,6 +1,6 @@
 package objc_Foundation
 
-@(objc_class = "URLRequest")
+@(objc_class = "NSURLRequest")
 URLRequest :: struct { using _: Object }
 
 @(objc_type = URLRequest, objc_name = "alloc", objc_is_class_method = true)
