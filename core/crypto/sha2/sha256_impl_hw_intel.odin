@@ -58,7 +58,7 @@ is_hardware_accelerated_256 :: proc "contextless" () -> bool {
 		.sse41,
 		.sha,
 	}
-	return info.cpu_features() >= req_features
+	return intrinsics.has_target_feature(sha256_transf_hw) && info.cpu_features() >= req_features
 }
 
 @(private, enable_target_feature="sse2,ssse3,sse4.1,sha")
@@ -70,7 +70,7 @@ sha256_transf_hw :: proc "contextless" (ctx: ^Context_256, data: []byte) #no_bou
 	tmp = x86._mm_shuffle_epi32(tmp, 0xb1)            // CDAB
 	state_1 = x86._mm_shuffle_epi32(state_1, 0x1b)    // EFGH
 	state_0 := x86._mm_alignr_epi8(tmp, state_1, 8)   // ABEF
-	state_1 = x86._mm_blend_epi16(state_1, tmp, 0xf0) // CDGH
+	state_1 = blend_epi16_high_64(state_1, tmp) // CDGH
 
 	data := data
 	for len(data) >= BLOCK_SIZE_256 {
@@ -237,9 +237,16 @@ sha256_transf_hw :: proc "contextless" (ctx: ^Context_256, data: []byte) #no_bou
 	// Write back the updated state
 	tmp = x86._mm_shuffle_epi32(state_0, 0x1b)        // FEBA
 	state_1 = x86._mm_shuffle_epi32(state_1, 0xb1)    // DCHG
-	state_0 = x86._mm_blend_epi16(tmp, state_1, 0xf0) // DCBA
+	state_0 = blend_epi16_high_64(tmp, state_1) // DCBA
 	state_1 = x86._mm_alignr_epi8(state_1, tmp, 8)    // ABEF
 
 	intrinsics.unaligned_store((^x86.__m128i)(&ctx.h[0]), state_0)
 	intrinsics.unaligned_store((^x86.__m128i)(&ctx.h[4]), state_1)
+}
+
+@(private = "file")
+blend_epi16_high_64 :: #force_inline proc "contextless" (a, b: x86.__m128i) -> x86.__m128i {
+	a_array := simd.to_array(a)
+	b_array := simd.to_array(b)
+	return x86.__m128i{a_array[0], b_array[1]}
 }
