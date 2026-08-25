@@ -138,11 +138,23 @@ _rfc3339_to_components :: proc(rfc_datetime: string) -> (res: dt.DateTime, utc_o
 	count  := 19
 
 	if rfc_datetime[count] == '.' {
-		// Scan hundredths. The string must be at least 4 bytes long (.hhZ)
-		(len(rfc_datetime[count:]) >= 4) or_return
-		hundredths := scan_digits(rfc_datetime[count+1:], "", 2) or_return
-		count += 3
-		nanos = 10_000_000 * hundredths
+		count += 1
+		fraction_digits := 0
+		for count < len(rfc_datetime) {
+			digit := rfc_datetime[count]
+			if digit < '0' || digit > '9' {
+				break
+			}
+			if fraction_digits < 9 {
+				nanos = nanos * 10 + int(digit - '0')
+			}
+			fraction_digits += 1
+			count += 1
+		}
+		(fraction_digits > 0) or_return
+		for digit_index := fraction_digits; digit_index < 9; digit_index += 1 {
+			nanos *= 10
+		}
 	}
 
 	// Leap second handling
