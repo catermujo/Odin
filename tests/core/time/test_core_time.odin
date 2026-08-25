@@ -83,6 +83,10 @@ rfc3339_tests :: []RFC3339_Test{
 	{"1985-04-12 23:20:50.52Z",      {482196050520000000},  true,  0,    23, false},
 	// Same, but lowercase z
 	{"1985-04-12 23:20:50.52z",      {482196050520000000},  true,  0,    23, false},
+	{"1985-04-12 23:20:50.5Z",          {482196050500000000}, true, 0, 22, false},
+	{"1985-04-12 23:20:50.003362Z",     {482196050003362000}, true, 0, 27, false},
+	{"1985-04-12 23:20:50.52001905Z",   {482196050520019050}, true, 0, 29, false},
+	{"1985-04-12 23:20:50.1234567891Z", {482196050123456789}, true, 0, 31, false},
 
 	// This represents 39 minutes and 57 seconds after the 16th hour of December 19th, 1996 with an offset of -08:00 from UTC (Pacific Standard Time).
 	// Note that this is equivalent to 1996-12-20T00:39:57Z in UTC.
