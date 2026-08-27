@@ -11,6 +11,8 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN check ../test_recursive_maybe_comparison.odin -file $COMMON_CHECK 2>&1 | grep -F "Illegal type declaration cycle"
+
 $ODIN run ../test_issue_nonconstant_global_broadcast.odin -file $COMMON
 $ODIN run ../test_issue_nonconstant_global_union.odin -file $COMMON
 
