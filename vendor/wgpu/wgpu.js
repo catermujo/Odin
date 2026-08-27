@@ -1946,7 +1946,7 @@ class WebGPUInterface {
 
 				/** @type {GPUCommandEncoderDescriptor} */
 				let descriptor;
-				if (descriptor != 0) {
+				if (descriptorPtr != 0) {
 					descriptor = {
 						label: this.StringView(descriptorPtr + 4),
 					};
