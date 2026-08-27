@@ -25,6 +25,7 @@ const ENUMS = {
 	MipmapFilterMode: [undefined, "nearest", "linear", ],
 	CompareFunction: [undefined, "never", "less", "equal", "less-equal", "greater", "not-equal", "greater-equal", "always", ],
 	TextureDimension: [undefined, "1d", "2d", "3d", ],
+	ErrorFilter: [undefined, "validation", "out-of-memory", "internal", ],
 	ErrorType: [undefined, "no-error", "validation", "out-of-memory", "internal", "unknown", ],
 	WGSLLanguageFeatureName: [undefined, "readonly_and_readwrite_storage_textures", "packed_4x8_integer_dot_product", "unrestricted_pointer_parameters", "pointer_composite_access", "uniform_buffer_standard_layout", "subgroup_id", "texture_and_sampler_let", "subgroup_uniformity", "texture_formats_tier1", "linear_indexing" ],
 	PowerPreference: [undefined, "low-power", "high-performance", ],
@@ -36,12 +37,14 @@ const ENUMS = {
 	TextureAspect: [undefined, "all", "stencil-only", "depth-only"],
 	DeviceLostReason: [undefined, "unknown", "destroyed", "callback-cancelled", "failed-creation"],
 	BufferMapState: [undefined, "unmapped", "pending", "mapped"],
+	CompilationMessageType: [undefined, "error", "warning", "info"],
 	OptionalBool: [false, true, undefined],
 	ComponentSwizzle: [undefined, "0", "1", "r", "g", "b", "a"],
 	PredefinedColorSpace: [undefined, "srgb", "display-p3"],
 	ToneMappingMode: [undefined, "standard", "extended"],
 	FeatureLevel: [undefined, "compatibility", "core"],
 	TextureViewDimensions: [undefined, "1d", "2d", "2d-array", "cube", "cube-array", "3d"],
+	SurfaceGetCurrentTextureStatus: [undefined, "SuccessOptimal", "SuccessSuboptimal", "Timeout", "Outdated", "Lost", "Error"],
 
 	// WARN: used with indexOf to pass to WASM, if we would pass to JS, this needs to use official naming convention (not like Odin enums) like the ones above.
 	BackendType: [undefined, null, "WebGPU", "D3D11", "D3D12", "Metal", "Vulkan", "OpenGL", "OpenGLES"],
@@ -1093,7 +1096,15 @@ class WebGPUInterface {
 		}
 
 		this.zeroMessageAddr = this.mem.exports.wgpu_alloc(this.sizes.StringView[0]);
+		this.mem.storeI32(this.zeroMessageAddr, 0);
+		this.mem.storeUint(this.zeroMessageAddr + this.mem.intSize, 0);
 		return this.zeroMessageAddr;
+	}
+
+	releaseMessageArg(messageAddr) {
+		if (messageAddr !== 0 && messageAddr !== this.zeroMessageAddr) {
+			this.mem.exports.wgpu_free(messageAddr);
+		}
 	}
 
 	makeMessageArg(message) {
@@ -1240,15 +1251,10 @@ class WebGPUInterface {
 				const uncapturedErrorCallbackInfo = this.UncapturedErrorCallbackInfo(off(this.sizes.UncapturedErrorCallbackInfo));
 
 				adapter.requestDevice(descriptor)
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.RequestDeviceStatus.indexOf("Error"), messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then((device) => {
 						const deviceIdx = this.devices.create(device);
 
-						if (deviceLostCallbackInfo.callback !== null) {
+						if (deviceLostCallbackInfo.callback != null) {
 							device.lost.then((info) => {
 								const reason = ENUMS.DeviceLostReason.indexOf(info.reason);
 
@@ -1259,11 +1265,11 @@ class WebGPUInterface {
 								this.callCallback(deviceLostCallbackInfo, [devicePtr, reason, messageAddr]);
 
 								this.mem.exports.wgpu_free(devicePtr);
-								this.mem.exports.wgpu_free(messageAddr);
+								this.releaseMessageArg(messageAddr);
 							});
 						}
 
-						if (uncapturedErrorCallbackInfo.callback !== null) {
+						if (uncapturedErrorCallbackInfo.callback != null) {
 							device.onuncapturederror = (ev) => {
 								let status;
 								if (ev.error instanceof GPUValidationError) {
@@ -1277,12 +1283,19 @@ class WebGPUInterface {
 								}
 
 								const messageAddr = this.makeMessageArg(ev.error.message);
-								this.callCallback(uncapturedErrorCallbackInfo, [deviceIdx, status, messageAddr]);
-								this.mem.exports.wgpu_free(messageAddr);
+								const devicePtr = this.mem.exports.wgpu_alloc(4);
+								this.mem.storeI32(devicePtr, deviceIdx);
+								this.callCallback(uncapturedErrorCallbackInfo, [devicePtr, status, messageAddr]);
+								this.mem.exports.wgpu_free(devicePtr);
+								this.releaseMessageArg(messageAddr);
 							};
 						}
 
-						this.callCallback(callbackInfo, [ENUMS.ErrorType.indexOf("no-error"), deviceIdx, this.zeroMessageArg()]);
+						this.callCallback(callbackInfo, [ENUMS.RequestDeviceStatus.indexOf("Success"), deviceIdx, this.zeroMessageArg()]);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.RequestDeviceStatus.indexOf("Error"), 0, messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: returning a future? WARN that requires refactor removing await
@@ -1407,13 +1420,12 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);	
 				buffer.buffer.mapAsync(mode, offset, size)
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.MapAsyncStatus.indexOf("Error"), messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then(() => {
 						this.callCallback(callbackInfo, [ENUMS.MapAsyncStatus.indexOf("Success"), this.zeroMessageArg()]);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.MapAsyncStatus.indexOf("Error"), messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: returning a future? WARN that requires refactor removing await
@@ -1968,14 +1980,13 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				device.createComputePipelineAsync(this.ComputePipelineDescriptor(descriptorPtr))
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("ValidationError"), 0, messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then((computePipeline) => {
 						const pipelineIdx = this.computePipelines.create(computePipeline);
 						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("Success"), pipelineIdx, this.zeroMessageArg()]);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("ValidationError"), 0, messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: returning futures?
@@ -2088,14 +2099,13 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				device.createRenderPipelineAsync(this.RenderPipelineDescriptor(descriptorPtr))
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("Unknown"), 0, messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then((renderPipeline) => {
 						const renderPipelineIdx = this.renderPipelines.create(renderPipeline);
 						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("Success"), renderPipelineIdx, this.zeroMessageArg()]);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.CreatePipelineAsyncStatus.indexOf("ValidationError"), 0, messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: returning futures?
@@ -2274,11 +2284,6 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				device.popErrorScope()
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.PopErrorScopeStatus.indexOf("Error"), ENUMS.ErrorType.indexOf("unknown"), messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then((error) => {
 						if (!error) {
 							this.callCallback(callbackInfo, [ENUMS.PopErrorScopeStatus.indexOf("Success"), ENUMS.ErrorType.indexOf("no-error"), this.zeroMessageArg()]);
@@ -2296,9 +2301,13 @@ class WebGPUInterface {
 							status = ENUMS.ErrorType.indexOf("unknown");
 						}
 
-						const messageAddr = error.message;
+						const messageAddr = this.makeMessageArg(error.message);
 						this.callCallback(callbackInfo, [ENUMS.PopErrorScopeStatus.indexOf("Success"), status, messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
+						this.releaseMessageArg(messageAddr);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.PopErrorScopeStatus.indexOf("Error"), ENUMS.ErrorType.indexOf("unknown"), messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: futures?
@@ -2441,15 +2450,14 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				navigator.gpu.requestAdapter(options)
-					.catch((e) => {
-						const messageAddr = this.makeMessageArg(e.message);
-						this.callCallback(callbackInfo, [ENUMS.RequestAdapterStatus.indexOf("Error"), null, messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
 					.then((adapter) => {
 						const adapterIdx = this.adapters.create(adapter);
 
 						this.callCallback(callbackInfo, [ENUMS.RequestAdapterStatus.indexOf("Success"), adapterIdx, this.zeroMessageArg()]);
+					}, (e) => {
+						const messageAddr = this.makeMessageArg(e.message);
+						this.callCallback(callbackInfo, [ENUMS.RequestAdapterStatus.indexOf("Error"), 0, messageAddr]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: futures?
@@ -2509,14 +2517,13 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				queue.onSubmittedWorkDone()
-					.catch((e) => {
+					.then(() => {
+						this.callCallback(callbackInfo, [ENUMS.QueueWorkDoneStatus.indexOf("Success"), this.zeroMessageArg()]);
+					}, (e) => {
 						console.warn(e);
 						const messageAddr = this.makeMessageArg(e.message);
 						this.callCallback(callbackInfo, [ENUMS.QueueWorkDoneStatus.indexOf("Error"), messageAddr]);
-						this.mem.exports.wgpu_free(messageAddr);
-					})
-					.then(() => {
-						this.callCallback(callbackInfo, [ENUMS.QueueWorkDoneStatus.indexOf("Success"), this.zeroMessageArg()]);
+						this.releaseMessageArg(messageAddr);
 					});
 
 				// TODO: futures?
@@ -3046,10 +3053,6 @@ class WebGPUInterface {
 
 				const callbackInfo = this.CallbackInfo(callbackInfoPtr);
 				shaderModule.getCompilationInfo()
-					.catch((e) => {
-						console.warn(e);
-						this.callCallback(callbackInfo, [ENUMS.CompilationInfoRequestStatus.indexOf("CallbackCancelled"), null]);
-					})
 					.then((compilationInfo) => {
 						const ptrsToFree = [];
 
@@ -3089,6 +3092,9 @@ class WebGPUInterface {
 						this.callCallback(callbackInfo, [ENUMS.CompilationInfoRequestStatus.indexOf("Success"), retAddr]);
 
 						ptrsToFree.forEach(ptr => this.mem.exports.wgpu_free(ptr));
+					}, (e) => {
+						console.warn(e);
+						this.callCallback(callbackInfo, [ENUMS.CompilationInfoRequestStatus.indexOf("CallbackCancelled"), 0]);
 					});
 
 				// TODO: futures?
@@ -3220,9 +3226,11 @@ class WebGPUInterface {
 				const texture = context.getCurrentTexture();
 
 				const textureIdx = this.textures.create(texture);
+				this.mem.storeI32(texturePtr, 0);
 				this.mem.storeI32(texturePtr + 4, textureIdx);
+				this.mem.storeI32(texturePtr + 8, ENUMS.SurfaceGetCurrentTextureStatus.indexOf("SuccessOptimal"));
 
-				// TODO: determine status somehow?
+				return STATUS_SUCCESS;
 			},
 
 			/**
@@ -3230,6 +3238,7 @@ class WebGPUInterface {
 			 */
 			wgpuSurfacePresent: (surfaceIdx) => {
 				// NOTE: Not really anything to do here.
+				return STATUS_SUCCESS;
 			},
 
 			/**
