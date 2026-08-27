@@ -2809,85 +2809,121 @@ gb_internal bool is_type_lock_free(Type *t) {
 
 
 
-gb_internal bool is_type_comparable(Type *t) {
+gb_internal bool is_type_comparable_internal(Type *t, PtrSet<Type *> *visiting) {
 	t = base_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	// Recursive value types are invalid, but must not recurse until the checker stack overflows
+	// before check_for_type_cycles can report the declaration error.
+	if (ptr_set_update(visiting, t)) {
+		return false;
+	}
+
+	bool result = false;
 	switch (t->kind) {
 	case Type_Basic:
 		switch (t->Basic.kind) {
 		case Basic_UntypedNil:
 		case Basic_any:
-			return false;
+			result = false;
+			break;
 		case Basic_rune:
-			return true;
 		case Basic_string:
 		case Basic_cstring:
 		case Basic_string16:
 		case Basic_cstring16:
-			return true;
 		case Basic_typeid:
-			return true;
+			result = true;
+			break;
+		default:
+			result = true;
+			break;
 		}
-		return true;
+		break;
 	case Type_Pointer:
-		return true;
 	case Type_SoaPointer:
-		return true;
 	case Type_MultiPointer:
-		return true;
+		result = true;
+		break;
 	case Type_Enum:
-		return is_type_comparable(core_type(t));
+		result = is_type_comparable_internal(core_type(t), visiting);
+		break;
 	case Type_EnumeratedArray:
-		return is_type_comparable(t->EnumeratedArray.elem);
+		result = is_type_comparable_internal(t->EnumeratedArray.elem, visiting);
+		break;
 	case Type_Array:
-		return is_type_comparable(t->Array.elem);
+		result = is_type_comparable_internal(t->Array.elem, visiting);
+		break;
 	case Type_Proc:
 		// bare procs compare as function pointers; a closure is a 2-word {fn,env} aggregate and is
 		// not comparable (matching slices/maps), which also keeps the scalar-compare codegen path unreached.
-		return !t->Proc.is_closure;
+		result = !t->Proc.is_closure;
+		break;
 	case Type_Matrix:
-		return is_type_comparable(t->Matrix.elem);
+		result = is_type_comparable_internal(t->Matrix.elem, visiting);
+		break;
 
 	case Type_FixedCapacityDynamicArray:
-		return false;
+		result = false;
+		break;
 
 	case Type_BitSet:
-		return true;
+		result = true;
+		break;
 
 	case Type_Struct:
 		if (t->Struct.soa_kind != StructSoa_None) {
-			return false;
+			break;
 		}
 		// an unspecialized polymorphic record has no values to compare
 		if (is_type_polymorphic_record_unspecialized(t)) {
-			return false;
+			break;
 		}
 		if (t->Struct.is_raw_union) {
-			return is_type_simple_compare(t);
+			result = is_type_simple_compare(t);
+			break;
 		}
+		result = true;
 		for_array(i, t->Struct.fields) {
 			Entity *f = t->Struct.fields[i];
-			if (!is_type_comparable(f->type)) {
-				return false;
+			if (!is_type_comparable_internal(f->type, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_Union:
+		result = true;
 		for_array(i, t->Union.variants) {
 			Type *v = t->Union.variants[i];
-			if (!is_type_comparable(v)) {
-				return false;
+			if (!is_type_comparable_internal(v, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_SimdVector:
-		return true;
+		result = true;
+		break;
 
 	case Type_BitField:
-		return is_type_comparable(t->BitField.backing_type);
+		result = is_type_comparable_internal(t->BitField.backing_type, visiting);
+		break;
 	}
-	return false;
+
+	ptr_set_remove(visiting, t);
+	return result;
+}
+
+gb_internal bool is_type_comparable(Type *t) {
+	PtrSet<Type *> visiting = {};
+	ptr_set_init(&visiting);
+	bool result = is_type_comparable_internal(t, &visiting);
+	ptr_set_destroy(&visiting);
+	return result;
 }
 
 // NOTE(bill): type can be easily compared using memcmp
