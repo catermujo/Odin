@@ -263,6 +263,39 @@ async function main() {
 		assert.equal(iface.wgpuSurfacePresent(1), STATUS_SUCCESS);
 	}
 
+	{
+		const {mem, iface} = makeInterface();
+		const descriptors = [];
+		const commandEncoders = [];
+		iface.devices.get = () => ({
+			createCommandEncoder: (descriptor) => {
+				descriptors.push(descriptor);
+				return {descriptor};
+			},
+		});
+		iface.commandEncoders.create = (commandEncoder) => {
+			commandEncoders.push(commandEncoder);
+			return 100 + commandEncoders.length;
+		};
+
+		assert.equal(iface.wgpuDeviceCreateCommandEncoder(1, 0), 101);
+		assert.equal(descriptors.length, 1);
+		assert.equal(descriptors[0], undefined);
+
+		const label = "populated command encoder";
+		const labelPtr = mem.exports.wgpu_alloc(label.length);
+		mem.storeString(labelPtr, label);
+		const descriptorPtr = mem.exports.wgpu_alloc(12);
+		mem.storeI32(descriptorPtr + 0, 0);
+		mem.storeUint(descriptorPtr + 4, labelPtr);
+		mem.storeUint(descriptorPtr + 8, label.length);
+
+		assert.equal(iface.wgpuDeviceCreateCommandEncoder(1, descriptorPtr), 102);
+		assert.equal(descriptors.length, 2);
+		assert.equal(descriptors[1].label, label);
+		assert.equal(commandEncoders.length, 2);
+	}
+
 	let mapRejectMessagePtr = 0;
 	await expectPromiseCallback(
 		"mapAsync reject",
