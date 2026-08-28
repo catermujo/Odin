@@ -5369,36 +5369,64 @@ gb_internal lbAddr lb_build_array_swizzle_addr(lbProcedure *p, AstCallExpr *ce, 
 	if (index_count == 0) {
 		return addr;
 	}
-	if (addr.kind != lbAddr_SoaVariable) {
-		Type *type = base_type(lb_addr_type(addr));
-		GB_ASSERT(type->kind == Type_Array);
-		i64 count = type->Array.count;
-		if (count <= 4 && index_count <= 4) {
-			u8 indices[4] = {};
-			u8 index_count = 0;
-			for (i32 i = 1; i < ce->args.count; i++) {
-				TypeAndValue tv = type_and_value_of_expr(ce->args[i]);
-				GB_ASSERT(is_type_integer(tv.type));
-				GB_ASSERT(tv.value.kind == ExactValue_Integer);
-
-				i64 src_index = big_int_to_i64(&tv.value.value_integer);
-				indices[index_count++] = cast(u8)src_index;
-			}
-			return lb_addr_swizzle(lb_addr_get_ptr(p, addr), tv.type, index_count, indices);
-		}
-	}
-	auto indices = slice_make<i32>(permanent_allocator(), ce->args.count-1);
-	isize index_index = 0;
+	auto indices = slice_make<i32>(permanent_allocator(), index_count);
 	for (i32 i = 1; i < ce->args.count; i++) {
 		TypeAndValue tv = type_and_value_of_expr(ce->args[i]);
 		GB_ASSERT(is_type_integer(tv.type));
 		GB_ASSERT(tv.value.kind == ExactValue_Integer);
 
 		i64 src_index = big_int_to_i64(&tv.value.value_integer);
-		indices[index_index++] = cast(i32)src_index;
+		indices[i-1] = cast(i32)src_index;
 	}
+
+	// Preserve addressability when swizzling an already-swizzled value by composing the
+	// index lists. Calling lb_addr_get_ptr on one of these addresses is intentionally invalid.
+	if (addr.kind == lbAddr_Swizzle) {
+		if (index_count > 1 && index_count <= 4) {
+			u8 composed[4] = {};
+			for (isize i = 0; i < index_count; i++) {
+				GB_ASSERT(indices[i] >= 0 && indices[i] < addr.swizzle.count);
+				composed[i] = addr.swizzle.indices[indices[i]];
+			}
+			return lb_addr_swizzle(addr.addr, tv.type, cast(u8)index_count, composed);
+		}
+		auto composed = slice_make<i32>(permanent_allocator(), index_count);
+		for (isize i = 0; i < index_count; i++) {
+			GB_ASSERT(indices[i] >= 0 && indices[i] < addr.swizzle.count);
+			composed[i] = addr.swizzle.indices[indices[i]];
+		}
+		return lb_addr_swizzle_large(addr.addr, tv.type, composed);
+	}
+	if (addr.kind == lbAddr_SwizzleLarge) {
+		auto composed = slice_make<i32>(permanent_allocator(), index_count);
+		for (isize i = 0; i < index_count; i++) {
+			GB_ASSERT(indices[i] >= 0 && indices[i] < addr.swizzle_large.indices.count);
+			composed[i] = addr.swizzle_large.indices[indices[i]];
+		}
+		return lb_addr_swizzle_large(addr.addr, tv.type, composed);
+	}
+	if (addr.kind == lbAddr_SwizzleSoa) {
+		auto composed = slice_make<i32>(permanent_allocator(), index_count);
+		for (isize i = 0; i < index_count; i++) {
+			GB_ASSERT(indices[i] >= 0 && indices[i] < addr.swizzle_soa.indices.count);
+			composed[i] = addr.swizzle_soa.indices[indices[i]];
+		}
+		return lb_addr_swizzle_soa(addr.addr, addr.swizzle_soa.index, addr.swizzle_soa.index_expr, tv.type, composed);
+	}
+
 	if (addr.kind == lbAddr_SoaVariable) {
 		return lb_addr_swizzle_soa(addr.addr, addr.soa.index, addr.soa.index_expr, tv.type, indices);
+	}
+
+	Type *type = base_type(lb_addr_type(addr));
+	GB_ASSERT(type->kind == Type_Array);
+	i64 count = type->Array.count;
+	if (count <= 4 && index_count > 1 && index_count <= 4) {
+		u8 small_indices[4] = {};
+		for (isize i = 0; i < index_count; i++) {
+			small_indices[i] = cast(u8)indices[i];
+		}
+		return lb_addr_swizzle(lb_addr_get_ptr(p, addr), tv.type, cast(u8)index_count, small_indices);
 	}
 	return lb_addr_swizzle_large(lb_addr_get_ptr(p, addr), tv.type, indices);
 }
@@ -7373,10 +7401,16 @@ gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr) {
 					GB_ASSERT(sel.index.count > 0);
 					// NOTE(bill): just patch the index in place
 					sel.index[0] = addr.swizzle.indices[sel.index[0]];
+					addr = lb_addr(addr.addr);
 				} else if (addr.kind == lbAddr_SwizzleLarge) {
 					GB_ASSERT(sel.index.count > 0);
 					// NOTE(bill): just patch the index in place
-					sel.index[0] = addr.swizzle.indices[sel.index[0]];
+					sel.index[0] = addr.swizzle_large.indices[sel.index[0]];
+					addr = lb_addr(addr.addr);
+				} else if (addr.kind == lbAddr_SwizzleSoa) {
+					GB_ASSERT(sel.index.count > 0);
+					sel.index[0] = addr.swizzle_soa.indices[sel.index[0]];
+					addr = lb_addr_soa_variable(addr.addr, addr.swizzle_soa.index, addr.swizzle_soa.index_expr, nullptr, lbSoaVariable_OuterIndex);
 				}
 
 				Type *atype = type_deref(lb_addr_type(addr));
