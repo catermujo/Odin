@@ -29,6 +29,10 @@ swizzle_zwx :: proc(value: Vec4) -> Vec3 {
 	return value.zwx
 }
 
+swizzle_nested_component :: proc(value: Vec4) -> f32 {
+	return value.zwx.x
+}
+
 swizzle_bgra :: proc(value: Vec4) -> Vec4 {
 	return value.bgra
 }
@@ -49,6 +53,7 @@ main :: proc() {
 	_ = index_z({1, 2, 3})
 	_ = swizzle_z_local()
 	_ = swizzle_zwx({1, 2, 3, 4})
+	_ = swizzle_nested_component({1, 2, 3, 4})
 	_ = swizzle_bgra({1, 2, 3, 4})
 	value := Vec3{1, 2, 3}
 	_ = swizzle_ptr_y(&value)
