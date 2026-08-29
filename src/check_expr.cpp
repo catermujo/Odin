@@ -553,11 +553,13 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 			return false;
 		}
 
-		rw_mutex_shared_lock(&gen_procs->mutex); // @local-mutex
+		// Serialize the final lookup with publication so concurrent checkers cannot
+		// generate duplicate specializations with distinct local types.
+		rw_mutex_lock(&gen_procs->mutex); // @local-mutex
 		for (Entity *other : gen_procs->procs) {
 			Type *pt = base_type(other->type);
 			if (are_types_identical(pt, final_proc_type)) {
-				rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
+				rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
 
 				if (poly_proc_data) {
 					poly_proc_data->gen_entity = other;
@@ -583,7 +585,6 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 				return true;
 			}
 		}
-		rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
 	}
 
 
@@ -658,8 +659,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		}
 	}
 
-	rw_mutex_lock(&gen_procs->mutex); // @local-mutex
-		array_add(&gen_procs->procs, entity);
+	array_add(&gen_procs->procs, entity);
 	rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
 
 	ProcInfo *proc_info = permanent_alloc_item<ProcInfo>();
