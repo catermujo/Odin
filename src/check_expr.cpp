@@ -397,6 +397,7 @@ gb_internal void check_scope_decls(CheckerContext *c, Slice<Ast *> const &nodes,
 struct GeneratedPolymorphicProcedureLookupResult {
 	Entity *entity;
 	isize   candidate_count;
+	bool    found;
 };
 
 gb_internal u64 generated_polymorphic_procedure_operands_hash(Type *src, Array<Operand> const &operands) {
@@ -466,15 +467,16 @@ gb_internal bool generated_polymorphic_procedure_operands_identical(Type *src, S
 	return true;
 }
 
-gb_internal GeneratedPolymorphicProcedureLookupResult lookup_generated_polymorphic_procedure_by_operands(Type *src, GenProcsData *gen_procs, Array<Operand> const &operands, u64 operands_hash) {
+gb_internal GeneratedPolymorphicProcedureLookupResult lookup_generated_polymorphic_procedure_by_operands(Type *src, PtrMap<u64, GeneratedProcCacheEntry *> *cache, Array<Operand> const &operands, u64 operands_hash) {
 	GeneratedPolymorphicProcedureLookupResult result = {};
-	for (auto *entry = multi_map_find_first(&gen_procs->procs_by_operands, operands_hash);
+	for (auto *entry = multi_map_find_first(cache, operands_hash);
 	     entry != nullptr;
-	     entry = multi_map_find_next(&gen_procs->procs_by_operands, entry)) {
+	     entry = multi_map_find_next(cache, entry)) {
 		result.candidate_count += 1;
 		GeneratedProcCacheEntry *cache_entry = entry->value;
 		if (generated_polymorphic_procedure_operands_identical(src, cache_entry->operands, operands)) {
 			result.entity = cache_entry->entity;
+			result.found = true;
 			break;
 		}
 	}
@@ -493,19 +495,20 @@ gb_internal GeneratedPolymorphicProcedureLookupResult lookup_generated_polymorph
 	return result;
 }
 
-gb_internal void cache_generated_polymorphic_procedure(Type *src, GenProcsData *gen_procs, Array<Operand> const &operands, u64 operands_hash, Entity *entity) {
+gb_internal bool cache_generated_polymorphic_procedure(Type *src, PtrMap<u64, GeneratedProcCacheEntry *> *cache, Array<Operand> const &operands, u64 operands_hash, Entity *entity) {
 	if (operands_hash == 0) {
-		return;
+		return false;
 	}
-	if (lookup_generated_polymorphic_procedure_by_operands(src, gen_procs, operands, operands_hash).entity != nullptr) {
-		return;
+	if (lookup_generated_polymorphic_procedure_by_operands(src, cache, operands, operands_hash).found) {
+		return false;
 	}
 
 	GeneratedProcCacheEntry *entry = permanent_alloc_item<GeneratedProcCacheEntry>();
 	entry->entity = entity;
 	entry->operands = slice_make<Operand>(permanent_allocator(), operands.count);
 	gb_memcopy(entry->operands.data, operands.data, operands.count*gb_size_of(Operand));
-	multi_map_insert(&gen_procs->procs_by_operands, operands_hash, entry);
+	multi_map_insert(cache, operands_hash, entry);
+	return true;
 }
 
 gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, Entity *base_entity, Type *type,
@@ -598,6 +601,10 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 
 	auto *pt = &src->Proc;
 	bool polymorphic_timing_enabled = checker_procedure_body_timing_state.enabled;
+	bool rejected_cache_enabled = build_context.no_threaded_checker &&
+	                              old_c->in_proc_group &&
+	                              old_c->no_polymorphic_errors &&
+	                              old_c->hide_polymorphic_errors;
 	u64 operands_hash = generated_polymorphic_procedure_operands_hash(src, operands);
 	GenProcsData *gen_procs = nullptr;
 
@@ -609,13 +616,17 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 			mutex_unlock(&base_entity->Procedure.gen_procs_mutex); // @entity-mutex
 
 			u64 lookup_start = polymorphic_timing_enabled ? time_stamp_time_now() : 0;
-			GeneratedPolymorphicProcedureLookupResult lookup = lookup_generated_polymorphic_procedure_by_operands(src, gen_procs, operands, operands_hash);
+			GeneratedPolymorphicProcedureLookupResult lookup = lookup_generated_polymorphic_procedure_by_operands(src, &gen_procs->procs_by_operands, operands, operands_hash);
+			GeneratedPolymorphicProcedureLookupResult rejected_lookup = {};
+			if (!lookup.found && rejected_cache_enabled) {
+				rejected_lookup = lookup_generated_polymorphic_procedure_by_operands(src, &gen_procs->failed_procs_by_operands, operands, operands_hash);
+			}
 			if (polymorphic_timing_enabled) {
-				checker_procedure_body_timing_note_polymorphic_lookup(true, lookup.candidate_count, time_stamp_time_now() - lookup_start);
+				checker_procedure_body_timing_note_polymorphic_lookup(true, lookup.candidate_count + rejected_lookup.candidate_count, time_stamp_time_now() - lookup_start);
 			}
 			rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
 
-			if (lookup.entity != nullptr) {
+			if (lookup.found) {
 				if (poly_proc_data) {
 					poly_proc_data->gen_entity = lookup.entity;
 				}
@@ -623,6 +634,12 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 					checker_procedure_body_timing_state.polymorphic_operand_cache_hit_count += 1;
 				}
 				return true;
+			}
+			if (rejected_lookup.found) {
+				if (polymorphic_timing_enabled) {
+					checker_procedure_body_timing_state.polymorphic_operand_failure_cache_hit_count += 1;
+				}
+				return false;
 			}
 		} else {
 			mutex_unlock(&base_entity->Procedure.gen_procs_mutex); // @entity-mutex
@@ -649,6 +666,22 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	}
 
 	if (!success) {
+		if (rejected_cache_enabled && operands_hash != 0) {
+			mutex_lock(&base_entity->Procedure.gen_procs_mutex); // @entity-mutex
+			gen_procs = base_entity->Procedure.gen_procs;
+			if (gen_procs == nullptr) {
+				gen_procs = permanent_alloc_item<GenProcsData>();
+				gen_procs->procs.allocator = heap_allocator();
+				base_entity->Procedure.gen_procs = gen_procs;
+			}
+			rw_mutex_lock(&gen_procs->mutex); // @local-mutex
+			mutex_unlock(&base_entity->Procedure.gen_procs_mutex); // @entity-mutex
+			bool cached = cache_generated_polymorphic_procedure(src, &gen_procs->failed_procs_by_operands, operands, operands_hash, nullptr);
+			rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
+			if (polymorphic_timing_enabled && cached) {
+				checker_procedure_body_timing_state.polymorphic_failure_cached_count += 1;
+			}
+		}
 		return false;
 	}
 
@@ -671,7 +704,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 			rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
 			if (operands_hash != 0) {
 				rw_mutex_lock(&gen_procs->mutex); // @local-mutex
-				cache_generated_polymorphic_procedure(src, gen_procs, operands, operands_hash, lookup.entity);
+				cache_generated_polymorphic_procedure(src, &gen_procs->procs_by_operands, operands, operands_hash, lookup.entity);
 				rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
 			}
 
@@ -720,7 +753,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 			checker_procedure_body_timing_note_polymorphic_lookup(false, lookup.candidate_count, time_stamp_time_now() - lookup_start);
 		}
 		if (lookup.entity != nullptr) {
-			cache_generated_polymorphic_procedure(src, gen_procs, operands, operands_hash, lookup.entity);
+			cache_generated_polymorphic_procedure(src, &gen_procs->procs_by_operands, operands, operands_hash, lookup.entity);
 			rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
 
 			if (poly_proc_data) {
@@ -824,7 +857,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	}
 
 	array_add(&gen_procs->procs, entity);
-	cache_generated_polymorphic_procedure(src, gen_procs, operands, operands_hash, entity);
+	cache_generated_polymorphic_procedure(src, &gen_procs->procs_by_operands, operands, operands_hash, entity);
 	if (polymorphic_timing_enabled) {
 		checker_procedure_body_timing_state.polymorphic_generated_count += 1;
 	}
