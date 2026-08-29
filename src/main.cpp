@@ -2436,6 +2436,8 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 
 	timings_print_all(t);
 	show_checker_global_entity_timings(t);
+	show_checker_procedure_body_timings(t);
+	show_checker_statement_timings(t);
 
 	PRINT_PEAK_USAGE();
 
