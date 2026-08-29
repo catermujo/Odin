@@ -109,35 +109,49 @@ gb_internal gb_inline bool ptr_set_exists(PtrSet<T> *s, T ptr) {
 
 template <typename T>
 gb_internal bool ptr_set_update(PtrSet<T> *s, T ptr) { // returns true if it previously existsed
-	if (ptr_set_exists(s, ptr)) {
-		return true;
-	}
-
 	if (s->keys == nullptr) {
 		ptr_set_init(s);
-	} else if (ptr_set__full(s)) {
-		ptr_set_grow(s);
 	}
-	GB_ASSERT(s->count < s->capacity);
+	GB_ASSERT(ptr != 0);
 	GB_ASSERT(s->capacity >= 0);
 
 	usize mask = s->capacity-1;
 	u32 hash = ptr_map_hash_key(ptr);
 	usize hash_index = (cast(usize)hash) & mask;
 	GB_ASSERT(hash_index < s->capacity);
+	isize insertion_index = -1;
 	for (usize i = 0; i < s->capacity; i++) {
-		T *key_ptr = &s->keys[hash_index];
-		T key = *key_ptr;
-		GB_ASSERT(key != ptr);
-		if (key == (T)PtrSet<T>::TOMBSTONE || key == 0) {
-			*key_ptr = ptr;
-			s->count++;
-			return false;
+		T key = s->keys[hash_index];
+		if (key == ptr) {
+			return true;
+		}
+		if (key == (T)PtrSet<T>::TOMBSTONE) {
+			if (insertion_index < 0) {
+				insertion_index = cast(isize)hash_index;
+			}
+		} else if (key == 0) {
+			if (insertion_index < 0) {
+				insertion_index = cast(isize)hash_index;
+			}
+			break;
 		}
 		hash_index = (hash_index+1)&mask;
 	}
 
-	GB_PANIC("ptr set out of memory");
+	if (ptr_set__full(s)) {
+		ptr_set_grow(s);
+		mask = s->capacity-1;
+		hash_index = (cast(usize)hash) & mask;
+		while (s->keys[hash_index] != 0) {
+			hash_index = (hash_index+1)&mask;
+		}
+		insertion_index = cast(isize)hash_index;
+	}
+
+	GB_ASSERT(insertion_index >= 0);
+	GB_ASSERT(s->count < s->capacity);
+	s->keys[insertion_index] = ptr;
+	s->count++;
 	return false;
 }
 
@@ -273,5 +287,3 @@ template <typename T>
 gb_internal PtrSetIterator<T> end(PtrSet<T> &set) noexcept {
 	return PtrSetIterator<T>{&set, set.capacity};
 }*/
-
-

@@ -728,9 +728,15 @@ struct LoadDirectoryCache {
 };
 
 
+struct GeneratedProcCacheEntry {
+	Entity *       entity;
+	Slice<Operand> operands;
+};
+
 struct GenProcsData {
-	Array<Entity *> procs;
-	RwMutex         mutex;
+	Array<Entity *>                       procs;
+	PtrMap<u64, GeneratedProcCacheEntry *> procs_by_operands;
+	RwMutex                               mutex;
 };
 
 struct GenTypesData {

@@ -136,6 +136,18 @@ struct CheckerProcedureBodyTimingState {
 	isize                             body_count;
 	isize                             successful_body_count;
 	isize                             polymorphic_specialization_count;
+	isize                             polymorphic_attempt_count;
+	isize                             polymorphic_resolution_success_count;
+	isize                             polymorphic_operand_lookup_pass_count;
+	isize                             polymorphic_operand_cache_hit_count;
+	isize                             polymorphic_operand_candidate_count;
+	isize                             polymorphic_resolved_lookup_pass_count;
+	isize                             polymorphic_resolved_cache_hit_count;
+	isize                             polymorphic_resolved_candidate_count;
+	isize                             polymorphic_generated_count;
+	u64                               polymorphic_resolution_ticks;
+	u64                               polymorphic_operand_lookup_ticks;
+	u64                               polymorphic_resolved_lookup_ticks;
 	u64                               body_ticks;
 	CheckerGlobalEntityTimingBucket   buckets[CheckerProcedureBodyTiming_COUNT];
 	struct SlowBody {
@@ -166,6 +178,28 @@ gb_internal void checker_procedure_body_timing_add(CheckerProcedureBodyTimingKin
 	GB_ASSERT(kind >= 0 && kind < CheckerProcedureBodyTiming_COUNT);
 	state->buckets[kind].exclusive_ticks += ticks;
 	state->buckets[kind].call_count += 1;
+}
+
+gb_internal void checker_procedure_body_timing_note_polymorphic_resolution(u64 ticks, bool success) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	state->polymorphic_attempt_count += 1;
+	state->polymorphic_resolution_success_count += success;
+	state->polymorphic_resolution_ticks += ticks;
+}
+
+gb_internal void checker_procedure_body_timing_note_polymorphic_lookup(bool operand_lookup, isize candidate_count, u64 ticks) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	if (operand_lookup) {
+		state->polymorphic_operand_lookup_pass_count += 1;
+		state->polymorphic_operand_candidate_count += candidate_count;
+		state->polymorphic_operand_lookup_ticks += ticks;
+	} else {
+		state->polymorphic_resolved_lookup_pass_count += 1;
+		state->polymorphic_resolved_candidate_count += candidate_count;
+		state->polymorphic_resolved_lookup_ticks += ticks;
+	}
 }
 
 gb_internal void checker_statement_timing_begin(AstKind kind) {
@@ -488,6 +522,28 @@ gb_internal void show_checker_procedure_body_timings(Timings *t) {
 	checker_global_entity_timing_print_line("body other", body_other_ticks, state->body_count, phase_ms, t->freq);
 	checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_PostBody], state->buckets[CheckerProcedureBodyTiming_PostBody].exclusive_ticks, state->buckets[CheckerProcedureBodyTiming_PostBody].call_count, phase_ms, t->freq);
 	checker_global_entity_timing_print_line("dispatch/filtering", dispatch_ticks, state->dispatch_count, phase_ms, t->freq);
+
+	if (state->polymorphic_attempt_count > 0) {
+		isize request_count = state->polymorphic_attempt_count + state->polymorphic_operand_cache_hit_count;
+		gb_printf_err("\n");
+		gb_printf_err("Polymorphic Specialization Lookup\n");
+		gb_printf_err("requests                     - %td total, %td resolution attempts, %td resolved, %td generated\n",
+		              request_count,
+		              state->polymorphic_attempt_count,
+		              state->polymorphic_resolution_success_count,
+		              state->polymorphic_generated_count);
+		gb_printf_err("cache hits                    - %td operand, %td resolved-type\n",
+		              state->polymorphic_operand_cache_hit_count,
+		              state->polymorphic_resolved_cache_hit_count);
+		gb_printf_err("lookup candidates             - %td operand over %td passes, %td resolved-type over %td passes\n",
+		              state->polymorphic_operand_candidate_count,
+		              state->polymorphic_operand_lookup_pass_count,
+		              state->polymorphic_resolved_candidate_count,
+		              state->polymorphic_resolved_lookup_pass_count);
+		checker_global_entity_timing_print_line("polymorphic resolution", state->polymorphic_resolution_ticks, state->polymorphic_attempt_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("polymorphic operand lookup", state->polymorphic_operand_lookup_ticks, state->polymorphic_operand_lookup_pass_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("polymorphic resolved lookup", state->polymorphic_resolved_lookup_ticks, state->polymorphic_resolved_lookup_pass_count, phase_ms, t->freq);
+	}
 
 	gb_printf_err("\n");
 	gb_printf_err("Slowest Procedure Bodies\n");
