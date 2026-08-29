@@ -761,35 +761,25 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 			return false;
 		}
 
+		// Serialize the final lookup with publication so concurrent checkers cannot
+		// generate duplicate specializations with distinct local types.
+		rw_mutex_lock(&gen_procs->mutex); // @local-mutex
 		u64 hash = proc_type_identity_hash(final_proc_type);
-		rw_mutex_shared_lock(&gen_procs->mutex); // @local-mutex
 		for_array(i, gen_procs->procs) {
 			if (gen_procs->hashes[i] != hash) {
 				continue;
 			}
 			Entity *other = gen_procs->procs[i];
-			Type *pt = base_type(proc_entity_full_type(other));
-			if (are_types_identical_unique_tuples(pt, final_proc_type)) {
-				rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
+			Type *other_type = base_type(proc_entity_full_type(other));
+			if (are_types_identical_unique_tuples(other_type, final_proc_type)) {
+				rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
 				reuse_gen_polymorphic_procedure(other, poly_proc_data);
 				return true;
 			}
 		}
-		rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
+
 	}
 
-
-	// Re-check under the exclusive lock (the lookups above ran under a released shared lock) and
-	// hold it across construction + array_add so find-then-publish is atomic. (@local-mutex)
-	u64 final_hash = proc_type_identity_hash(final_proc_type);
-	rw_mutex_lock(&gen_procs->mutex); // @local-mutex
-	for_array(i, gen_procs->procs) {
-		Entity *other = gen_procs->procs[i];
-		if (gen_procs->hashes[i] == final_hash && are_types_identical_unique_tuples(base_type(proc_entity_full_type(other)), final_proc_type)) {
-			rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
-			return reuse_gen_polymorphic_procedure(other, poly_proc_data);
-		}
-	}
 
 	Ast *proc_lit = clone_ast(old_decl->proc_lit);
 	ast_node(pl, ProcLit, proc_lit);
