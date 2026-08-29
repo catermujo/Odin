@@ -40,6 +40,18 @@ Capture_Const :: struct {
 // Platform specific.
 Capture_Entry :: distinct _Capture_Entry
 
+when INSTRUMENTATION_MODE && CUSTOM_INSTRUMENTATION {
+	@(no_instrumentation)
+	instrumentation_enter :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
+		_custom_instrumentation_enter(a, b, loc)
+	}
+
+	@(no_instrumentation)
+	instrumentation_exit :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
+		_custom_instrumentation_exit(a, b, loc)
+	}
+}
+
 /*
 Capture a constantly sized trace (defined by `-define:ODIN_TRACE_SIZE`).
 
