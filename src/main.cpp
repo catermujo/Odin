@@ -458,6 +458,7 @@ enum BuildFlagKind {
 	BuildFlag_KeepTempFiles,
 	BuildFlag_Collection,
 	BuildFlag_Define,
+	BuildFlag_TestFiles,
 	BuildFlag_BuildMode,
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
@@ -722,6 +723,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_KeepTempFiles,           str_lit("keep-temp-files"),           BuildFlagParam_None,    Command__does_build | Command_strip_semicolon);
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
+	add_flag(&build_flags, BuildFlag_TestFiles,               str_lit("test-files"),                BuildFlagParam_None,    Command_check);
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
@@ -1233,6 +1235,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							// NOTE(bill): Allow for multiple library collections
 							continue;
 						}
+						case BuildFlag_TestFiles:
+							build_context.include_test_files = true;
+							break;
 						case BuildFlag_Define: {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String str = value.value_string;
@@ -2789,6 +2794,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		print_usage_line(3, "odin check .                     Type checks package in current directory.");
 		print_usage_line(3, "odin check <dir>                 Type checks package in <dir>.");
 		print_usage_line(3, "odin check filename.odin -file   Type checks single-file package, must contain entry point.");
+		print_usage_line(3, "odin check <dir> -test-files     Type checks package including #+test files.");
 	} else if (command == "test") {
 		print_usage_header_once();
 		print_usage_line(1, "test    Builds and runs procedures with the attribute @(test) in the initial package.");
@@ -2887,6 +2893,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(3, "@(init) @(fini) (-disable-init-fini)");
 			print_usage_line(3, "Anything Objective-C related");
 			print_usage_line(3, "The default paths to the library collections 'core' and 'vendor'");
+		}
+	}
+	if (command == "check") {
+		if (print_flag("-test-files")) {
+			print_usage_line(2, "Includes files tagged with #+test while type checking.");
 		}
 	}
 
