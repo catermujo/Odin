@@ -223,6 +223,8 @@ else
 	exit 1
 fi
 $ODIN test ../test_issue_proc_constant_instantiation.odin $COMMON
+$ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON
+$ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON -no-threaded-checker
 $ODIN test ../test_issue_swizzle_multi_assign.odin $COMMON
 $ODIN test ../test_issue_global_when_order.odin $COMMON
 if [[ $($ODIN check ../test_issue_global_when_cycle.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Contradictory global 'when'") -eq 4 ]]; then

@@ -780,6 +780,17 @@ struct GeneratedProcCacheEntry {
 	Slice<Operand> operands;
 };
 
+struct ProcGroupCallCacheEntry {
+	Entity *       proc_group;
+	Entity *       entity;
+	Type *         type;
+	Slice<Operand> positional_operands;
+	Slice<Operand> named_operands;
+	Slice<String>  named_argument_names;
+	isize          candidate_count;
+	bool           variadic_expand;
+};
+
 struct GenProcsData {
 	Array<Entity *>                       procs;
 	Array<u64>                            hashes; // `proc_type_identity_hash` of each of `procs`
@@ -911,6 +922,7 @@ struct CheckerInfo {
 	PtrMap<Ast *, Ast *> assignment_overloaded_call_expr_map;
 	BlockingMutex range_stmt_iterator_overload_state_mutex;
 	PtrMap<Ast *, Entity *> range_stmt_iterator_overload_state_map;
+	PtrMap<u64, ProcGroupCallCacheEntry *> proc_group_call_cache;
 
 
 	BlockingMutex                       load_directory_mutex;
