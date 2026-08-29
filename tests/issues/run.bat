@@ -11,6 +11,9 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% run ..\test_issue_polymorphic_proc_identity.odin -file %COMMON%  || exit /b
+
+
 %ODIN% run ..\test_issue_nonconstant_global_broadcast.odin -file %COMMON%  || exit /b
 %ODIN% run ..\test_issue_nonconstant_global_union.odin -file %COMMON%  || exit /b
 
