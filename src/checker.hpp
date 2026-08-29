@@ -734,9 +734,10 @@ struct GeneratedProcCacheEntry {
 };
 
 struct GenProcsData {
-	Array<Entity *>                       procs;
+	Array<Entity *>                        procs;
 	PtrMap<u64, GeneratedProcCacheEntry *> procs_by_operands;
-	RwMutex                               mutex;
+	PtrMap<u64, GeneratedProcCacheEntry *> failed_procs_by_operands;
+	RwMutex                                mutex;
 };
 
 struct GenTypesData {

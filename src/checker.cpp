@@ -140,11 +140,13 @@ struct CheckerProcedureBodyTimingState {
 	isize                             polymorphic_resolution_success_count;
 	isize                             polymorphic_operand_lookup_pass_count;
 	isize                             polymorphic_operand_cache_hit_count;
+	isize                             polymorphic_operand_failure_cache_hit_count;
 	isize                             polymorphic_operand_candidate_count;
 	isize                             polymorphic_resolved_lookup_pass_count;
 	isize                             polymorphic_resolved_cache_hit_count;
 	isize                             polymorphic_resolved_candidate_count;
 	isize                             polymorphic_generated_count;
+	isize                             polymorphic_failure_cached_count;
 	u64                               polymorphic_resolution_ticks;
 	u64                               polymorphic_operand_lookup_ticks;
 	u64                               polymorphic_resolved_lookup_ticks;
@@ -524,7 +526,9 @@ gb_internal void show_checker_procedure_body_timings(Timings *t) {
 	checker_global_entity_timing_print_line("dispatch/filtering", dispatch_ticks, state->dispatch_count, phase_ms, t->freq);
 
 	if (state->polymorphic_attempt_count > 0) {
-		isize request_count = state->polymorphic_attempt_count + state->polymorphic_operand_cache_hit_count;
+		isize request_count = state->polymorphic_attempt_count +
+		                      state->polymorphic_operand_cache_hit_count +
+		                      state->polymorphic_operand_failure_cache_hit_count;
 		gb_printf_err("\n");
 		gb_printf_err("Polymorphic Specialization Lookup\n");
 		gb_printf_err("requests                     - %td total, %td resolution attempts, %td resolved, %td generated\n",
@@ -532,9 +536,11 @@ gb_internal void show_checker_procedure_body_timings(Timings *t) {
 		              state->polymorphic_attempt_count,
 		              state->polymorphic_resolution_success_count,
 		              state->polymorphic_generated_count);
-		gb_printf_err("cache hits                    - %td operand, %td resolved-type\n",
+		gb_printf_err("cache hits                    - %td operand, %td rejected, %td resolved-type\n",
 		              state->polymorphic_operand_cache_hit_count,
+		              state->polymorphic_operand_failure_cache_hit_count,
 		              state->polymorphic_resolved_cache_hit_count);
+		gb_printf_err("cached rejected resolutions   - %td\n", state->polymorphic_failure_cached_count);
 		gb_printf_err("lookup candidates             - %td operand over %td passes, %td resolved-type over %td passes\n",
 		              state->polymorphic_operand_candidate_count,
 		              state->polymorphic_operand_lookup_pass_count,
@@ -3642,8 +3648,9 @@ gb_internal void collect_testing_procedures_of_package(Checker *c, AstPackage *p
 }
 
 gb_internal void generate_minimum_dependency_set_internal(Checker *c, Entity *start) {
-	// auto const &add_to_set = add_dependency_to_set;
-	auto const &add_to_set = add_dependency_to_set_threaded;
+	void (*add_to_set)(Checker *, Entity *) = build_context.no_threaded_checker
+	                                         ? add_dependency_to_set
+	                                         : add_dependency_to_set_threaded;
 
 	Scope *builtin_scope = builtin_pkg->scope;
 	for_array(i, c->info.definitions) {
