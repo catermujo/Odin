@@ -961,9 +961,17 @@ parse_float_prefix_generic :: proc($T: typeid, str: string) -> (value: T, nr: in
 		case 4:
 			value = cast(F)transmute(f16)cast(u16)as_int
 		case 8:
-			value = cast(F)transmute(f32)cast(u32)as_int
+			when F == f32 {
+				value = transmute(f32)cast(u32)as_int
+			} else {
+				value = cast(F)transmute(f32)cast(u32)as_int
+			}
 		case 16:
-			value = cast(F)transmute(f64)as_int
+			when F == f64 {
+				value = transmute(f64)as_int
+			} else {
+				value = cast(F)transmute(f64)as_int
+			}
 		case:
 			ok = false
 		}
