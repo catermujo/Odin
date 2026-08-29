@@ -11,6 +11,9 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% test ..\test_issue_proc_group_cached_signature.odin -file %COMMON% || exit /b
+%ODIN% test ..\test_issue_proc_group_cached_signature.odin -file %COMMON% -no-threaded-checker || exit /b
+
 %ODIN% run ..\test_issue_polymorphic_rejected_cache.odin -file %COMMON% -no-threaded-checker || exit /b
 
 

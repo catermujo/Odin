@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN test ../test_issue_proc_group_cached_signature.odin -file $COMMON
+$ODIN test ../test_issue_proc_group_cached_signature.odin -file $COMMON -no-threaded-checker
+
 $ODIN run ../test_issue_polymorphic_rejected_cache.odin -file $COMMON -no-threaded-checker
 
 
