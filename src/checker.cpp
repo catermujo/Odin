@@ -147,9 +147,17 @@ struct CheckerProcedureBodyTimingState {
 	isize                             polymorphic_resolved_candidate_count;
 	isize                             polymorphic_generated_count;
 	isize                             polymorphic_failure_cached_count;
+	isize                             proc_group_selection_count;
+	isize                             proc_group_cacheable_count;
+	isize                             proc_group_cache_hit_count;
+	isize                             proc_group_cache_candidate_count;
+	isize                             proc_group_candidate_count;
+	isize                             proc_group_avoided_candidate_count;
 	u64                               polymorphic_resolution_ticks;
 	u64                               polymorphic_operand_lookup_ticks;
 	u64                               polymorphic_resolved_lookup_ticks;
+	u64                               proc_group_cache_lookup_ticks;
+	u64                               proc_group_candidate_ticks;
 	u64                               body_ticks;
 	CheckerGlobalEntityTimingBucket   buckets[CheckerProcedureBodyTiming_COUNT];
 	struct SlowBody {
@@ -549,6 +557,21 @@ gb_internal void show_checker_procedure_body_timings(Timings *t) {
 		checker_global_entity_timing_print_line("polymorphic resolution", state->polymorphic_resolution_ticks, state->polymorphic_attempt_count, phase_ms, t->freq);
 		checker_global_entity_timing_print_line("polymorphic operand lookup", state->polymorphic_operand_lookup_ticks, state->polymorphic_operand_lookup_pass_count, phase_ms, t->freq);
 		checker_global_entity_timing_print_line("polymorphic resolved lookup", state->polymorphic_resolved_lookup_ticks, state->polymorphic_resolved_lookup_pass_count, phase_ms, t->freq);
+	}
+
+	if (state->proc_group_selection_count > 0) {
+		gb_printf_err("\n");
+		gb_printf_err("Procedure Group Selection\n");
+		gb_printf_err("requests                     - %td total, %td cacheable, %td winner-cache hits\n",
+		              state->proc_group_selection_count,
+		              state->proc_group_cacheable_count,
+		              state->proc_group_cache_hit_count);
+		gb_printf_err("candidate checks             - %td performed, %td avoided\n",
+		              state->proc_group_candidate_count,
+		              state->proc_group_avoided_candidate_count);
+		gb_printf_err("lookup candidates             - %td\n", state->proc_group_cache_candidate_count);
+		checker_global_entity_timing_print_line("procedure group candidate checks", state->proc_group_candidate_ticks, state->proc_group_candidate_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("procedure group cache lookup", state->proc_group_cache_lookup_ticks, state->proc_group_cacheable_count, phase_ms, t->freq);
 	}
 
 	gb_printf_err("\n");
@@ -2285,6 +2308,7 @@ gb_internal void init_checker_info(CheckerInfo *i) {
 	map_init(&i->assignment_operation_expr_map);
 	map_init(&i->assignment_overloaded_call_expr_map);
 	map_init(&i->range_stmt_iterator_overload_state_map);
+	map_init(&i->proc_group_call_cache);
 
 	mpsc_init(&i->entity_queue, a); // 1<<20);
 	mpsc_init(&i->definition_queue, a); //); // 1<<20);
@@ -2327,6 +2351,7 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	map_destroy(&i->assignment_operation_expr_map);
 	map_destroy(&i->assignment_overloaded_call_expr_map);
 	map_destroy(&i->range_stmt_iterator_overload_state_map);
+	map_destroy(&i->proc_group_call_cache);
 
 	mpsc_destroy(&i->all_procedures_queue);
 
