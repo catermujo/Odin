@@ -775,10 +775,16 @@ struct LoadDirectoryCache {
 };
 
 
+struct GeneratedProcCacheEntry {
+	Entity *       entity;
+	Slice<Operand> operands;
+};
+
 struct GenProcsData {
-	Array<Entity *> procs;
-	Array<u64>      hashes; // `proc_type_identity_hash` of each of `procs`
-	RwMutex         mutex;
+	Array<Entity *>                       procs;
+	Array<u64>                            hashes; // `proc_type_identity_hash` of each of `procs`
+	PtrMap<u64, GeneratedProcCacheEntry *> procs_by_operands;
+	RwMutex                               mutex;
 };
 
 struct GenTypesData {
