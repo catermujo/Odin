@@ -12,6 +12,8 @@ set -x
 
 $ODIN run ../test_issue_reference_range_alias.odin $COMMON -debug
 
+$ODIN run ../test_issue_polymorphic_rejected_cache.odin $COMMON -no-threaded-checker
+
 $ODIN run ../test_issue_polymorphic_proc_identity.odin $COMMON
 
 $ODIN run ../test_issue_nonconstant_global_broadcast.odin $COMMON
