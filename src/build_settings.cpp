@@ -647,6 +647,7 @@ struct BuildContext {
 	Array<String> extra_packages;
 
 	bool      test_all_packages;
+	bool      include_test_files;
 
 	gbAffinity affinity;
 	isize      thread_count;
@@ -678,6 +679,10 @@ struct BuildContext {
 };
 
 gb_global BuildContext build_context = {0};
+
+gb_internal bool is_test_context(void) {
+	return build_context.command_kind == Command_test || build_context.include_test_files;
+}
 
 gb_internal bool IS_ODIN_DEBUG(void) {
 	return build_context.ODIN_DEBUG;
