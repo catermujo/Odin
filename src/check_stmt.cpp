@@ -708,6 +708,14 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 
 gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags);
 gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
+	bool statement_timing_enabled = checker_procedure_body_timing_state.enabled;
+	if (statement_timing_enabled) {
+		checker_statement_timing_begin(node->kind);
+	}
+	defer (if (statement_timing_enabled) {
+		checker_statement_timing_end();
+	});
+
 	u32 prev_state_flags = ctx->state_flags;
 
 	if (node->state_flags != 0) {
