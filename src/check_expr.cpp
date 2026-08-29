@@ -400,13 +400,17 @@ struct GeneratedPolymorphicProcedureLookupResult {
 	bool    found;
 };
 
-gb_internal u64 generated_polymorphic_procedure_operands_hash(Type *src, Array<Operand> const &operands) {
-	GB_ASSERT(src->kind == Type_Proc);
-	if (src->Proc.param_count != operands.count) {
-		return 0;
+gb_internal u64 checker_cache_hash_finalize(u64 hash) {
+	if (hash == 0) {
+		hash = 1;
 	}
+	if (hash == PtrMapConstant<u64>::TOMBSTONE()) {
+		hash -= 1;
+	}
+	return hash;
+}
 
-	u64 hash = 0xcbf29ce484222325ull;
+gb_internal u64 checker_operands_hash(Array<Operand> const &operands, u64 hash) {
 	hash = fnv64a(&operands.count, gb_size_of(operands.count), hash);
 
 	for (isize i = 0; i < operands.count; i++) {
@@ -438,18 +442,24 @@ gb_internal u64 generated_polymorphic_procedure_operands_hash(Type *src, Array<O
 		hash = fnv64a(&builtin_id, gb_size_of(builtin_id), hash);
 		hash = fnv64a(&proc_group, gb_size_of(proc_group), hash);
 	}
-
-	if (hash == 0) {
-		hash = 1;
-	}
-	if (hash == PtrMapConstant<u64>::TOMBSTONE()) {
-		hash -= 1;
-	}
 	return hash;
 }
 
-gb_internal bool generated_polymorphic_procedure_operands_identical(Type *src, Slice<Operand> cached, Array<Operand> const &operands) {
-	if (cached.count != operands.count || src->Proc.param_count != operands.count) {
+gb_internal u64 generated_polymorphic_procedure_operands_hash(Type *src, Array<Operand> const &operands) {
+	GB_ASSERT(src->kind == Type_Proc);
+	if (src->Proc.param_count != operands.count) {
+		return 0;
+	}
+
+	u64 hash = checker_operands_hash(operands, 0xcbf29ce484222325ull);
+	if (hash == 0) {
+		return 0;
+	}
+	return checker_cache_hash_finalize(hash);
+}
+
+gb_internal bool checker_operands_identical(Slice<Operand> cached, Array<Operand> const &operands) {
+	if (cached.count != operands.count) {
 		return false;
 	}
 
@@ -465,6 +475,13 @@ gb_internal bool generated_polymorphic_procedure_operands_identical(Type *src, S
 		}
 	}
 	return true;
+}
+
+gb_internal bool generated_polymorphic_procedure_operands_identical(Type *src, Slice<Operand> cached, Array<Operand> const &operands) {
+	if (src->Proc.param_count != operands.count) {
+		return false;
+	}
+	return checker_operands_identical(cached, operands);
 }
 
 gb_internal GeneratedPolymorphicProcedureLookupResult lookup_generated_polymorphic_procedure_by_operands(Type *src, PtrMap<u64, GeneratedProcCacheEntry *> *cache, Array<Operand> const &operands, u64 operands_hash) {
@@ -508,6 +525,102 @@ gb_internal bool cache_generated_polymorphic_procedure(Type *src, PtrMap<u64, Ge
 	entry->operands = slice_make<Operand>(permanent_allocator(), operands.count);
 	gb_memcopy(entry->operands.data, operands.data, operands.count*gb_size_of(Operand));
 	multi_map_insert(cache, operands_hash, entry);
+	return true;
+}
+
+struct ProcGroupCallCacheLookupResult {
+	ProcGroupCallCacheEntry *entry;
+	isize                    candidate_count;
+};
+
+gb_internal u64 proc_group_call_cache_hash(Entity *proc_group,
+	Array<Operand> const &positional_operands, Array<Operand> const &named_operands,
+	Slice<Ast *> const &named_args, bool variadic_expand) {
+	if (proc_group == nullptr || proc_group->kind != Entity_ProcGroup || proc_group->decl_info == nullptr ||
+	    named_args.count != named_operands.count) {
+		return 0;
+	}
+
+	u64 hash = 0xcbf29ce484222325ull;
+	u64 proc_group_key = cast(u64)cast(uintptr)proc_group;
+	hash = fnv64a(&proc_group_key, gb_size_of(proc_group_key), hash);
+	hash = fnv64a(&variadic_expand, gb_size_of(variadic_expand), hash);
+	hash = checker_operands_hash(positional_operands, hash);
+	if (hash == 0) {
+		return 0;
+	}
+	hash = checker_operands_hash(named_operands, hash);
+	if (hash == 0) {
+		return 0;
+	}
+
+	hash = fnv64a(&named_args.count, gb_size_of(named_args.count), hash);
+	for (Ast *arg : named_args) {
+		if (arg->kind != Ast_FieldValue || arg->FieldValue.field->kind != Ast_Ident) {
+			return 0;
+		}
+		String name = arg->FieldValue.field->Ident.token.string;
+		hash = fnv64a(&name.len, gb_size_of(name.len), hash);
+		hash = fnv64a(name.text, name.len, hash);
+	}
+
+	return checker_cache_hash_finalize(hash);
+}
+
+gb_internal ProcGroupCallCacheLookupResult lookup_proc_group_call_cache(CheckerInfo *info, Entity *proc_group,
+	Array<Operand> const &positional_operands, Array<Operand> const &named_operands,
+	Slice<Ast *> const &named_args, bool variadic_expand, u64 hash) {
+	ProcGroupCallCacheLookupResult result = {};
+	for (auto *map_entry = multi_map_find_first(&info->proc_group_call_cache, hash);
+	     map_entry != nullptr;
+	     map_entry = multi_map_find_next(&info->proc_group_call_cache, map_entry)) {
+		result.candidate_count += 1;
+		ProcGroupCallCacheEntry *entry = map_entry->value;
+		if (entry->proc_group != proc_group || entry->variadic_expand != variadic_expand ||
+		    !checker_operands_identical(entry->positional_operands, positional_operands) ||
+		    !checker_operands_identical(entry->named_operands, named_operands) ||
+		    entry->named_argument_names.count != named_args.count) {
+			continue;
+		}
+
+		bool names_match = true;
+		for_array(i, named_args) {
+			Ast *arg = named_args[i];
+			if (arg->kind != Ast_FieldValue || arg->FieldValue.field->kind != Ast_Ident ||
+			    entry->named_argument_names[i] != arg->FieldValue.field->Ident.token.string) {
+				names_match = false;
+				break;
+			}
+		}
+		if (names_match) {
+			result.entry = entry;
+			break;
+		}
+	}
+	return result;
+}
+
+gb_internal bool cache_proc_group_call(CheckerInfo *info, Entity *proc_group, Entity *entity,
+	Array<Operand> const &positional_operands, Array<Operand> const &named_operands,
+	Slice<Ast *> const &named_args, bool variadic_expand, u64 hash, isize candidate_count) {
+	if (hash == 0 || lookup_proc_group_call_cache(info, proc_group, positional_operands, named_operands, named_args, variadic_expand, hash).entry != nullptr) {
+		return false;
+	}
+
+	ProcGroupCallCacheEntry *entry = permanent_alloc_item<ProcGroupCallCacheEntry>();
+	entry->proc_group = proc_group;
+	entry->entity = entity;
+	entry->candidate_count = candidate_count;
+	entry->variadic_expand = variadic_expand;
+	entry->positional_operands = slice_make<Operand>(permanent_allocator(), positional_operands.count);
+	entry->named_operands = slice_make<Operand>(permanent_allocator(), named_operands.count);
+	entry->named_argument_names = slice_make<String>(permanent_allocator(), named_args.count);
+	gb_memcopy(entry->positional_operands.data, positional_operands.data, positional_operands.count*gb_size_of(Operand));
+	gb_memcopy(entry->named_operands.data, named_operands.data, named_operands.count*gb_size_of(Operand));
+	for_array(i, named_args) {
+		entry->named_argument_names[i] = named_args[i]->FieldValue.field->Ident.token.string;
+	}
+	multi_map_insert(&info->proc_group_call_cache, hash, entry);
 	return true;
 }
 
@@ -8839,6 +8952,7 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 	data.result_type = t_invalid;
 
 	GB_ASSERT(operand->mode == Addressing_ProcGroup);
+	Entity *proc_group = operand->proc_group;
 	auto procs = proc_group_entities_cloned(c, *operand);
 
 	if (procs.count > 1) {
@@ -9057,6 +9171,39 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		array_add(&named_operands, o);
 	}
 
+	bool proc_group_timing_enabled = checker_procedure_body_timing_state.enabled;
+	u64 proc_group_cache_hash = 0;
+	if (proc_group_timing_enabled) {
+		checker_procedure_body_timing_state.proc_group_selection_count += 1;
+	}
+	if (build_context.no_threaded_checker) {
+		bool variadic_expand = ce->ellipsis.pos.line != 0;
+		proc_group_cache_hash = proc_group_call_cache_hash(proc_group, positional_operands, named_operands, named_args, variadic_expand);
+		if (proc_group_cache_hash != 0) {
+			u64 lookup_start = proc_group_timing_enabled ? time_stamp_time_now() : 0;
+			ProcGroupCallCacheLookupResult lookup = lookup_proc_group_call_cache(c->info, proc_group,
+				positional_operands, named_operands, named_args, variadic_expand, proc_group_cache_hash);
+			if (proc_group_timing_enabled) {
+				checker_procedure_body_timing_state.proc_group_cacheable_count += 1;
+				checker_procedure_body_timing_state.proc_group_cache_candidate_count += lookup.candidate_count;
+				checker_procedure_body_timing_state.proc_group_cache_lookup_ticks += time_stamp_time_now() - lookup_start;
+			}
+			if (lookup.entry != nullptr) {
+				if (proc_group_timing_enabled) {
+					checker_procedure_body_timing_state.proc_group_cache_hit_count += 1;
+					checker_procedure_body_timing_state.proc_group_avoided_candidate_count += lookup.entry->candidate_count;
+				}
+				Entity *e = lookup.entry->entity;
+				check_call_arguments_single(c, call, operand,
+					e, e->type,
+					positional_operands, named_operands,
+					CallArgumentErrorMode::ShowErrors,
+					&data, false);
+				return data;
+			}
+		}
+	}
+
 	auto valids = array_make<ValidIndexAndScore>(temporary_allocator(), 0, procs.count);
 
 	auto proc_entities = array_make<Entity *>(temporary_allocator(), 0, procs.count*2 + 1);
@@ -9070,6 +9217,8 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 	defer (gb_string_free(expr_name));
 
 	c->in_proc_group = true;
+	isize proc_group_candidate_count = 0;
+	u64 proc_group_candidate_start = proc_group_timing_enabled ? time_stamp_time_now() : 0;
 	for_array(i, procs) {
 		Entity *p = procs[i];
 		if (p->flags & EntityFlag_Disabled) {
@@ -9078,6 +9227,7 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 
 		Type *pt = base_type(p->type);
 		if (pt != nullptr && is_type_proc(pt)) {
+			proc_group_candidate_count += 1;
 			CallArgumentData data = {};
 			CheckerContext ctx = *c;
 
@@ -9142,6 +9292,10 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		}
 	}
 	c->in_proc_group = false;
+	if (proc_group_timing_enabled) {
+		checker_procedure_body_timing_state.proc_group_candidate_count += proc_group_candidate_count;
+		checker_procedure_body_timing_state.proc_group_candidate_ticks += time_stamp_time_now() - proc_group_candidate_start;
+	}
 
 	if (max_matched_features > 0) {
 		for_array(i, valids) {
@@ -9548,11 +9702,17 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		Entity *e = proc_entities[valids[0].index];
 		GB_ASSERT(e != nullptr);
 
-		check_call_arguments_single(c, call, operand,
+		bool success = check_call_arguments_single(c, call, operand,
 			e, e->type,
 			positional_operands, named_operands,
 			CallArgumentErrorMode::ShowErrors,
 			&data, false);
+		if (success && proc_group_cache_hash != 0) {
+			bool variadic_expand = ce->ellipsis.pos.line != 0;
+			cache_proc_group_call(c->info, proc_group, e,
+				positional_operands, named_operands, named_args, variadic_expand,
+				proc_group_cache_hash, proc_group_candidate_count);
+		}
 		return data;
 	}
 
