@@ -880,7 +880,11 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		// NOTE(bill): A failed candidate is checked again when called directly to get its errors reported
 		if (is_found && (found.result != nullptr || is_probe)) {
 			if (polymorphic_timing_enabled) {
+				if (found.result == nullptr) {
+					checker_procedure_body_timing_state.polymorphic_operand_failure_cache_hit_count += 1;
+				} else {
 				checker_procedure_body_timing_state.polymorphic_operand_cache_hit_count += 1;
+				}
 			}
 			for (Entity *e : found.deps) {
 				add_dependency(info, old_c->decl, e);
@@ -928,6 +932,9 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 
 		rw_mutex_lock(&gen_procs->mutex);
 		array_add(&gen_procs->lookups, l);
+		if (polymorphic_timing_enabled && result == nullptr) {
+			checker_procedure_body_timing_state.polymorphic_failure_cached_count += 1;
+		}
 		rw_mutex_unlock(&gen_procs->mutex);
 	};
 

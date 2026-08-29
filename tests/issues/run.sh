@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN run ../test_issue_polymorphic_rejected_cache.odin -file $COMMON -no-threaded-checker
+
+
 $ODIN run ../test_issue_polymorphic_proc_identity.odin -file $COMMON
 
 
