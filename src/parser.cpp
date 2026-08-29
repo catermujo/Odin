@@ -6796,7 +6796,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 		} else {
 			syntax_error(pos, "Empty directory that contains no .odin files: %.*s", LIT(rel_path));
 		}
-		if (build_context.command_kind == Command_test) {
+		if (is_test_context()) {
 			error_line("\tSuggestion: Make an .odin file that imports packages to test and use the `-all-packages` flag.");
 		}
 		return nullptr;
@@ -8083,7 +8083,7 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 		f->vet_flags = parse_vet_tag(tok, lc, ast_file_vet_flags(f));
 		f->vet_flags_set = true;
 	} else if (string_starts_with(lc, str_lit("test"))) {
-		if ((build_context.command_kind & Command_test) == 0) {
+		if (!is_test_context()) {
 			return false;
 		}
 	} else if (string_starts_with(lc, str_lit("ignore"))) {
@@ -8410,7 +8410,7 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 		try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
 		p->init_fullpath = init_fullpath;
 
-		if (build_context.command_kind == Command_test) {
+		if (is_test_context()) {
 			bool ok = false;
 			String s = get_fullpath_core_collection(permanent_allocator(), str_lit("testing"), &ok);
 			if (!ok) {

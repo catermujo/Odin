@@ -1712,7 +1712,7 @@ gb_internal void init_universal(void) {
 	add_global_bool_constant("ODIN_DEFAULT_TO_PANIC_ALLOCATOR", bc->ODIN_DEFAULT_TO_PANIC_ALLOCATOR);
 	add_global_bool_constant("ODIN_NO_CRT",                     bc->no_crt);
 	add_global_bool_constant("ODIN_USE_SEPARATE_MODULES",       bc->use_separate_modules);
-	add_global_bool_constant("ODIN_TEST",                       bc->command_kind == Command_test);
+	add_global_bool_constant("ODIN_TEST",                       is_test_context());
 	add_global_bool_constant("ODIN_NO_ENTRY_POINT",             bc->no_entry_point);
 	add_global_bool_constant("ODIN_FOREIGN_ERROR_PROCEDURES",   bc->ODIN_FOREIGN_ERROR_PROCEDURES);
 	add_global_bool_constant("ODIN_NO_RTTI",                    bc->no_rtti);
@@ -3476,7 +3476,7 @@ gb_internal void generate_minimum_dependency_set_internal(Checker *c, Entity *st
 		}
 	}
 
-	if (build_context.command_kind == Command_test) {
+	if (is_test_context()) {
 		AstPackage *testing_package = get_core_package(&c->info, str_lit("testing"));
 		Scope *testing_scope = testing_package->scope;
 
@@ -9243,7 +9243,7 @@ gb_internal void check_parsed_files(Checker *c) {
 	thread_pool_wait();
 
 	TIME_SECTION("check entry point");
-	if (build_context.build_mode == BuildMode_Executable && !build_context.no_entry_point && build_context.command_kind != Command_test) {
+	if (build_context.build_mode == BuildMode_Executable && !build_context.no_entry_point && !is_test_context()) {
 		Scope *s = c->info.init_scope;
 		GB_ASSERT(s != nullptr);
 		GB_ASSERT(s->flags&ScopeFlag_Init);
