@@ -850,6 +850,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	}
 	mutex_unlock(&base_entity->Procedure.gen_procs_mutex);
 
+	bool polymorphic_timing_enabled = checker_procedure_body_timing_state.enabled;
 	bool is_probe = old_c->no_polymorphic_errors;
 
 	auto lookup_operands = array_make<PolyProcLookupOperand>(heap_allocator(), 0, operands.count);
@@ -857,10 +858,13 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	u64 lookup_hash = 0;
 	bool use_lookup = old_c->decl != nullptr && poly_proc_lookup_operands(src, dst, operands, &lookup_operands, &lookup_hash);
 	if (use_lookup) {
+		u64 lookup_start = polymorphic_timing_enabled ? time_stamp_time_now() : 0;
+		isize candidates = 0;
 		PolyProcLookup found = {};
 		bool is_found = false;
 		rw_mutex_shared_lock(&gen_procs->mutex);
 		for (PolyProcLookup const &l : gen_procs->lookups) {
+			candidates += 1;
 			if (l.hash == lookup_hash && l.dst == dst && poly_proc_lookup_operands_equal(l.operands, lookup_operands)) {
 				found = l;
 				is_found = true;
@@ -869,8 +873,15 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		}
 		rw_mutex_shared_unlock(&gen_procs->mutex);
 
+		if (polymorphic_timing_enabled) {
+			checker_procedure_body_timing_note_polymorphic_lookup(true, candidates, time_stamp_time_now() - lookup_start);
+		}
+
 		// NOTE(bill): A failed candidate is checked again when called directly to get its errors reported
 		if (is_found && (found.result != nullptr || is_probe)) {
+			if (polymorphic_timing_enabled) {
+				checker_procedure_body_timing_state.polymorphic_operand_cache_hit_count += 1;
+			}
 			for (Entity *e : found.deps) {
 				add_dependency(info, old_c->decl, e);
 				poly_dep_capture_entity(old_c, e);
@@ -920,6 +931,7 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		rw_mutex_unlock(&gen_procs->mutex);
 	};
 
+	u64 polymorphic_resolution_start = polymorphic_timing_enabled ? time_stamp_time_now() : 0;
 	CheckerContext nctx = *old_c;
 
 	Scope *scope = create_scope(info, nullptr);
@@ -956,6 +968,9 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		success = check_procedure_type(&nctx, final_proc_type, clone_ast(pt->node), &operands);
 	}
 	nctx.poly_dep_capture = old_c->poly_dep_capture;
+	if (polymorphic_timing_enabled) {
+		checker_procedure_body_timing_note_polymorphic_resolution(time_stamp_time_now() - polymorphic_resolution_start, success);
+	}
 
 	if (!success) {
 		record_lookup(nullptr);
@@ -973,8 +988,17 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	}
 
 	u64 final_hash = proc_type_identity_hash(final_proc_type);
+	u64 type_lookup_start = polymorphic_timing_enabled ? time_stamp_time_now() : 0;
+	isize type_lookup_candidates = 0;
+	auto const note_type_lookup = [&](bool hit) {
+		if (polymorphic_timing_enabled) {
+			checker_procedure_body_timing_note_polymorphic_lookup(false, type_lookup_candidates, time_stamp_time_now() - type_lookup_start);
+			checker_procedure_body_timing_state.polymorphic_resolved_cache_hit_count += hit;
+		}
+	};
 	rw_mutex_shared_lock(&gen_procs->mutex); // @local-mutex
 	for_array(i, gen_procs->procs) {
+		type_lookup_candidates += 1;
 		if (gen_procs->hashes[i] != final_hash) {
 			continue;
 		}
@@ -983,11 +1007,13 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 		// NOTE(bill): parameter names need to be included too as `typeid`s and link names include them
 		if (are_types_identical_unique_tuples(pt, final_proc_type)) {
 			rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
+			note_type_lookup(true);
 			record_lookup(other);
 			return reuse_gen_polymorphic_procedure(other, poly_proc_data);
 		}
 	}
 	rw_mutex_shared_unlock(&gen_procs->mutex); // @local-mutex
+	note_type_lookup(false);
 
 	// NOTE(bill): Clone a polymorphic procedure's body before taking `gen_procs`' exclusive lock so lookups of it don't wait on the clone
 	Ast *proc_lit = clone_ast(old_decl->proc_lit);
@@ -995,16 +1021,21 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 
 	// Re-check under the exclusive lock (the lookups above ran under a released shared lock) and
 	// hold it across construction + array_add so find-then-publish is atomic. (@local-mutex)
+	type_lookup_start = polymorphic_timing_enabled ? time_stamp_time_now() : 0;
+	type_lookup_candidates = 0;
 	rw_mutex_lock(&gen_procs->mutex); // @local-mutex
 	for_array(i, gen_procs->procs) {
+		type_lookup_candidates += 1;
 		Entity *other = gen_procs->procs[i];
 		if (gen_procs->hashes[i] == final_hash && are_types_identical_unique_tuples(base_type(proc_entity_full_type(other)), final_proc_type)) {
 			rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
+			note_type_lookup(true);
 			record_lookup(other);
 			return reuse_gen_polymorphic_procedure(other, poly_proc_data);
 		}
 	}
 
+	note_type_lookup(false);
 	ast_node(pl, ProcLit, proc_lit);
 	// NOTE(bill): Associate the scope declared above withinth this procedure declaration's type
 	add_scope(&nctx, pl->type, final_proc_type->Proc.scope);
@@ -1093,6 +1124,9 @@ gb_internal bool find_or_generate_polymorphic_procedure(CheckerContext *old_c, E
 	// Before it can be found by another thread which could use it first
 	d->proc->gen_proc_info.store(proc_info);
 
+	if (polymorphic_timing_enabled) {
+		checker_procedure_body_timing_state.polymorphic_generated_count += 1;
+	}
 	array_add(&gen_procs->procs, entity);
 	array_add(&gen_procs->hashes, proc_type_identity_hash(final_proc_type));
 	rw_mutex_unlock(&gen_procs->mutex); // @local-mutex
