@@ -2692,6 +2692,8 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		return false;
 	}
 	GB_ASSERT(body->kind == Ast_BlockStmt);
+	bool procedure_timing_enabled = checker_procedure_body_timing_state.enabled;
+	u64 parameter_setup_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	String proc_name = {};
 	if (token.kind == Token_Ident) {
@@ -2796,9 +2798,15 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		}
 	}
 	rw_mutex_unlock(&ctx->scope->mutex);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ParameterSetup, time_stamp_time_now() - parameter_setup_start);
+	}
 
-
+	u64 where_clause_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	bool where_clause_ok = evaluate_where_clauses(ctx, nullptr, decl->scope, &decl->proc_lit->ProcLit.where_clauses, !decl->where_clauses_evaluated.load(std::memory_order_relaxed));
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_WhereClauses, time_stamp_time_now() - where_clause_start);
+	}
 	if (!where_clause_ok) {
 		// NOTE(bill, 2019-08-31): Don't check the body as the where clauses failed
 		return false;
@@ -2822,7 +2830,11 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 			GB_ASSERT(decl->defer_use_checked.load(std::memory_order_relaxed) == false);
 		}
 
+		u64 statements_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 		check_stmt_list(ctx, bs->stmts, Stmt_CheckScopeDecls);
+		if (procedure_timing_enabled) {
+			checker_procedure_body_timing_add(CheckerProcedureBodyTiming_Statements, time_stamp_time_now() - statements_start);
+		}
 
 		decl->defer_use_checked.store(true, std::memory_order_relaxed);
 
@@ -2839,6 +2851,7 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 			}
 		}
 
+		u64 termination_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 		if (type->Proc.result_count > 0) {
 			if (!check_is_terminating(body, str_lit(""))) {
 				if (token.kind == Token_Ident) {
@@ -2858,14 +2871,26 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 				}
 			}
 		}
+		if (procedure_timing_enabled) {
+			checker_procedure_body_timing_add(CheckerProcedureBodyTiming_Termination, time_stamp_time_now() - termination_start);
+		}
 
 	}
+	u64 scope_usage_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	check_close_scope(ctx);
 
 	check_scope_usage(ctx->checker, ctx->scope, check_vet_flags(body));
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ScopeUsage, time_stamp_time_now() - scope_usage_start);
+	}
 
+	u64 dependency_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	add_deps_from_child_to_parent(decl);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_DependencyPropagation, time_stamp_time_now() - dependency_start);
+	}
 
+	u64 variadic_reuse_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	for (VariadicReuseData const &vr : decl->variadic_reuses) {
 		GB_ASSERT(vr.slice_type->kind == Type_Slice);
 		Type *elem = vr.slice_type->Slice.elem;
@@ -2873,6 +2898,9 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		i64 align = type_align_of(elem);
 		decl->variadic_reuse_max_bytes = gb_max(decl->variadic_reuse_max_bytes, size*vr.max_count);
 		decl->variadic_reuse_max_align = gb_max(decl->variadic_reuse_max_align, align);
+	}
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_VariadicReuse, time_stamp_time_now() - variadic_reuse_start);
 	}
 
 	return true;

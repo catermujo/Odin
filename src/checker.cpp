@@ -103,6 +103,135 @@ struct CheckerGlobalVariableTimingState {
 
 gb_global CheckerGlobalVariableTimingState checker_global_variable_timing_state = {};
 
+enum CheckerProcedureBodyTimingKind {
+	CheckerProcedureBodyTiming_ContextSetup,
+	CheckerProcedureBodyTiming_ParameterSetup,
+	CheckerProcedureBodyTiming_WhereClauses,
+	CheckerProcedureBodyTiming_Statements,
+	CheckerProcedureBodyTiming_Termination,
+	CheckerProcedureBodyTiming_ScopeUsage,
+	CheckerProcedureBodyTiming_DependencyPropagation,
+	CheckerProcedureBodyTiming_VariadicReuse,
+	CheckerProcedureBodyTiming_PostBody,
+
+	CheckerProcedureBodyTiming_COUNT,
+};
+
+gb_global char const *checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_COUNT] = {
+	"context setup",
+	"parameter/using setup",
+	"where clauses",
+	"statements",
+	"termination checks",
+	"scope usage",
+	"dependency propagation",
+	"variadic reuse layout",
+	"post-body bookkeeping",
+};
+
+struct CheckerProcedureBodyTimingState {
+	bool                              enabled;
+	isize                             initial_queue_count;
+	isize                             dispatch_count;
+	isize                             body_count;
+	isize                             successful_body_count;
+	isize                             polymorphic_specialization_count;
+	u64                               body_ticks;
+	CheckerGlobalEntityTimingBucket   buckets[CheckerProcedureBodyTiming_COUNT];
+	struct SlowBody {
+		u64       ticks;
+		ProcInfo *info;
+	};
+	SlowBody                          slow_bodies[16];
+	isize                             slow_body_count;
+	CheckerGlobalEntityTimingBucket   statement_buckets[Ast_COUNT];
+	struct StatementStackEntry {
+		AstKind kind;
+		u64     start;
+		u64     child_ticks;
+	};
+	StatementStackEntry               statement_stack[1024];
+	isize                             statement_stack_count;
+};
+
+gb_global CheckerProcedureBodyTimingState checker_procedure_body_timing_state = {};
+
+gb_internal void checker_procedure_body_timing_reset(void) {
+	gb_zero_item(&checker_procedure_body_timing_state);
+}
+
+gb_internal void checker_procedure_body_timing_add(CheckerProcedureBodyTimingKind kind, u64 ticks) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind >= 0 && kind < CheckerProcedureBodyTiming_COUNT);
+	state->buckets[kind].exclusive_ticks += ticks;
+	state->buckets[kind].call_count += 1;
+}
+
+gb_internal void checker_statement_timing_begin(AstKind kind) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind >= 0 && kind < Ast_COUNT);
+	GB_ASSERT(state->statement_stack_count < gb_count_of(state->statement_stack));
+
+	auto *entry = &state->statement_stack[state->statement_stack_count++];
+	entry->kind = kind;
+	entry->start = time_stamp_time_now();
+	entry->child_ticks = 0;
+}
+
+gb_internal void checker_statement_timing_end(void) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->statement_stack_count > 0);
+
+	CheckerProcedureBodyTimingState::StatementStackEntry entry = state->statement_stack[--state->statement_stack_count];
+	u64 total_ticks = time_stamp_time_now() - entry.start;
+	u64 exclusive_ticks = total_ticks - entry.child_ticks;
+
+	auto *bucket = &state->statement_buckets[entry.kind];
+	bucket->exclusive_ticks += exclusive_ticks;
+	bucket->call_count += 1;
+
+	if (state->statement_stack_count > 0) {
+		state->statement_stack[state->statement_stack_count-1].child_ticks += total_ticks;
+	}
+}
+
+gb_internal void checker_procedure_body_timing_note_body(ProcInfo *info, u64 ticks, bool successful) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+
+	state->body_count += 1;
+	state->body_ticks += ticks;
+	state->successful_body_count += successful;
+	if (info->type->Proc.is_polymorphic && info->type->Proc.is_poly_specialized) {
+		state->polymorphic_specialization_count += 1;
+	}
+
+	isize count = state->slow_body_count;
+	isize cap = gb_count_of(state->slow_bodies);
+	if (count == cap && ticks <= state->slow_bodies[count-1].ticks) {
+		return;
+	}
+
+	isize idx = count;
+	if (idx < cap) {
+		state->slow_body_count += 1;
+	} else {
+		idx = cap-1;
+	}
+
+	while (idx > 0 && state->slow_bodies[idx-1].ticks < ticks) {
+		if (idx < cap) {
+			state->slow_bodies[idx] = state->slow_bodies[idx-1];
+		}
+		idx -= 1;
+	}
+
+	state->slow_bodies[idx].ticks = ticks;
+	state->slow_bodies[idx].info = info;
+}
+
 gb_internal CheckerGlobalEntityTimingKind checker_global_entity_timing_kind_from_entity_kind(EntityKind kind) {
 	switch (kind) {
 	case Entity_Variable:  return CheckerGlobalEntityTiming_Variable;
@@ -309,6 +438,115 @@ gb_internal void show_checker_global_entity_timings(Timings *t) {
 		}
 		gb_printf_err("\n");
 	}
+}
+
+gb_internal void show_checker_procedure_body_timings(Timings *t) {
+	if (!build_context.show_more_timings || !build_context.no_threaded_checker) {
+		return;
+	}
+
+	auto *state = &checker_procedure_body_timing_state;
+	if (state->body_count == 0) {
+		return;
+	}
+
+	TimeStamp phase = {};
+	for (TimeStamp const &section : t->sections) {
+		if (section.label == "check procedure bodies") {
+			phase = section;
+			break;
+		}
+	}
+	if (phase.label.len == 0) {
+		return;
+	}
+
+	u64 body_measured_ticks = 0;
+	for (isize i = CheckerProcedureBodyTiming_ParameterSetup; i < CheckerProcedureBodyTiming_PostBody; i++) {
+		body_measured_ticks += state->buckets[i].exclusive_ticks;
+	}
+	u64 body_other_ticks = state->body_ticks > body_measured_ticks ? state->body_ticks - body_measured_ticks : 0;
+
+	u64 phase_ticks = phase.finish - phase.start;
+	u64 phase_measured_ticks = state->buckets[CheckerProcedureBodyTiming_ContextSetup].exclusive_ticks +
+	                           state->body_ticks +
+	                           state->buckets[CheckerProcedureBodyTiming_PostBody].exclusive_ticks;
+	u64 dispatch_ticks = phase_ticks > phase_measured_ticks ? phase_ticks - phase_measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+
+	isize appended_dispatch_count = gb_max(state->dispatch_count - state->initial_queue_count, 0);
+	isize skipped_dispatch_count = gb_max(state->dispatch_count - state->body_count, 0);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Procedure Body Breakdown\n");
+	gb_printf_err("body queue                   - %td initial, %td appended/requeued, %td dispatches\n", state->initial_queue_count, appended_dispatch_count, state->dispatch_count);
+	gb_printf_err("body results                 - %td entered, %td successful, %td skipped/deferred, %td polymorphic specializations\n", state->body_count, state->successful_body_count, skipped_dispatch_count, state->polymorphic_specialization_count);
+	checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_ContextSetup], state->buckets[CheckerProcedureBodyTiming_ContextSetup].exclusive_ticks, state->buckets[CheckerProcedureBodyTiming_ContextSetup].call_count, phase_ms, t->freq);
+	for (isize i = CheckerProcedureBodyTiming_ParameterSetup; i < CheckerProcedureBodyTiming_PostBody; i++) {
+		checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[i], state->buckets[i].exclusive_ticks, state->buckets[i].call_count, phase_ms, t->freq);
+	}
+	checker_global_entity_timing_print_line("body other", body_other_ticks, state->body_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_PostBody], state->buckets[CheckerProcedureBodyTiming_PostBody].exclusive_ticks, state->buckets[CheckerProcedureBodyTiming_PostBody].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("dispatch/filtering", dispatch_ticks, state->dispatch_count, phase_ms, t->freq);
+
+	gb_printf_err("\n");
+	gb_printf_err("Slowest Procedure Bodies\n");
+	for (isize i = 0; i < state->slow_body_count; i++) {
+		auto *entry = &state->slow_bodies[i];
+		ProcInfo *info = entry->info;
+		String name = info->token.kind == Token_Ident ? info->token.string : str_lit("(anonymous-procedure)");
+		f64 ms = checker_global_entity_ticks_as_ms(entry->ticks, t->freq);
+
+		gb_printf_err("%td. %.3f ms - %s - %.*s", i+1, ms, token_pos_to_string(info->token.pos), LIT(name));
+		if (info->type->Proc.is_polymorphic && info->type->Proc.is_poly_specialized) {
+			gb_printf_err(" - polymorphic specialization");
+		}
+		gb_printf_err("\n");
+	}
+}
+
+gb_internal void show_checker_statement_timings(Timings *t) {
+	if (!build_context.show_more_timings || !build_context.no_threaded_checker) {
+		return;
+	}
+
+	auto *state = &checker_procedure_body_timing_state;
+	u64 phase_ticks = state->buckets[CheckerProcedureBodyTiming_Statements].exclusive_ticks;
+	if (phase_ticks == 0) {
+		return;
+	}
+
+	u64 measured_ticks = 0;
+	for (isize i = 0; i < Ast_COUNT; i++) {
+		measured_ticks += state->statement_buckets[i].exclusive_ticks;
+	}
+	u64 other_ticks = phase_ticks > measured_ticks ? phase_ticks - measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+	bool printed[Ast_COUNT] = {};
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Statement Breakdown\n");
+	for (isize rank = 0; rank < Ast_COUNT; rank++) {
+		isize best = -1;
+		for (isize i = 0; i < Ast_COUNT; i++) {
+			if (printed[i] || state->statement_buckets[i].call_count == 0) {
+				continue;
+			}
+			if (best < 0 || state->statement_buckets[i].exclusive_ticks > state->statement_buckets[best].exclusive_ticks) {
+				best = i;
+			}
+		}
+		if (best < 0) {
+			break;
+		}
+		printed[best] = true;
+
+		auto *bucket = &state->statement_buckets[best];
+		f64 ms = checker_global_entity_ticks_as_ms(bucket->exclusive_ticks, t->freq);
+		f64 pct = phase_ms > 0 ? 100.0*ms/phase_ms : 0.0;
+		gb_printf_err("%.*s - %.3f ms - %.2f%% - %td calls - %.3f us/call\n", LIT(ast_strings[best]), ms, pct, bucket->call_count, 1000.0*ms/cast(f64)bucket->call_count);
+	}
+	checker_global_entity_timing_print_line("statement-list setup/other", other_ticks, 0, phase_ms, t->freq);
 }
 
 gb_internal bool is_operand_value(Operand o) {
@@ -7947,6 +8185,8 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		break;
 	}
 	pi->decl->proc_checked_state.store(ProcCheckedState_InProgress);
+	bool procedure_timing_enabled = checker_procedure_body_timing_state.enabled;
+	u64 context_setup_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	GB_ASSERT(pi->type->kind == Type_Proc);
 	TypeProc *pt = &pi->type->Proc;
@@ -8019,7 +8259,16 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		ctx.state_flags &= ~StateFlag_downcast_assert;
 	}
 
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ContextSetup, time_stamp_time_now() - context_setup_start);
+	}
+
+	u64 body_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	bool body_was_checked = check_proc_body(&ctx, pi->token, pi->decl, pi->type, pi->body);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_note_body(pi, time_stamp_time_now() - body_start, body_was_checked);
+	}
+	u64 post_body_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	if (body_was_checked) {
 		pi->decl->proc_checked_state.store(ProcCheckedState_Checked);
@@ -8049,6 +8298,9 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		}
 	}
 	rw_mutex_shared_unlock(&ctx.decl->deps_mutex);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_PostBody, time_stamp_time_now() - post_body_start);
+	}
 
 	return true;
 }
@@ -8226,6 +8478,11 @@ gb_internal void check_init_worker_data(Checker *c) {
 
 gb_internal void check_procedure_bodies(Checker *c) {
 	GB_ASSERT(c != nullptr);
+	checker_procedure_body_timing_reset();
+	checker_procedure_body_timing_state.enabled = build_context.show_more_timings && build_context.no_threaded_checker;
+	if (checker_procedure_body_timing_state.enabled) {
+		checker_procedure_body_timing_state.initial_queue_count = c->procs_to_check.count;
+	}
 
 	u32 thread_count = cast(u32)global_thread_pool.threads.count;
 	if (build_context.no_threaded_checker) {
@@ -8235,9 +8492,14 @@ gb_internal void check_procedure_bodies(Checker *c) {
 	if (thread_count == 1) {
 		UntypedExprInfoMap *untyped = &check_procedure_bodies_worker_data[0].untyped;
 		for_array(i, c->procs_to_check) {
+			if (checker_procedure_body_timing_state.enabled) {
+				checker_procedure_body_timing_state.dispatch_count += 1;
+			}
 			consume_proc_info(c, c->procs_to_check[i], untyped);
 		}
 		array_clear(&c->procs_to_check);
+		GB_ASSERT(checker_procedure_body_timing_state.statement_stack_count == 0);
+		checker_procedure_body_timing_state.enabled = false;
 
 		debugf("Total Procedure Bodies Checked: %td\n", total_bodies_checked.load(std::memory_order_relaxed));
 		return;
@@ -8255,6 +8517,7 @@ gb_internal void check_procedure_bodies(Checker *c) {
 	thread_pool_wait();
 
 	global_procedure_body_in_worker_queue = false;
+	checker_procedure_body_timing_state.enabled = false;
 }
 gb_internal void add_untyped_expressions(CheckerInfo *cinfo, UntypedExprInfoMap *untyped) {
 	if (untyped == nullptr) {
