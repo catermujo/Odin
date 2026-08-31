@@ -4974,6 +4974,29 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	case_ast_node(te, TernaryIfExpr, expr);
 		GB_ASSERT(te->y != nullptr);
 		Type *type = default_type(type_of_expr(expr));
+		// WebAssembly's SelectionDAG cannot lower large first-class aggregate PHIs.
+		// Materialize each branch into storage, then load the selected aggregate. This
+		// also lets aggregate stores use their existing memcpy lowering without
+		// requiring either branch to be addressable.
+		if (lb_is_type_aggregate(type) && type_size_of(type) > 64) {
+			lbAddr result = lb_add_local_generated(p, type, false);
+
+			lbBlock *then  = lb_create_block(p, "if.then");
+			lbBlock *done  = lb_create_block(p, "if.done"); // NOTE(bill): Append later
+			lbBlock *else_ = lb_create_block(p, "if.else");
+
+			lb_build_cond(p, te->cond, then, else_);
+			lb_start_block(p, then);
+			lb_addr_store(p, result, lb_build_expr(p, te->x));
+			lb_emit_jump(p, done);
+
+			lb_start_block(p, else_);
+			lb_addr_store(p, result, lb_build_expr(p, te->y));
+			lb_emit_jump(p, done);
+
+			lb_start_block(p, done);
+			return lb_addr_load(p, result);
+		}
 		if (lb_is_expr_trivial(te->x) && lb_is_expr_trivial(te->y)) {
 			lbValue cond = lb_build_expr(p, te->cond);
 			lbValue x = lb_emit_conv(p, lb_build_expr(p, te->x), type);

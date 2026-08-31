@@ -4099,8 +4099,10 @@ gb_internal void lb_build_assign_stmt(lbProcedure *p, Ast *node) {
 				ast_node(te, TernaryIfExpr, rhs_expr);
 				Ast *then_expr = unparen_expr(te->x);
 				Ast *else_expr = unparen_expr(te->y);
-				if (then_expr->tav.mode == Addressing_Variable &&
-				    else_expr->tav.mode == Addressing_Variable &&
+				bool large_aggregate = type_size_of(lhs_type) > 64;
+				if ((large_aggregate ||
+				     (then_expr->tav.mode == Addressing_Variable &&
+				      else_expr->tav.mode == Addressing_Variable)) &&
 				    are_types_identical(lhs_type, type_of_expr(rhs_expr)) &&
 				    are_types_identical(lhs_type, type_of_expr(then_expr)) &&
 				    are_types_identical(lhs_type, type_of_expr(else_expr))) {
