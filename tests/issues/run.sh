@@ -163,6 +163,17 @@ if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
 	fi
 fi
 
+set +e
+DOC_OUTPUT=$($ODIN doc core:time Benchmark_Options 2>&1)
+DOC_STATUS=$?
+set -e
+if [[ $DOC_STATUS -eq 1 && $(grep -F -c "Expected either a directory or a .odin file" <<< "$DOC_OUTPUT") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 if [[ $($ODIN build ../test_issue_7108.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
