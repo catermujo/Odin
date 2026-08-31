@@ -3159,8 +3159,12 @@ gb_internal String lb_filepath_obj_for_module(lbModule *m) {
 	String name = build_context.build_paths[BuildPath_Output].name;
 
 	bool use_temporary_directory = false;
-	if (USE_SEPARATE_MODULES && build_context.build_mode == BuildMode_Executable) {
-		// NOTE(bill): use a temporary directory
+	bool linked_build =
+		build_context.build_mode == BuildMode_Executable ||
+		build_context.build_mode == BuildMode_StaticLibrary ||
+		build_context.build_mode == BuildMode_DynamicLibrary;
+	if (linked_build && !build_context.keep_object_files) {
+		// Intermediate objects must not be shared by concurrent builds with the same output path.
 		String dir = temporary_directory(permanent_allocator());
 		if (dir.len != 0) {
 			basename = dir;

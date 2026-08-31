@@ -277,8 +277,6 @@ gb_internal i32 linker_stage(LinkerData *gen) {
 	String output_filename = path_to_string(heap_allocator(), build_context.build_paths[BuildPath_Output]);
 	debugf("Linking %.*s\n", LIT(output_filename));
 
-	// TOOD(Jeroen): Make a `build_paths[BuildPath_Object] to avoid `%.*s.o`.
-
 	if (is_arch_wasm()) {
 		timings_start_section(timings, str_lit("wasm-ld"));
 
@@ -287,7 +285,9 @@ gb_internal i32 linker_stage(LinkerData *gen) {
 		gbString extra_orca_flags = gb_string_make(temporary_allocator(), "");
 
 		gbString inputs = gb_string_make(temporary_allocator(), "");
-		inputs = gb_string_append_fmt(inputs, "\"%.*s.o\"", LIT(output_filename));
+		for (String const &object_path : gen->output_object_paths) {
+			inputs = gb_string_append_fmt(inputs, "\"%.*s\" ", LIT(object_path));
+		}
 
 
 		for (Entity *e : gen->foreign_libraries) {
