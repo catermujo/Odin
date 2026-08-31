@@ -11,6 +11,18 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+set +e
+DOC_OUTPUT=$($ODIN doc core:time Benchmark_Options 2>&1)
+DOC_STATUS=$?
+set -e
+if [[ $DOC_STATUS -eq 1 && $(grep -F -c "Expected either a directory or a .odin file" <<< "$DOC_OUTPUT") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
+
 $ODIN test ../test_issue_proc_group_cached_signature.odin -file $COMMON
 $ODIN test ../test_issue_proc_group_cached_signature.odin -file $COMMON -no-threaded-checker
 
