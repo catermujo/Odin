@@ -80,6 +80,7 @@ clang -c ..\test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o || exit /b
 ..\..\..\odin test ..\test_issue_7587.odin %COMMON%  || exit /b
 ..\..\..\odin run ..\test_issue_7596.odin %COMMON% || exit /b
 ..\..\..\odin check ..\test_recursive_type_field_query.odin -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "2" || exit /b
+..\..\..\odin check ..\test_inferred_array_literal_len_cycle.odin -no-entry-point %COMMON% || exit /b
 
 @echo off
 
