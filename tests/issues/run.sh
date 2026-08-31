@@ -11,6 +11,27 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+# Linked builds must not share their intermediate object when concurrent invocations use the same
+# output path. One build can otherwise remove the object while another invocation is linking it.
+RACE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/odin-output-race.XXXXXX")
+trap 'rm -rf "$RACE_DIR"' EXIT
+RACE_PIDS=()
+for i in $(seq 1 8); do
+	$ODIN build ../test_issue_large_aggregate_ternary.odin -file $COMMON -out:"$RACE_DIR/shared.bin" >"$RACE_DIR/$i.log" 2>&1 &
+	RACE_PIDS+=("$!")
+done
+RACE_STATUS=0
+for pid in "${RACE_PIDS[@]}"; do
+	if ! wait "$pid"; then
+		RACE_STATUS=1
+	fi
+done
+if [[ "$RACE_STATUS" -ne 0 ]]; then
+	cat "$RACE_DIR"/*.log
+	exit 1
+fi
+
+
 $ODIN check ../test_inferred_array_literal_len_cycle.odin -file -no-entry-point $COMMON_CHECK
 
 set +e
