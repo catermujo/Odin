@@ -131,6 +131,26 @@ $ODIN test ../test_issue_bool_comparison_truthiness.odin $COMMON
 $ODIN test ../test_issue_const_array_broadcast.odin $COMMON
 $ODIN test ../test_issue_swizzle_multi_assign.odin $COMMON
 
+# Linked builds must not share their intermediate object when concurrent invocations use the same
+# output path. One build can otherwise remove the object while another invocation is linking it.
+RACE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/odin-output-race.XXXXXX")
+trap 'rm -rf "$RACE_DIR"' EXIT
+RACE_PIDS=()
+for i in $(seq 1 8); do
+	$ODIN build ../test_issue_large_aggregate_ternary.odin $COMMON -out:"$RACE_DIR/shared.bin" >"$RACE_DIR/$i.log" 2>&1 &
+	RACE_PIDS+=("$!")
+done
+RACE_STATUS=0
+for pid in "${RACE_PIDS[@]}"; do
+	if ! wait "$pid"; then
+		RACE_STATUS=1
+	fi
+done
+if [[ "$RACE_STATUS" -ne 0 ]]; then
+	cat "$RACE_DIR"/*.log
+	exit 1
+fi
+
 $ODIN check ../test_issue_foreign_redeclaration.odin -no-entry-point $COMMON_CHECK
 if [[ $($ODIN check ../test_issue_foreign_redeclaration_mismatch.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
