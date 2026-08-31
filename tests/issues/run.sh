@@ -223,6 +223,7 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+$ODIN check ../test_inferred_array_literal_len_cycle.odin -no-entry-point $COMMON_CHECK
 
 if [[ $($ODIN build ../test_issue_7073-1.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
