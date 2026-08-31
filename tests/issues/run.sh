@@ -11,6 +11,8 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN check ../test_inferred_array_literal_len_cycle.odin -file -no-entry-point $COMMON_CHECK
+
 set +e
 DOC_OUTPUT=$($ODIN doc core:time Benchmark_Options 2>&1)
 DOC_STATUS=$?

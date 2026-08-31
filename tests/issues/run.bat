@@ -11,6 +11,8 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% check ..\test_inferred_array_literal_len_cycle.odin -file -no-entry-point %COMMON% || exit /b
+
 %ODIN% test ..\test_issue_proc_group_cached_signature.odin -file %COMMON% || exit /b
 %ODIN% test ..\test_issue_proc_group_cached_signature.odin -file %COMMON% -no-threaded-checker || exit /b
 
