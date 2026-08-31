@@ -2990,6 +2990,44 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 	return true;
 }
 
+gb_internal bool infer_unresolved_array_literal_length(CheckerContext *c, Ast *expr, i64 *length) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr || expr->kind != Ast_Ident) {
+		return false;
+	}
+
+	ast_node(ident, Ident, expr);
+	Entity *entity = scope_lookup(c->scope, ident->interned, ident->hash);
+	if (entity == nullptr || entity->kind != Entity_Variable || entity->state != EntityState_Unresolved) {
+		return false;
+	}
+
+	DeclInfo *decl = decl_info_of_entity(entity);
+	if (decl == nullptr || decl->init_expr == nullptr) {
+		return false;
+	}
+
+	Ast *init = unparen_expr(decl->init_expr);
+	if (init == nullptr || init->kind != Ast_CompoundLit) {
+		return false;
+	}
+	ast_node(cl, CompoundLit, init);
+	if (cl->type == nullptr || cl->type->kind != Ast_ArrayType) {
+		return false;
+	}
+	ast_node(array_type, ArrayType, cl->type);
+	if (array_type->count == nullptr || array_type->count->kind != Ast_UnaryExpr) {
+		return false;
+	}
+	ast_node(count, UnaryExpr, array_type->count);
+	if (count->op.kind != Token_Question || cl->elems.count == 0 || cl->elems[0]->kind == Ast_FieldValue) {
+		return false;
+	}
+
+	*length = cl->elems.count;
+	return true;
+}
+
 gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, Ast *call, i32 id, Type *type_hint) {
 	ast_node(ce, CallExpr, call);
 	if (ce->inlining != ProcInlining_none) {
@@ -3136,6 +3174,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	{
 		// len :: proc(Type) -> int
 		// cap :: proc(Type) -> int
+		i64 inferred_length = 0;
+		if (infer_unresolved_array_literal_length(c, ce->args[0], &inferred_length)) {
+			operand->mode = Addressing_Constant;
+			operand->value = exact_value_i64(inferred_length);
+			operand->type = t_untyped_integer;
+			break;
+		}
 		check_expr_or_type(c, operand, ce->args[0]);
 		if (operand->mode == Addressing_Invalid) {
 			return false;
