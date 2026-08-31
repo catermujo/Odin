@@ -8426,6 +8426,7 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 				String const ext = str_lit(".odin");
 				if (!string_ends_with(fullpath, ext)) {
 					error({}, "Expected either a directory or a .odin file, got '%.*s'\n", LIT(fullpath));
+					thread_pool_wait();
 					return ParseFile_WrongExtension;
 				}
 			}
