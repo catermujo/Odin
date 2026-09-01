@@ -4243,9 +4243,21 @@ gb_internal bool lb_generate_code(lbGenerator *gen, CodeGenGlobalPlan const &pla
 			gbString split_name = gb_string_make(temporary_allocator(), "");
 
 			LLVMBool is_optimized = build_context.optimization_level > 0;
-			AstFile *init_file = nullptr;
-			if (m->info->init_package->files.count > 0) {
+			AstFile *init_file = m->file;
+			if (init_file == nullptr && m->pkg != nullptr && m->pkg->files.count > 0) {
+				init_file = m->pkg->files[0];
+			}
+			if (init_file == nullptr && m->info->init_package != nullptr && m->info->init_package->files.count > 0) {
 				init_file = m->info->init_package->files[0];
+			}
+			if (init_file == nullptr) {
+				for (auto const &file_entry : info->files) {
+					init_file = file_entry.value;
+					break;
+				}
+			}
+			if (init_file == nullptr) {
+				continue;
 			}
 
 			if (Entity *entry_point = m->info->entry_point) {
