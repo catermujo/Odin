@@ -6709,8 +6709,15 @@ gb_internal void parser_add_foreign_file_to_process(Parser *p, AstPackage *pkg, 
 
 
 // NOTE(bill): Returns true if it's added
-gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const &rel_path, TokenPos pos, PackageKind kind = Package_Normal) {
+gb_internal AstPackage *try_add_import_path(Parser *p, String &path, String const &rel_path, TokenPos pos, PackageKind kind = Package_Normal) {
 	String const FILE_EXT = str_lit(".odin");
+
+	// Reserve the logical path before doing any I/O. Imports are parsed
+	// concurrently, so this prevents duplicate package loads through the same
+	// import spelling.
+	while (path.len > 1 && (path[path.len-1] == '/' || path[path.len-1] == '\\')) {
+		path.len -= 1;
+	}
 
 	MUTEX_GUARD_BLOCK(&p->imported_files_mutex) {
 		if (string_set_update(&p->imported_files, path)) {
@@ -6718,16 +6725,15 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 		}
 	}
 
-	path = copy_string(permanent_allocator(), path);
-
-	AstPackage *pkg = permanent_alloc_item<AstPackage>();
-	pkg->kind = kind;
-	pkg->fullpath = path;
-	array_init(&pkg->files, permanent_allocator());
-	pkg->foreign_files.allocator = permanent_allocator();
-
 	// NOTE(bill): Single file initial package
 	if (kind == Package_Init && !path_is_directory(path) && string_ends_with(path, FILE_EXT)) {
+		path = copy_string(permanent_allocator(), path);
+		AstPackage *pkg = permanent_alloc_item<AstPackage>();
+		pkg->kind = kind;
+		pkg->fullpath = path;
+		array_init(&pkg->files, permanent_allocator());
+		pkg->foreign_files.allocator = permanent_allocator();
+
 		FileInfo fi = {};
 		fi.name = filename_from_path(path);
 		fi.fullpath = path;
@@ -6776,6 +6782,50 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 		error(pos, "'import' declarations cannot import directories with a .odin extension/suffix");
 		return nullptr;
 	}
+
+	// A staged source tree may contain a real package directory whose source
+	// files are symlinks into the original tree. Use the physical source
+	// directory as the package identity so imports through both views share one
+	// package and one set of file scopes.
+	String physical_package_path = {};
+	bool physical_package_path_is_consistent = true;
+	for (FileInfo fi : list) {
+		String name = fi.name;
+		String ext = path_extension(name);
+		if (ext != FILE_EXT || fi.is_dir) {
+			continue;
+		}
+		String file_package_path = directory_from_path(fi.fullpath);
+		if (physical_package_path.len == 0) {
+			physical_package_path = file_package_path;
+		} else if (physical_package_path != file_package_path) {
+			physical_package_path_is_consistent = false;
+			break;
+		}
+	}
+	if (physical_package_path_is_consistent && physical_package_path.len > 0) {
+		while (physical_package_path.len > 1 &&
+		       (physical_package_path[physical_package_path.len-1] == '/' ||
+		        physical_package_path[physical_package_path.len-1] == '\\')) {
+			physical_package_path.len -= 1;
+		}
+		if (physical_package_path != path) {
+			MUTEX_GUARD_BLOCK(&p->imported_files_mutex) {
+				if (string_set_update(&p->imported_files, physical_package_path)) {
+					return nullptr;
+				}
+			}
+			path = physical_package_path;
+		}
+	}
+
+	path = copy_string(permanent_allocator(), path);
+
+	AstPackage *pkg = permanent_alloc_item<AstPackage>();
+	pkg->kind = kind;
+	pkg->fullpath = path;
+	array_init(&pkg->files, permanent_allocator());
+	pkg->foreign_files.allocator = permanent_allocator();
 
 	isize files_with_ext = 0;
 	isize files_to_reserve = 1; // always reserve 1
@@ -7139,12 +7189,16 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 				continue;
 			}
 			import_path = string_trim_whitespace(import_path);
+			while (import_path.len > 1 && (import_path[import_path.len-1] == '/' || import_path[import_path.len-1] == '\\')) {
+				import_path.len -= 1;
+			}
 
-			id->fullpath = import_path;
 			if (is_package_name_reserved(import_path)) {
+				id->fullpath = import_path;
 				continue;
 			}
 			try_add_import_path(p, import_path, original_string, ast_token(node).pos);
+			id->fullpath = import_path;
 		} else if (node->kind == Ast_ForeignImportDecl) {
 			ast_node(fl, ForeignImportDecl, node);
 			if (!resolve_imports) {
