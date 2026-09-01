@@ -131,6 +131,9 @@ $ODIN test ../test_issue_bool_comparison_truthiness.odin $COMMON
 $ODIN test ../test_issue_const_array_broadcast.odin $COMMON
 $ODIN test ../test_issue_swizzle_multi_assign.odin $COMMON
 
+# A package can have no active files for a target. Debug object generation must handle that case.
+$ODIN build ../test_issue_debug_empty_package.odin -file -no-entry-point -target:js_wasm32 -build-mode:obj -debug -out:debug_empty_package.wasm.o
+
 # Linked builds must not share their intermediate object when concurrent invocations use the same
 # output path. One build can otherwise remove the object while another invocation is linking it.
 RACE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/odin-output-race.XXXXXX")
