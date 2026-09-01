@@ -50,6 +50,6 @@ _get_name :: proc(thread: ^Thread, allocator : runtime.Allocator, loc : runtime.
 	unimplemented("core:thread procedure not supported on this target")
 }
 
-_set_name :: proc(thread: ^Thread, name:string) {
+_set_name :: proc(thread: ^Thread) {
 	unimplemented("core:thread procedure not supported on this target")
 }
