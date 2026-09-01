@@ -86,3 +86,20 @@ name_test :: proc(_t: ^testing.T) {
 
 	thread.join(t)
 }
+
+@(test)
+pool_payload_test :: proc(_t: ^testing.T) {
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 2)
+	thread.pool_start(&pool)
+
+	value: int
+	thread.pool_add_task(&pool, context.allocator, proc(task: thread.Task) {
+		value := cast(^int)task.data
+		intrinsics.atomic_store(value, 1)
+	}, &value)
+	thread.pool_finish(&pool)
+
+	testing.expect(_t, value == 1, "thread pool task did not run")
+	thread.pool_destroy(&pool)
+}
