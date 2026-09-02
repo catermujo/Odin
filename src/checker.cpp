@@ -8744,12 +8744,17 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				} else {
 					gbString s = type_to_string(src_params);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, src_params},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
@@ -8774,12 +8779,17 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				} else {
 					gbString s = type_to_string(src_results);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, src_results},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
@@ -8831,12 +8841,17 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				} else {
 					gbString s = type_to_string(tsrc);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, tsrc},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
