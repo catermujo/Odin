@@ -523,7 +523,12 @@ gb_internal Type *check_record_polymorphic_params(CheckerContext *ctx, Ast *poly
 							if (!ctx->no_polymorphic_errors) {
 								gbString t = type_to_string(operand.type);
 								gbString s = type_to_string(specialization);
-								error(operand.expr, "Cannot convert type '%s' to the specialization '%s'", t, s);
+								TypeDiagnosticString type_strings[] = {
+									{&t, operand.type},
+									{&s, specialization},
+								};
+								add_type_package_provenance(type_strings, gb_count_of(type_strings));
+								error(operand.expr, "Cannot convert type '%s' to the specialization '%s'", *type_strings[0].value, *type_strings[1].value);
 								gb_string_free(s);
 								gb_string_free(t);
 							}
@@ -1340,8 +1345,13 @@ gb_internal void check_bit_set_type(CheckerContext *c, Type *type, Type *named_t
 			    rhs.type != t_invalid) {
 				gbString xt = type_to_string(lhs.type);
 				gbString yt = type_to_string(rhs.type);
+				TypeDiagnosticString type_strings[] = {
+					{&xt, lhs.type},
+					{&yt, rhs.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				gbString expr_str = expr_to_string(bs->elem);
-				error(bs->elem, "Mismatched types in range '%s' : '%s' vs '%s'", expr_str, xt, yt);
+				error(bs->elem, "Mismatched types in range '%s' : '%s' vs '%s'", expr_str, *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(expr_str);
 				gb_string_free(yt);
 				gb_string_free(xt);
@@ -1675,9 +1685,14 @@ gb_internal Type *determine_type_from_polymorphic(CheckerContext *ctx, Type *pol
 
 			gbString pts = type_to_string(poly_type);
 			gbString ots = type_to_string(operand.type, true);
+			TypeDiagnosticString type_strings[] = {
+				{&ots, operand.type},
+				{&pts, poly_type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
 			defer (gb_string_free(pts));
 			defer (gb_string_free(ots));
-			error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", ots, pts);
+			error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", *type_strings[0].value, *type_strings[1].value);
 
 			if (operand.mode == Addressing_Type) {
 				error_line("\tSuggestion: Are you trying to pass a type to a value parameter?\n");
@@ -1694,9 +1709,14 @@ gb_internal Type *determine_type_from_polymorphic(CheckerContext *ctx, Type *pol
 		ERROR_BLOCK();
 		gbString pts = type_to_string(poly_type);
 		gbString ots = type_to_string(operand.type, true);
+		TypeDiagnosticString type_strings[] = {
+			{&ots, operand.type},
+			{&pts, poly_type},
+		};
+		add_type_package_provenance(type_strings, gb_count_of(type_strings));
 		defer (gb_string_free(pts));
 		defer (gb_string_free(ots));
-		error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", ots, pts);
+		error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", *type_strings[0].value, *type_strings[1].value);
 
 		Type *pt = poly_type;
 		while (pt && pt->kind == Type_Generic && pt->Generic.specialized) {
@@ -2132,7 +2152,12 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 						if (!ctx->no_polymorphic_errors) {
 							gbString t = type_to_string(type);
 							gbString s = type_to_string(specialization);
-							error(o.expr, "Cannot convert type '%s' to the specialization '%s'", t, s);
+							TypeDiagnosticString type_strings[] = {
+								{&t, type},
+								{&s, specialization},
+							};
+							add_type_package_provenance(type_strings, gb_count_of(type_strings));
+							error(o.expr, "Cannot convert type '%s' to the specialization '%s'", *type_strings[0].value, *type_strings[1].value);
 							gb_string_free(s);
 							gb_string_free(t);
 						}

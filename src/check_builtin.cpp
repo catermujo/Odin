@@ -632,7 +632,12 @@ gb_internal bool check_builtin_objc_procedure(CheckerContext *c, Operand *operan
 					gbString e   = expr_to_string(op.expr);
 					gbString src = type_to_string(op.type);
 					gbString dst = type_to_string(handler_capture_param_types[i]->type);
-					error(op.expr, "'%.*s' captured value '%s' of type '%s' is not assignable to type '%s'", LIT(builtin_name), e, src, dst);
+					TypeDiagnosticString type_strings[] = {
+						{&src, op.type},
+						{&dst, handler_capture_param_types[i]->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(op.expr, "'%.*s' captured value '%s' of type '%s' is not assignable to type '%s'", LIT(builtin_name), e, *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(e);
 					gb_string_free(src);
 					gb_string_free(dst);
@@ -788,7 +793,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -821,7 +831,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -842,7 +857,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(dst.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(dst.type);
-			error(dst.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, dst.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(dst.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -856,7 +876,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(src.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(src.type);
-			error(src.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, src.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(src.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -877,7 +902,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -958,7 +988,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1017,7 +1052,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1177,7 +1217,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString tx = type_to_string(x.type);
 				gbString ty = type_to_string(y.type);
-				error(call, "Mismatched types to '%.*s', '%s' vs '%s'", LIT(builtin_name), tx, ty);
+				TypeDiagnosticString type_strings[] = {
+					{&tx, x.type},
+					{&ty, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(call, "Mismatched types to '%.*s', '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ty);
 				gb_string_free(tx);
 			}
@@ -1362,7 +1407,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(y.type, elem)) {
 				gbString et = type_to_string(elem);
 				gbString yt = type_to_string(y.type);
-				error(y.expr, "'%.*s' expected a type of '%s' to insert, got '%s'", LIT(builtin_name), et, yt);
+				TypeDiagnosticString type_strings[] = {
+					{&et, elem},
+					{&yt, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(y.expr, "'%.*s' expected a type of '%s' to insert, got '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yt);
 				gb_string_free(et);
 				return false;
@@ -1509,7 +1559,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1590,7 +1645,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1634,7 +1694,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 results of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 results of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1695,7 +1760,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(src.type, indices.type)) {
 				gbString src_str = type_to_string(src.type);
 				gbString indices_str = type_to_string(indices.type);
-				error(indices.expr, "'%.*s' expected both arguments to have the same type, got '%s' vs '%s'", LIT(builtin_name), src_str, indices_str);
+				TypeDiagnosticString type_strings[] = {
+					{&src_str, src.type},
+					{&indices_str, indices.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(indices.expr, "'%.*s' expected both arguments to have the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(indices_str);
 				gb_string_free(src_str);
 				return false;
@@ -1860,7 +1930,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1868,7 +1943,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, z.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString zs = type_to_string(z.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, zs);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&zs, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(zs);
 				gb_string_free(xs);
 				return false;
@@ -1942,7 +2022,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 				if (!are_types_identical(x.type, y.type)) {
 					gbString a = type_to_string(x.type);
 					gbString b = type_to_string(y.type);
-					error(y.expr, "'%.*s' all argument types must match, expected %s, got %s", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, x.type},
+						{&b, y.type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(y.expr, "'%.*s' all argument types must match, expected %s, got %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -3794,7 +3879,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(x.type, y.type)) {
 			gbString tx = type_to_string(x.type);
 			gbString ty = type_to_string(y.type);
-			error(call, "Mismatched types to 'complex', '%s' vs '%s'", tx, ty);
+			TypeDiagnosticString type_strings[] = {
+				{&tx, x.type},
+				{&ty, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "Mismatched types to 'complex', '%s' vs '%s'", *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(ty);
 			gb_string_free(tx);
 			return false;
@@ -3991,7 +4081,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			gbString ty = type_to_string(xyzw[1].type);
 			gbString tz = type_to_string(xyzw[2].type);
 			gbString tw = type_to_string(xyzw[3].type);
-			error(call, "Mismatched types to 'quaternion', 'w=%s' vs 'x=%s' vs 'y=%s' vs 'z=%s'", tw, tx, ty, tz);
+			TypeDiagnosticString type_strings[] = {
+				{&tx, xyzw[0].type},
+				{&ty, xyzw[1].type},
+				{&tz, xyzw[2].type},
+				{&tw, xyzw[3].type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "Mismatched types to 'quaternion', 'w=%s' vs 'x=%s' vs 'y=%s' vs 'z=%s'", *type_strings[3].value, *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 			gb_string_free(tw);
 			gb_string_free(tz);
 			gb_string_free(ty);
@@ -4592,9 +4689,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(a->type, b->type)) {
 					gbString type_a = type_to_string(a->type);
 					gbString type_b = type_to_string(b->type);
+					TypeDiagnosticString type_strings[] = {
+						{&type_a, a->type},
+						{&type_b, b->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(a->expr,
 					      "Mismatched types to 'min', '%s' vs '%s'",
-					      type_a, type_b);
+					      *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(type_b);
 					gb_string_free(type_a);
 					return false;
@@ -4775,9 +4877,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(a->type, b->type)) {
 					gbString type_a = type_to_string(a->type);
 					gbString type_b = type_to_string(b->type);
+					TypeDiagnosticString type_strings[] = {
+						{&type_a, a->type},
+						{&type_b, b->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(a->expr,
 					      "Mismatched types to 'max', '%s' vs '%s'",
-					      type_a, type_b);
+					      *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(type_b);
 					gb_string_free(type_a);
 					return false;
@@ -4936,9 +5043,15 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				gbString type_x = type_to_string(x.type);
 				gbString type_y = type_to_string(y.type);
 				gbString type_z = type_to_string(z.type);
+				TypeDiagnosticString type_strings[] = {
+					{&type_x, x.type},
+					{&type_y, y.type},
+					{&type_z, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				error(call,
 				      "Mismatched types to 'clamp', '%s', '%s', '%s'",
-				      type_x, type_y, type_z);
+				      *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 				gb_string_free(type_z);
 				gb_string_free(type_y);
 				gb_string_free(type_x);
@@ -5208,7 +5321,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!is_type_array(x.type) || !is_type_array(y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects only arrays, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects only arrays, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5221,7 +5339,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(xt->Array.elem, yt->Array.elem)) {
 			gbString s1 = type_to_string(xt->Array.elem);
 			gbString s2 = type_to_string(yt->Array.elem);
-			error(call, "'%.*s' mismatched element types, got %s vs %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, xt->Array.elem},
+				{&s2, yt->Array.elem},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' mismatched element types, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5238,7 +5361,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (xt->Array.count == 0 || yt->Array.count == 0) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects only arrays of non-zero length, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects only arrays of non-zero length, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5274,7 +5402,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!is_type_matrix(x.type) && !is_type_array(y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects matrix or array values, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects matrix or array values, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5283,7 +5416,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(x.type, y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' values of the same type, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' values of the same type, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5610,7 +5748,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(base_type(args.type), slice_hint)) {
 			gbString s = type_to_string(slice_hint);
 			gbString t = type_to_string(args.type);
-			error(array_ptr.expr, "Expected a %s to use as the slice '%.*s', got %s", s, LIT(builtin_name), t);
+			TypeDiagnosticString type_strings[] = {
+				{&s, slice_hint},
+				{&t, args.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(array_ptr.expr, "Expected a %s to use as the slice '%.*s', got %s", *type_strings[0].value, LIT(builtin_name), *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(s);
 			return false;
@@ -5678,7 +5821,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(lhs.type, extra.type)) {
 					gbString a = type_to_string(lhs.type);
 					gbString b = type_to_string(extra.type);
-					error(extra.expr, "'%.*s' expects constant values of the same slice type, got '%s' vs '%s'", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, lhs.type},
+						{&b, extra.type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(extra.expr, "'%.*s' expects constant values of the same slice type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -5694,7 +5842,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(elem_type, extra_elem_type)) {
 					gbString a = type_to_string(elem_type);
 					gbString b = type_to_string(extra_elem_type);
-					error(extra.expr, "'%.*s' expects constant values of the same element-type, got '%s' vs '%s'", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, elem_type},
+						{&b, extra_elem_type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(extra.expr, "'%.*s' expects constant values of the same element-type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -6155,7 +6308,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6206,7 +6364,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6294,7 +6457,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
 				gbString zts = type_to_string(z.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s vs %s", LIT(builtin_name), xts, yts, zts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+					{&zts, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 				gb_string_free(zts);
 				gb_string_free(yts);
 				gb_string_free(xts);
@@ -6505,7 +6674,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(ptr0.type, ptr1.type)) {
 				gbString xts = type_to_string(ptr0.type);
 				gbString yts = type_to_string(ptr1.type);
-				error(ptr0.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, ptr0.type},
+					{&yts, ptr1.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(ptr0.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6909,7 +7083,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6979,7 +7158,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				*operand = x; // minimize error propagation
@@ -8409,7 +8593,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (super->kind != sub->kind) {
 				gbString a = type_to_string(op_super.type);
 				gbString b = type_to_string(op_sub.type);
-				error(op_super.expr, "'%.*s' expects types of the same kind, got %s vs %s", LIT(builtin_name), a, b);
+				TypeDiagnosticString type_strings[] = {
+					{&a, op_super.type},
+					{&b, op_sub.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(op_super.expr, "'%.*s' expects types of the same kind, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(b);
 				gb_string_free(a);
 				return false;
@@ -8485,7 +8674,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 			gbString a = type_to_string(op_super.type);
 			gbString b = type_to_string(op_sub.type);
-			error(op_super.expr, "'%.*s' expects types of the same kind and either an enum or union, got %s vs %s", LIT(builtin_name), a, b);
+			TypeDiagnosticString type_strings[] = {
+				{&a, op_super.type},
+				{&b, op_sub.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(op_super.expr, "'%.*s' expects types of the same kind and either an enum or union, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(b);
 			gb_string_free(a);
 			return false;

@@ -729,11 +729,16 @@ gb_internal void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr
 					gbString expr_str = expr_to_string(init);
 					gbString op_type_str = type_to_string(entity->type);
 					gbString type_str = type_to_string(e->type);
+					TypeDiagnosticString type_strings[] = {
+						{&op_type_str, entity->type},
+						{&type_str, e->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(e->token,
 					      "Cannot assign '%s' of type '%s' to '%s'",
 					      expr_str,
-					      op_type_str,
-					      type_str);
+					      *type_strings[0].value,
+					      *type_strings[1].value);
 
 					gb_string_free(type_str);
 					gb_string_free(op_type_str);
@@ -1468,7 +1473,12 @@ gb_internal void check_scope_exit_contract(CheckerContext *ctx, Entity *src, Ast
 		if (!are_types_identical(binding_type, cleanup_param_type)) {
 			gbString binding_str = type_to_string(binding_type);
 			gbString cleanup_str = type_to_string(cleanup_param_type);
-			error(arg, "Scope-exit cleanup parameter type does not match binding: %s != %s", binding_str, cleanup_str);
+			TypeDiagnosticString type_strings[] = {
+				{&binding_str, binding_type},
+				{&cleanup_str, cleanup_param_type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(arg, "Scope-exit cleanup parameter type does not match binding: %s != %s", *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(cleanup_str);
 			gb_string_free(binding_str);
 			return;
@@ -1542,11 +1552,16 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 				gbString expr_str = expr_to_string(d->proc_lit);
 				gbString op_type_str = type_to_string(e->type);
 				gbString type_str = type_to_string(decl_type);
+				TypeDiagnosticString type_strings[] = {
+					{&op_type_str, e->type},
+					{&type_str, decl_type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				error(e->token,
 				      "Cannot assign '%s' of type '%s' to '%s'",
 				      expr_str,
-				      op_type_str,
-				      type_str);
+				      *type_strings[0].value,
+				      *type_strings[1].value);
 
 				gb_string_free(type_str);
 				gb_string_free(op_type_str);

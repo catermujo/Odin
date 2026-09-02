@@ -1443,19 +1443,33 @@ gb_internal bool check_proc_params_assignable(CheckerContext *c, Type *dst, Type
 }
 
 
-gb_internal AstPackage *get_package_of_type(Type *type) {
+// Returns false when a compound type contains named types from multiple packages.
+gb_internal bool get_common_package_of_type(Type *type, AstPackage **package) {
+	GB_ASSERT(package != nullptr);
+	*package = nullptr;
+
 	for (;;) {
 		if (type == nullptr) {
-			return nullptr;
+			return true;
 		}
 		switch (type->kind) {
 		case Type_Basic:
-			return builtin_pkg;
+			*package = builtin_pkg;
+			return true;
 		case Type_Named:
 			if (type->Named.type_name != nullptr) {
-				return type->Named.type_name->pkg;
+				*package = type->Named.type_name->pkg;
 			}
-			return nullptr;
+			return true;
+		case Type_Generic:
+			if (type->Generic.specialized != nullptr) {
+				type = type->Generic.specialized;
+				continue;
+			}
+			if (type->Generic.entity != nullptr) {
+				*package = type->Generic.entity->pkg;
+			}
+			return true;
 		case Type_Pointer:
 			type = type->Pointer.elem;
 			continue;
@@ -1468,8 +1482,120 @@ gb_internal AstPackage *get_package_of_type(Type *type) {
 		case Type_DynamicArray:
 			type = type->DynamicArray.elem;
 			continue;
+		case Type_FixedCapacityDynamicArray:
+			type = type->FixedCapacityDynamicArray.elem;
+			continue;
+		case Type_EnumeratedArray:
+			type = type->EnumeratedArray.elem;
+			continue;
+		case Type_MultiPointer:
+			type = type->MultiPointer.elem;
+			continue;
+		case Type_SoaPointer:
+			type = type->SoaPointer.elem;
+			continue;
+		case Type_SimdVector:
+			type = type->SimdVector.elem;
+			continue;
+		case Type_Matrix:
+			type = type->Matrix.elem;
+			continue;
+		case Type_Tuple: {
+			AstPackage *common_package = nullptr;
+			for_array(i, type->Tuple.variables) {
+				Entity *variable = type->Tuple.variables[i];
+				if (variable == nullptr) {
+					continue;
+				}
+				AstPackage *element_package = nullptr;
+				if (!get_common_package_of_type(variable->type, &element_package)) {
+					return false;
+				}
+				if (element_package == nullptr || element_package == builtin_pkg) {
+					continue;
+				}
+				if (common_package != nullptr && common_package != element_package) {
+					return false;
+				}
+				common_package = element_package;
+			}
+			*package = common_package;
+			return true;
 		}
-		return nullptr;
+		case Type_Proc: {
+			AstPackage *common_package = nullptr;
+			Type *parts[] = {type->Proc.params, type->Proc.results};
+			for (Type *part : parts) {
+				AstPackage *part_package = nullptr;
+				if (!get_common_package_of_type(part, &part_package)) {
+					return false;
+				}
+				if (part_package == nullptr || part_package == builtin_pkg) {
+					continue;
+				}
+				if (common_package != nullptr && common_package != part_package) {
+					return false;
+				}
+				common_package = part_package;
+			}
+			*package = common_package;
+			return true;
+		}
+		case Type_Map: {
+			AstPackage *common_package = nullptr;
+			Type *parts[] = {type->Map.key, type->Map.value};
+			for (Type *part : parts) {
+				AstPackage *part_package = nullptr;
+				if (!get_common_package_of_type(part, &part_package)) {
+					return false;
+				}
+				if (part_package == nullptr || part_package == builtin_pkg) {
+					continue;
+				}
+				if (common_package != nullptr && common_package != part_package) {
+					return false;
+				}
+				common_package = part_package;
+			}
+			*package = common_package;
+			return true;
+		}
+		}
+		return true;
+	}
+}
+
+// NOTE(bill): Type names do not include their package. Add package names only
+// when multiple types in one diagnostic have the same rendered name.
+enum { TYPE_DIAGNOSTIC_STRING_MAX = 8 };
+struct TypeDiagnosticString {
+	gbString *value;
+	Type *    type;
+};
+
+gb_internal void add_type_package_provenance(TypeDiagnosticString *strings, isize count) {
+	GB_ASSERT(count <= TYPE_DIAGNOSTIC_STRING_MAX);
+
+	bool ambiguous[TYPE_DIAGNOSTIC_STRING_MAX] = {};
+	for (isize i = 0; i < count; i++) {
+		isize left_len = gb_string_length(*strings[i].value);
+		for (isize j = i+1; j < count; j++) {
+			isize right_len = gb_string_length(*strings[j].value);
+			if (left_len == right_len && gb_strncmp(*strings[i].value, *strings[j].value, left_len) == 0) {
+				ambiguous[i] = true;
+				ambiguous[j] = true;
+			}
+		}
+	}
+
+	for (isize i = 0; i < count; i++) {
+		if (!ambiguous[i]) {
+			continue;
+		}
+		AstPackage *pkg = nullptr;
+		if (get_common_package_of_type(strings[i].type, &pkg) && pkg != nullptr) {
+			*strings[i].value = gb_string_append_fmt(*strings[i].value, " (package %.*s)", LIT(pkg->name));
+		}
 	}
 }
 
@@ -1564,6 +1690,11 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 			gbString expr_str    = expr_to_string(operand->expr);
 			gbString op_type_str = type_to_string(operand->type);
 			gbString type_str    = type_to_string(type);
+			TypeDiagnosticString type_strings[] = {
+				{&op_type_str, operand->type},
+				{&type_str, type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
 
 			defer (gb_string_free(type_str));
 			defer (gb_string_free(op_type_str));
@@ -1575,7 +1706,8 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 			error(operand->expr,
 			      "Cannot assign overloaded procedure group '%s' to '%s' in %.*s%.*s",
 			      expr_str,
-			      op_type_str,
+			      *type_strings[0].value,
+			      *type_strings[1].value,
 			      LIT(article),
 			      LIT(context_name));
 			operand->mode = Addressing_Invalid;
@@ -1637,30 +1769,18 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 		default:
 			// TODO(bill): is this a good enough error message?
 			{
-				gbString op_type_extra = gb_string_make(heap_allocator(), "");
-				gbString type_extra = gb_string_make(heap_allocator(), "");
-				defer (gb_string_free(op_type_extra));
-				defer (gb_string_free(type_extra));
-
-				isize on = gb_string_length(op_type_str);
-				isize tn = gb_string_length(type_str);
-				if (on == tn && gb_strncmp(op_type_str, type_str, on) == 0) {
-					AstPackage *op_pkg = get_package_of_type(operand->type);
-					AstPackage *type_pkg = get_package_of_type(type);
-					if (op_pkg != nullptr) {
-						op_type_extra = gb_string_append_fmt(op_type_extra, " (package %.*s)", LIT(op_pkg->name));
-					}
-					if (type_pkg != nullptr) {
-						type_extra = gb_string_append_fmt(type_extra, " (package %.*s)", LIT(type_pkg->name));
-					}
-				}
+				TypeDiagnosticString type_strings[] = {
+					{&op_type_str, operand->type},
+					{&type_str, type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 
 				ERROR_BLOCK();
 				error(operand->expr,
-				      "Cannot assign value '%s' of type '%s%s' to '%s%s' in %.*s%.*s",
+				      "Cannot assign value '%s' of type '%s' to '%s' in %.*s%.*s",
 				      expr_str,
-				      op_type_str, op_type_extra,
-				      type_str, type_extra,
+				      *type_strings[0].value,
+				      *type_strings[1].value,
 				      LIT(article),
 				      LIT(context_name));
 				check_assignment_error_suggestion(c, operand, type);
@@ -2971,7 +3091,12 @@ gb_internal bool check_integer_exceed_suggestion(CheckerContext *c, Operand *o, 
 		if (is_type_enum(o->type)) {
 			if (check_is_castable_to(c, o, type)) {
 				gbString ot = type_to_string(o->type);
-				error_line("\tSuggestion: Try casting the '%s' expression to '%s'", ot, b);
+				TypeDiagnosticString type_strings[] = {
+					{&ot, o->type},
+					{&b, type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error_line("\tSuggestion: Try casting the '%s' expression to '%s'", *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ot);
 			}
 			return true;
@@ -3176,6 +3301,11 @@ gb_internal bool check_is_expressible(CheckerContext *ctx, Operand *o, Type *typ
 		gbString a = expr_to_string(o->expr);
 		gbString b = type_to_string(type);
 		gbString c = type_to_string(o->type);
+		TypeDiagnosticString type_strings[] = {
+			{&b, type},
+			{&c, o->type},
+		};
+		add_type_package_provenance(type_strings, gb_count_of(type_strings));
 		gbString s = exact_value_to_string(o->value);
 		defer(
 			gb_string_free(s);
@@ -3199,7 +3329,7 @@ gb_internal bool check_is_expressible(CheckerContext *ctx, Operand *o, Type *typ
 				if (are_types_identical(o->type, type)) {
 					error(o->expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", s, a, b);
 				} else {
-					error(o->expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", s, a, b, c);
+					error(o->expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", s, a, *type_strings[0].value, *type_strings[1].value);
 				}
 
 				check_assignment_error_suggestion(ctx, o, type, max_bit_size);
@@ -3212,7 +3342,7 @@ gb_internal bool check_is_expressible(CheckerContext *ctx, Operand *o, Type *typ
 				extra_text = suggestion_buf;
 			}
 
-			error(o->expr, "Cannot convert '%s' to '%s' from '%s', got %s%s", a, b, c, s, extra_text);
+			error(o->expr, "Cannot convert '%s' to '%s' from '%s', got %s%s", a, *type_strings[0].value, *type_strings[1].value, s, extra_text);
 			check_assignment_error_suggestion(ctx, o, type);
 		}
 		return false;
@@ -3796,18 +3926,23 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 		if (!defined) {
 			gbString xs = type_to_string(x->type, temporary_allocator());
 			gbString ys = type_to_string(y->type, temporary_allocator());
+			TypeDiagnosticString type_strings[] = {
+				{&xs, x->type},
+				{&ys, y->type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
 
 			if (!is_type_comparable(x->type)) {
 				err_str = gb_string_make(temporary_allocator(),
-					gb_bprintf("Type '%s' is not simply comparable, so operator '%.*s' is not defined for it", xs, LIT(token_strings[op]))
+					gb_bprintf("Type '%s' is not simply comparable, so operator '%.*s' is not defined for it", *type_strings[0].value, LIT(token_strings[op]))
 				);
 			} else if (!is_type_comparable(y->type)) {
 				err_str = gb_string_make(temporary_allocator(),
-					gb_bprintf("Type '%s' is not simply comparable, so operator '%.*s' is not defined for it", ys, LIT(token_strings[op]))
+					gb_bprintf("Type '%s' is not simply comparable, so operator '%.*s' is not defined for it", *type_strings[1].value, LIT(token_strings[op]))
 				);
 			} else {
 				err_str = gb_string_make(temporary_allocator(),
-					gb_bprintf("Operator '%.*s' not defined between the types '%s' and '%s'", LIT(token_strings[op]), xs, ys)
+					gb_bprintf("Operator '%.*s' not defined between the types '%s' and '%s'", LIT(token_strings[op]), *type_strings[0].value, *type_strings[1].value)
 				);
 			}
 		} else {
@@ -3830,7 +3965,12 @@ gb_internal void check_comparison(CheckerContext *c, Ast *node, Operand *x, Oper
 		} else {
 			yt = type_to_string(y->type);
 		}
-		err_str = gb_string_make(temporary_allocator(), gb_bprintf("Mismatched types '%s' and '%s'", xt, yt));
+		TypeDiagnosticString type_strings[] = {
+			{&xt, x->type},
+			{&yt, y->type},
+		};
+		add_type_package_provenance(type_strings, gb_count_of(type_strings));
+		err_str = gb_string_make(temporary_allocator(), gb_bprintf("Mismatched types '%s' and '%s'", *type_strings[0].value, *type_strings[1].value));
 	}
 
 	if (err_str != nullptr) {
@@ -4449,11 +4589,16 @@ gb_internal void check_cast(CheckerContext *c, Operand *x, Type *type, bool forb
 		gbString expr_str  = expr_to_string(x->expr, temporary_allocator());
 		gbString to_type   = type_to_string(type,    temporary_allocator());
 		gbString from_type = type_to_string(x->type, temporary_allocator());
+		TypeDiagnosticString type_strings[] = {
+			{&to_type, type},
+			{&from_type, x->type},
+		};
+		add_type_package_provenance(type_strings, gb_count_of(type_strings));
 
 		x->mode = Addressing_Invalid;
 
 		ERROR_BLOCK();
-		error(x->expr, "Cannot cast '%s' as '%s' from '%s'", expr_str, to_type, from_type);
+		error(x->expr, "Cannot cast '%s' as '%s' from '%s'", expr_str, *type_strings[0].value, *type_strings[1].value);
 		if (is_const_expr) {
 			gbString val_str = exact_value_to_string(x->value);
 			if (is_type_float(x->type) && is_type_integer(type)) {
@@ -4672,10 +4817,15 @@ gb_internal bool check_transmute(CheckerContext *c, Ast *node, Operand *o, Type 
 				gb_string_free(to_type);
 			} else if (is_type_integer(src_t) && is_type_integer(dst_t) &&
 			           types_have_same_internal_endian(src_t, dst_t) &&
-			           type_endian_kind_of(src_t) == type_endian_kind_of(dst_t)) {
+				           type_endian_kind_of(src_t) == type_endian_kind_of(dst_t)) {
 				gbString oper_type = type_to_string(src_t);
 				gbString to_type   = type_to_string(dst_t);
-				error(o->expr, "Use of 'transmute' where 'cast' would be preferred since both are integers of the same endianness, from '%s' to '%s'", oper_type, to_type);
+				TypeDiagnosticString type_strings[] = {
+					{&oper_type, src_t},
+					{&to_type, dst_t},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(o->expr, "Use of 'transmute' where 'cast' would be preferred since both are integers of the same endianness, from '%s' to '%s'", *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(to_type);
 				gb_string_free(oper_type);
 			}
@@ -4872,8 +5022,13 @@ matrix_success:
 matrix_error:
 	gbString xts = type_to_string(x->type);
 	gbString yts = type_to_string(y->type);
+	TypeDiagnosticString type_strings[] = {
+		{&xts, x->type},
+		{&yts, y->type},
+	};
+	add_type_package_provenance(type_strings, gb_count_of(type_strings));
 	gbString expr_str = expr_to_string(x->expr);
-	error(op, "Mismatched types in binary matrix expression '%s' for operator '%.*s' : '%s' vs '%s'", expr_str, LIT(op.string), xts, yts);
+	error(op, "Mismatched types in binary matrix expression '%s' for operator '%.*s' : '%s' vs '%s'", expr_str, LIT(op.string), *type_strings[0].value, *type_strings[1].value);
 	gb_string_free(expr_str);
 	gb_string_free(yts);
 	gb_string_free(xts);
@@ -5278,8 +5433,13 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 			    y->type != t_invalid) {
 				gbString xt = type_to_string(x->type);
 				gbString yt = type_to_string(y->type);
+				TypeDiagnosticString type_strings[] = {
+					{&xt, x->type},
+					{&yt, y->type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				gbString expr_str = expr_to_string(node);
-				error(op, "Mismatched types in binary expression '%s' : '%s' vs '%s'", expr_str, xt, yt);
+				error(op, "Mismatched types in binary expression '%s' : '%s' vs '%s'", expr_str, *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(expr_str);
 				gb_string_free(yt);
 				gb_string_free(xt);
@@ -5596,6 +5756,11 @@ gb_internal void convert_untyped_error(CheckerContext *c, Operand *operand, Type
 	gbString expr_str = expr_to_string(operand->expr);
 	gbString type_str = type_to_string(target_type);
 	gbString from_type_str = type_to_string(operand->type);
+	TypeDiagnosticString type_strings[] = {
+		{&type_str, target_type},
+		{&from_type_str, operand->type},
+	};
+	add_type_package_provenance(type_strings, gb_count_of(type_strings));
 
 	char suggestion_buf[64] = {};
 	char const *extra_text = "";
@@ -5608,7 +5773,7 @@ gb_internal void convert_untyped_error(CheckerContext *c, Operand *operand, Type
 		begin_error_block();
 	}
 
-	error(operand->expr, "Cannot convert untyped value '%s' to '%s' from '%s'%s", expr_str, type_str, from_type_str, extra_text);
+	error(operand->expr, "Cannot convert untyped value '%s' to '%s' from '%s'%s", expr_str, *type_strings[0].value, *type_strings[1].value, extra_text);
 	if (operand->value.kind == ExactValue_String) {
 		String key = operand->value.value_string;
 		if (is_type_string(operand->type) && is_type_enum(target_type)) {
@@ -10725,8 +10890,13 @@ gb_internal ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *c
 			ERROR_BLOCK();
 			gbString a = type_to_string(pt);
 			gbString b = type_to_string(c->curr_proc_sig);
+			TypeDiagnosticString type_strings[] = {
+				{&a, pt},
+				{&b, c->curr_proc_sig},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
 			error(call, "Use of '#must_tail' of a procedure must have the same type as the procedure it was called within");
-			error_line("\tCall type: %s, parent type: %s", a, b);
+			error_line("\tCall type: %s, parent type: %s", *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(b);
 			gb_string_free(a);
 		}
@@ -11032,8 +11202,13 @@ gb_internal bool check_range(CheckerContext *c, Ast *node, bool is_for_loop, Ope
 		    y->type != t_invalid) {
 			gbString xt = type_to_string(x->type);
 			gbString yt = type_to_string(y->type);
+			TypeDiagnosticString type_strings[] = {
+				{&xt, x->type},
+				{&yt, y->type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
 			gbString expr_str = expr_to_string(x->expr);
-			error(ie->op, "Mismatched types in interval expression '%s' : '%s' vs '%s'", expr_str, xt, yt);
+			error(ie->op, "Mismatched types in interval expression '%s' : '%s' vs '%s'", expr_str, *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(expr_str);
 			gb_string_free(yt);
 			gb_string_free(xt);
@@ -11728,7 +11903,12 @@ gb_internal ExprKind check_ternary_if_expr(CheckerContext *c, Operand *o, Ast *n
 	if (!ternary_compare_types(x.type, y.type)) {
 		gbString its = type_to_string(x.type);
 		gbString ets = type_to_string(y.type);
-		error(node, "Mismatched types in ternary if expression, %s vs %s", its, ets);
+		TypeDiagnosticString type_strings[] = {
+			{&its, x.type},
+			{&ets, y.type},
+		};
+		add_type_package_provenance(type_strings, gb_count_of(type_strings));
+		error(node, "Mismatched types in ternary if expression, %s vs %s", *type_strings[0].value, *type_strings[1].value);
 		gb_string_free(ets);
 		gb_string_free(its);
 		return kind;
@@ -11886,7 +12066,12 @@ gb_internal ExprKind check_or_else_expr(CheckerContext *c, Operand *o, Ast *node
 				} else if (!are_types_identical(left_type, y.type)) {
 					gbString xt = type_to_string(left_type);
 					gbString yt = type_to_string(y.type);
-					error(y.expr, "Mismatched types, expected (%s), got (%s)", xt, yt);
+					TypeDiagnosticString type_strings[] = {
+						{&xt, left_type},
+						{&yt, y.type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(y.expr, "Mismatched types, expected (%s), got (%s)", *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(yt);
 					gb_string_free(xt);
 				}
@@ -11963,8 +12148,13 @@ gb_internal ExprKind check_or_return_expr(CheckerContext *c, Operand *o, Ast *no
 				// TODO(bill): better error message
 				gbString a = type_to_string(right_type);
 				gbString b = type_to_string(end_type);
+				TypeDiagnosticString type_strings[] = {
+					{&a, right_type},
+					{&b, end_type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				gbString ret_type = type_to_string(result_type);
-				error(node, "Cannot assign end value of type '%s' to '%s' in '%.*s'", a, b, LIT(name));
+				error(node, "Cannot assign end value of type '%s' to '%s' in '%.*s'", *type_strings[0].value, *type_strings[1].value, LIT(name));
 				if (vars.count == 1) {
 					error_line("\tProcedure return value type: %s\n", ret_type);
 				} else {
