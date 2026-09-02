@@ -2891,7 +2891,12 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 			if (!rhs_is_container && !rhs_is_scalar) {
 				gbString lhs_str = type_to_string(lhs.type);
 				gbString elem_str = type_to_string(elem_type);
-				error(op, "Assignment operator '%.*s' with '%s' requires RHS assignable to '%s' or '%s'", LIT(op.string), lhs_str, lhs_str, elem_str);
+				TypeDiagnosticString type_strings[] = {
+					{&lhs_str, lhs.type},
+					{&elem_str, elem_type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(op, "Assignment operator '%.*s' with '%s' requires RHS assignable to '%s' or '%s'", LIT(op.string), *type_strings[0].value, *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(elem_str);
 				gb_string_free(lhs_str);
 				return;
