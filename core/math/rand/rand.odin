@@ -36,15 +36,15 @@ Returns:
 */
 default_random_generator :: runtime.default_random_generator
 
-@(require_results)
-create_u64 :: proc(seed: u64) -> (state: Default_Random_State) {
+@(no_instrumentation, require_results)
+create_u64 :: #force_inline proc(seed: u64) -> (state: Default_Random_State) {
 	seed := seed
 	runtime.default_random_generator_proc(&state, .Reset, ([^]byte)(&seed)[:size_of(seed)])
 	return
 }
 
-@(require_results)
-create_bytes :: proc(seed: []byte) -> (state: Default_Random_State) {
+@(no_instrumentation, require_results)
+create_bytes :: #force_inline proc(seed: []byte) -> (state: Default_Random_State) {
 	runtime.default_random_generator_proc(&state, .Reset, seed)
 	return
 }
@@ -78,15 +78,18 @@ reset :: proc {
 	reset_bytes,
 }
 
-reset_u64 :: proc(seed: u64, gen := context.random_generator) {
+@(no_instrumentation)
+reset_u64 :: #force_inline proc(seed: u64, gen := context.random_generator) {
 	runtime.random_generator_reset_u64(gen, seed)
 }
 
-reset_bytes :: proc(bytes: []byte, gen := context.random_generator) {
+@(no_instrumentation)
+reset_bytes :: #force_inline proc(bytes: []byte, gen := context.random_generator) {
 	runtime.random_generator_reset_bytes(gen, bytes)
 }
 
-query_info :: proc(gen := context.random_generator) -> Generator_Query_Info {
+@(no_instrumentation)
+query_info :: #force_inline proc(gen := context.random_generator) -> Generator_Query_Info {
 	return runtime.random_generator_query_info(gen)
 }
 
@@ -111,8 +114,8 @@ Possible Output:
 	389
 
 */
-@(require_results)
-uint32 :: proc(gen := context.random_generator) -> (val: u32) {#no_downcast_assert return u32(uint64(gen))}
+@(no_instrumentation, require_results)
+uint32 :: #force_inline proc(gen := context.random_generator) -> (val: u32) {#no_downcast_assert return u32(uint64(gen))}
 
 /*
 Generates a random 64 bit value using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -134,8 +137,8 @@ Possible Output:
 	389
 
 */
-@(require_results)
-uint64 :: proc(gen := context.random_generator) -> (val: u64) {
+@(no_instrumentation, require_results)
+uint64 :: #force_inline proc(gen := context.random_generator) -> (val: u64) {
 	ok := runtime.random_generator_read_ptr(gen, &val, size_of(val))
 	assert(ok, "uninitialized gen/context.random_generator")
 	return
@@ -161,8 +164,8 @@ Possible Output:
 	389
 
 */
-@(require_results)
-uint128 :: proc(gen := context.random_generator) -> (val: u128) {
+@(no_instrumentation, require_results)
+uint128 :: #force_inline proc(gen := context.random_generator) -> (val: u128) {
 	a := u128(uint64(gen))
 	b := u128(uint64(gen))
 	return (a<<64) | b
@@ -189,7 +192,7 @@ Possible Output:
 	389
 
 */
-@(require_results) int31  :: proc(gen := context.random_generator) -> (val: i32)  { return i32(uint32(gen) << 1 >> 1) }
+@(no_instrumentation, require_results) int31 :: #force_inline proc(gen := context.random_generator) -> (val: i32)  { #no_downcast_assert return i32(uint32(gen) << 1 >> 1) }
 
 /*
 Generates a random 63 bit value using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -212,7 +215,7 @@ Possible Output:
 	389
 
 */
-@(require_results) int63  :: proc(gen := context.random_generator) -> (val: i64)  { return i64(uint64(gen) << 1 >> 1) }
+@(no_instrumentation, require_results) int63 :: #force_inline proc(gen := context.random_generator) -> (val: i64)  { return i64(uint64(gen) << 1 >> 1) }
 
 /*
 Generates a random 127 bit value using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -235,7 +238,7 @@ Possible Output:
 	389
 
 */
-@(require_results) int127 :: proc(gen := context.random_generator) -> (val: i128) { return i128(uint128(gen) << 1 >> 1) }
+@(no_instrumentation, require_results) int127 :: #force_inline proc(gen := context.random_generator) -> (val: i128) { return i128(uint128(gen) << 1 >> 1) }
 
 /*
 Generates a random 31 bit value in the range `[0, n)` using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -911,7 +914,7 @@ Possible Output:
 	0.511
 
 */
-@(require_results) float32 :: proc(gen := context.random_generator) -> (val: f32) {#no_downcast_assert return f32(int31_max(1<<24, gen)) / (1 << 24) }
+@(no_instrumentation, require_results) float32 :: #force_inline proc(gen := context.random_generator) -> (val: f32) {#no_downcast_assert return f32(int31_max(1<<24, gen)) / (1 << 24) }
 
 /*
 Generates a random double floating point value in the range `[low, high)` using the provided random number generator. If no generator is provided the global random number generator will be used.
@@ -1010,8 +1013,8 @@ Possible Output:
 	[32, 4, 59, 7, 1, 2, 2, 119]
 
 */
-@(require_results)
-read :: proc(p: []byte, gen := context.random_generator) -> (n: int) {
+@(no_instrumentation, require_results)
+read :: #force_inline proc(p: []byte, gen := context.random_generator) -> (n: int) {
 	if !runtime.random_generator_read_bytes(gen, p) {return 0}
 	return len(p)
 }
@@ -1129,8 +1132,8 @@ Possible Output:
 	4
 
 */
-@(require_results)
-choice :: proc(array: $T/[]$E, gen := context.random_generator) -> (res: E) {
+@(no_instrumentation, require_results)
+choice :: #force_inline proc(array: $T/[]$E, gen := context.random_generator) -> (res: E) {
 	n := i64(len(array))
 	if n < 1 {
 		return E{}
