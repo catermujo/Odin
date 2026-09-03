@@ -8,5 +8,7 @@ plans
 test_issue_5573
 tests
 vendor/*
+!vendor/curl
+!vendor/curl/**
 !vendor/stb
 !vendor/stb/**
