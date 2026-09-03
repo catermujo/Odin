@@ -1,2 +1,12 @@
 .git
 odin
+LLVM-C.dll
+bin
+ci
+examples
+plans
+test_issue_5573
+tests
+vendor/*
+!vendor/stb
+!vendor/stb/**
