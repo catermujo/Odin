@@ -3243,7 +3243,7 @@ gb_internal void add_type_info_type_internal(CheckerContext *c, Type *t) {
 		break;
 
 	default:
-		GB_PANIC("Unhandled type: %*.s %d", LIT(type_strings[bt->kind]), bt->kind);
+		GB_PANIC("Unhandled type: %*.s %d", LIT(type_kind_strings[bt->kind]), bt->kind);
 		break;
 	}
 #endif
@@ -3483,7 +3483,7 @@ gb_internal void add_min_dep_type_info(Checker *c, Type *t) {
 		break;
 
 	default:
-		GB_PANIC("Unhandled type: %*.s", LIT(type_strings[bt->kind]));
+		GB_PANIC("Unhandled type: %*.s", LIT(type_kind_strings[bt->kind]));
 		break;
 	}
 }
