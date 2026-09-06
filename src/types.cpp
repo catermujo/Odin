@@ -332,7 +332,7 @@ enum TypeKind {
 	Type_Count,
 };
 
-gb_global String const type_strings[] = {
+gb_global String const type_kind_strings[] = {
 	{cast(u8 *)"Invalid", gb_size_of("Invalid")},
 #define TYPE_KIND(k, ...) {cast(u8 *)#k, gb_size_of(#k)-1},
 	TYPE_KINDS
