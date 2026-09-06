@@ -2707,7 +2707,7 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 				isize size = type_alloc_size(cast(TypeKind)kind);
 				total += count;
 				total_bytes += count*size;
-				gb_printf_err("%10td %8td  %.*s\n", count, size, LIT(type_strings[kind]));
+				gb_printf_err("%10td %8td  %.*s\n", count, size, LIT(type_kind_strings[kind]));
 			}
 			gb_printf_err("Total Types     - %td (%td bytes)\n", total, total_bytes);
 			gb_printf_err("\n");
