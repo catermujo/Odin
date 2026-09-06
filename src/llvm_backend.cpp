@@ -3715,9 +3715,8 @@ gb_internal bool lb_generate_code(lbGenerator *gen, CodeGenGlobalPlan const &pla
 				init_file = m->info->init_package->files[0];
 			}
 			if (init_file == nullptr) {
-				for (auto const &file_entry : info->files) {
-					init_file = file_entry.value;
-					break;
+				if (info->files.count > 0) {
+					init_file = info->files.entries[0].value;
 				}
 			}
 			if (init_file == nullptr) {

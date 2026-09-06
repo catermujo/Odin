@@ -1050,7 +1050,7 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		write_canonical_params(w, type);
 		return;
 	default:
-		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_strings[type->kind]));
+		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_kind_strings[type->kind]));
 		break;
 	}
 
