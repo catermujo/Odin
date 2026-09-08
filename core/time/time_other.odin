@@ -19,6 +19,7 @@ _now :: proc "contextless" () -> Time {
 _sleep :: proc "contextless" (d: Duration) {
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
 	// mul_div_u64 :: proc "contextless" (val, num, den: i64) -> i64 {
 	// 	q := val / den

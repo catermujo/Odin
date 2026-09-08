@@ -23,7 +23,9 @@ _sleep :: proc "contextless" (d: Duration) {
 	win32.Sleep(win32.DWORD(d/Millisecond))
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
+	@(no_instrumentation)
 	mul_div_u64 :: proc "contextless" (val, num, den: i64) -> i64 {
 		q := val / den
 		r := val % den

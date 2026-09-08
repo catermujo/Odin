@@ -38,6 +38,7 @@ when ODIN_OS == .Darwin {
 	TICK_CLOCK :: posix.Clock.MONOTONIC
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
 	t: posix.timespec
 	posix.clock_gettime(TICK_CLOCK, &t)
@@ -47,4 +48,3 @@ _tick_now :: proc "contextless" () -> Tick {
 _yield :: proc "contextless" () {
 	posix.sched_yield()
 }
-
