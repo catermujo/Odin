@@ -27,6 +27,7 @@ _sleep :: proc "contextless" (d: Duration) {
 	}
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
 	t, _ := linux.clock_gettime(.MONOTONIC_RAW)
 	return Tick{_nsec = i64(t.time_sec)*1e9 + i64(t.time_nsec)}
@@ -35,4 +36,3 @@ _tick_now :: proc "contextless" () -> Tick {
 _yield :: proc "contextless" () {
 	linux.sched_yield()
 }
-

@@ -14,7 +14,7 @@ Tick :: struct {
 Obtain the current tick.
 */
 @(require_results)
-tick_now :: proc "contextless" () -> Tick {
+tick_now :: #force_inline proc "contextless" () -> Tick {
 	return _tick_now()
 }
 
@@ -22,7 +22,7 @@ tick_now :: proc "contextless" () -> Tick {
 Add duration to a tick.
 */
 @(require_results)
-tick_add :: proc "contextless" (t: Tick, d: Duration) -> Tick {
+tick_add :: #force_inline proc "contextless" (t: Tick, d: Duration) -> Tick {
 	return Tick{t._nsec + i64(d)}
 }
 
@@ -30,7 +30,7 @@ tick_add :: proc "contextless" (t: Tick, d: Duration) -> Tick {
 Obtain the difference between ticks.
 */
 @(require_results)
-tick_diff :: proc "contextless" (start, end: Tick) -> Duration {
+tick_diff :: #force_inline proc "contextless" (start, end: Tick) -> Duration {
 	d := end._nsec - start._nsec
 	return Duration(d)
 }
@@ -47,7 +47,7 @@ This procedure is meant to be used in a loop, or in other scenarios, where one
 might want to obtain time between multiple ticks at specific points.
 */
 @(require_results)
-tick_lap_time :: proc "contextless" (prev: ^Tick) -> Duration {
+tick_lap_time :: #force_inline proc "contextless" (prev: ^Tick) -> Duration {
 	d: Duration
 	t := tick_now()
 	if prev._nsec != 0 {
@@ -61,14 +61,14 @@ tick_lap_time :: proc "contextless" (prev: ^Tick) -> Duration {
 Obtain the duration since last tick.
 */
 @(require_results)
-tick_since :: proc "contextless" (start: Tick) -> Duration {
+tick_since :: #force_inline proc "contextless" (start: Tick) -> Duration {
 	return tick_diff(start, tick_now())
 }
 
 /*
 Capture the duration the code in the current scope takes to execute.
 */
-SCOPED_TICK_DURATION :: proc "contextless" (d: ^Duration) -> (result: Tick) #scope_exit(.implicit, _tick_duration_end(d, result)) {
+SCOPED_TICK_DURATION :: #force_inline proc "contextless" (d: ^Duration) -> (result: Tick) #scope_exit(.implicit, _tick_duration_end(d, result)) {
 	return tick_now()
 }
 
