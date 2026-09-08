@@ -21,6 +21,7 @@ _sleep :: proc "contextless" (d: Duration) {
 	}
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
 	secs := orca.clock_time(.MONOTONIC)
 	return Tick{i64(secs * 1e9)}
