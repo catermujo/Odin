@@ -8,6 +8,13 @@ import tz "core:time/timezone"
 
 is_leap_year :: time.is_leap_year
 
+@(test)
+test_tick_lap_time_starts_at_zero :: proc(t: ^testing.T) {
+	prev: time.Tick
+	elapsed := time.tick_lap_time(&prev)
+	testing.expect_value(t, elapsed, time.Duration(0))
+}
+
 @test
 test_time_and_date_formatting :: proc(t: ^testing.T) {
 	buf: [64]u8
