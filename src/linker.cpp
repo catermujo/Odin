@@ -520,7 +520,7 @@ try_cross_linking:;
 				if (build_context.no_crt) {
 					link_settings = gb_string_append_fmt(link_settings, " /nodefaultlib");
 				} else {
-					link_settings = gb_string_append_fmt(link_settings, " /defaultlib:libcmt");
+					link_settings = gb_string_append_fmt(link_settings, " /defaultlib:libcmt /defaultlib:libvcruntime /defaultlib:libucrt");
 				}
 			}
 
