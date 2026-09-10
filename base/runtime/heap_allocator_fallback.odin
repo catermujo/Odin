@@ -58,6 +58,11 @@ heap_allocator :: proc() -> Allocator {
 heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
                             size, alignment: int,
                             old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, Allocator_Error) {
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+		if size < 0 || !is_power_of_two_int(alignment) {
+			return nil, .Invalid_Argument
+		}
+	}
 
 	// Because malloc does not support alignment requests, and aligned_alloc
 	// has specific requirements for what sizes it supports, this allocator
@@ -67,12 +72,15 @@ heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 	switch mode {
 	case .Alloc, .Alloc_Non_Zeroed:
 		padding := max(alignment, size_of(rawptr))
+		if size > max(int) - padding {
+			return nil, .Out_Of_Memory
+		}
 		ptr := heap_alloc(size + padding, mode == .Alloc)
 		if ptr == nil {
 			return nil, .Out_Of_Memory
 		}
-		shift := uintptr(padding) - uintptr(ptr) & uintptr(padding-1)
-		aligned_ptr := rawptr(uintptr(ptr) + shift)
+		aligned_address := (uintptr(ptr) + size_of(rawptr) + uintptr(padding-1)) & ~uintptr(padding-1)
+		aligned_ptr := rawptr(aligned_address)
 		([^]rawptr)(aligned_ptr)[-1] = ptr
 		return byte_slice(aligned_ptr, size), nil
 
@@ -86,6 +94,9 @@ heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 
 	case .Resize, .Resize_Non_Zeroed:
 		new_padding := max(alignment, size_of(rawptr))
+		if size > max(int) - new_padding {
+			return nil, .Out_Of_Memory
+		}
 		original_ptr := ([^]rawptr)(old_memory)[-1]
 		ptr: rawptr
 
@@ -108,9 +119,12 @@ heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 
 			ptr = heap_resize(original_ptr, real_old_size, real_new_size, mode == .Resize)
 		}
+		if ptr == nil {
+			return nil, .Out_Of_Memory
+		}
 
-		shift := uintptr(new_padding) - uintptr(ptr) & uintptr(new_padding-1)
-		aligned_ptr := rawptr(uintptr(ptr) + shift)
+		aligned_address := (uintptr(ptr) + size_of(rawptr) + uintptr(new_padding-1)) & ~uintptr(new_padding-1)
+		aligned_ptr := rawptr(aligned_address)
 		([^]rawptr)(aligned_ptr)[-1] = ptr
 
 		if alignment > align_of(rawptr) {
