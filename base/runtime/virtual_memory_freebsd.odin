@@ -25,6 +25,14 @@ MAP_ANONYMOUS :: 0x1000
 MAP_ALIGNMENT_SHIFT :: 24
 MAP_ALIGNED_SUPER   :: 1 << MAP_ALIGNMENT_SHIFT
 
+_mmap_anonymous :: proc "contextless" (size: int, flags: uintptr) -> (uintptr, bool) {
+	when ODIN_ARCH == .i386 {
+		return intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, flags, ~uintptr(0), 0, 0)
+	} else {
+		return intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, flags, ~uintptr(0), 0)
+	}
+}
+
 _init_virtual_memory :: proc "contextless" () {
 	page_size = _get_page_size()
 	superpage_size = _get_superpage_size()
@@ -67,7 +75,7 @@ _get_superpage_size :: proc "contextless" () -> int {
 }
 
 _allocate_virtual_memory :: proc "contextless" (size: int) -> rawptr {
-	result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, ~uintptr(0), 0)
+	result, ok := _mmap_anonymous(size, MAP_ANONYMOUS|MAP_PRIVATE)
 	if !ok {
 		return nil
 	}
@@ -77,7 +85,7 @@ _allocate_virtual_memory :: proc "contextless" (size: int) -> rawptr {
 _allocate_virtual_memory_superpage :: proc "contextless" () -> rawptr {
 	superpage_flags := uintptr(intrinsics.count_trailing_zeros(superpage_size) << MAP_ALIGNMENT_SHIFT) | MAP_ALIGNED_SUPER
 
-	result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(superpage_size), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE|superpage_flags, ~uintptr(0), 0)
+	result, ok := _mmap_anonymous(superpage_size, MAP_ANONYMOUS|MAP_PRIVATE|superpage_flags)
 	if !ok {
 		// It may be the case that FreeBSD couldn't fulfill our alignment
 		// request, but it could still give us some memory.
@@ -93,9 +101,9 @@ _allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: in
 	if alignment >= page_size {
 		map_aligned_n = intrinsics.count_trailing_zeros(uintptr(alignment)) << MAP_ALIGNMENT_SHIFT
 	}
-	result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE|map_aligned_n, ~uintptr(0), 0)
+	result, ok := _mmap_anonymous(size, MAP_ANONYMOUS|MAP_PRIVATE|map_aligned_n)
 	if !ok {
-		_allocate_virtual_memory_manually_aligned(size, alignment)
+		return _allocate_virtual_memory_manually_aligned(size, alignment)
 	}
 	return rawptr(result)
 }
@@ -108,14 +116,14 @@ _allocate_virtual_memory_manually_aligned :: proc "contextless" (size: int, alig
 		// two is necessarily aligned to all lesser powers of two, and because
 		// mmap returns page-aligned addresses, we don't have to do anything
 		// extra here.
-		result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, ~uintptr(0), 0)
+		result, ok := _mmap_anonymous(size, MAP_ANONYMOUS|MAP_PRIVATE)
 		if !ok {
 			return nil
 		}
 		return cast(rawptr)result
 	}
 	// We must over-allocate then adjust the address.
-	mmap_result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size + alignment), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, ~uintptr(0), 0)
+	mmap_result, ok := _mmap_anonymous(size + alignment, MAP_ANONYMOUS|MAP_PRIVATE)
 	if !ok {
 		return nil
 	}
@@ -138,6 +146,13 @@ _allocate_virtual_memory_manually_aligned :: proc "contextless" (size: int, alig
 		if delta > 0 {
 			// Unmap the pages we don't need.
 			intrinsics.syscall_bsd(SYS_munmap, mmap_result, delta)
+		}
+		used_size := size / page_size * page_size
+		if size % page_size != 0 {
+			used_size += page_size
+		}
+		if trailing_size := uintptr(alignment) - delta; trailing_size > 0 {
+			intrinsics.syscall_bsd(SYS_munmap, adjusted_result + uintptr(used_size), trailing_size)
 		}
 
 		return rawptr(adjusted_result)
@@ -169,6 +184,9 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 		result = _allocate_virtual_memory(new_size)
 	} else {
 		result = _allocate_virtual_memory_aligned(new_size, alignment)
+	}
+	if result == nil {
+		return nil
 	}
 	intrinsics.mem_copy_non_overlapping(result, ptr, min(new_size, old_size))
 	intrinsics.syscall_bsd(SYS_munmap, uintptr(ptr), uintptr(old_size))

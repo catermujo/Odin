@@ -110,7 +110,7 @@ Below `ODIN_HEAP_MIN_BIN_SIZE`, all requests are rounded up to the minimum.
 Beyond `ODIN_HEAP_MAX_BIN_SIZE`, all requests are given their own specifically-sized allocation.
 */
 ODIN_HEAP_MIN_BIN_SIZE :: #config(ODIN_HEAP_MIN_BIN_SIZE, 8 * Byte)
-ODIN_HEAP_MAX_BIN_SIZE :: #config(ODIN_HEAP_MIN_BIN_SIZE, 512 * Kilobyte) // [n..=m] inclusive range
+ODIN_HEAP_MAX_BIN_SIZE :: #config(ODIN_HEAP_MAX_BIN_SIZE, 512 * Kilobyte) // [n..=m] inclusive range
 
 /*
 `ODIN_HEAP_MAX_ALIGNMENT` controls the maximum supported alignment.
@@ -137,6 +137,10 @@ ODIN_HEAP_SEGMENT_SIZE  :: 4 * Megabyte
 ODIN_HEAP_MIN_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MIN_BIN_SIZE)
 ODIN_HEAP_MAX_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MAX_BIN_SIZE)
 ODIN_HEAP_BIN_RANKS     :: 1 + ODIN_HEAP_MAX_BIN_SHIFT - ODIN_HEAP_MIN_BIN_SHIFT
+
+// DUMBAI: Keep segment allocation and address masking on one size when virtual-memory init is late.
+@(private="file")
+heap_segment_size: uintptr
 
 // This mask is used to store an atomic count within a `Tagged_Pointer` to
 // limit the number of empty Segments sent into the orphanage.
@@ -221,16 +225,13 @@ Allocate a new Segment that may be used to store either Small or Large slabs.
 */
 @(require_results)
 heap_allocate_segment :: #force_inline proc "contextless" () -> ^Heap_Segment {
+	segment_size := heap_get_segment_size()
 	when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE == 0 {
-		if superpage_size != 0 {
+		if superpage_size != 0 && superpage_size == segment_size {
 			return cast(^Heap_Segment)allocate_virtual_memory_superpage()
-		} else {
-			// Use the default segment value.
-			return cast(^Heap_Segment)allocate_virtual_memory_aligned(ODIN_HEAP_SEGMENT_SIZE, ODIN_HEAP_SEGMENT_SIZE)
 		}
-	} else {
-		return cast(^Heap_Segment)allocate_virtual_memory_aligned(ODIN_HEAP_SEGMENT_SIZE_OVERRIDE, ODIN_HEAP_SEGMENT_SIZE_OVERRIDE)
 	}
+	return cast(^Heap_Segment)allocate_virtual_memory_aligned(segment_size, segment_size)
 }
 
 /*
@@ -238,15 +239,30 @@ Get the constant size for all segments. This size also dictates each segment's a
 */
 @(require_results)
 heap_get_segment_size :: #force_inline proc "contextless" () -> int {
-	when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE == 0 {
-		if size := superpage_size; size != 0 {
-			return size
+	segment_size := intrinsics.atomic_load_explicit(&heap_segment_size, .Acquire)
+	if segment_size == 0 {
+		candidate := uintptr(ODIN_HEAP_SEGMENT_SIZE)
+		when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE != 0 {
+			candidate = uintptr(ODIN_HEAP_SEGMENT_SIZE_OVERRIDE)
 		} else {
-			return ODIN_HEAP_SEGMENT_SIZE
+			if superpage_size != 0 {
+				candidate = uintptr(superpage_size)
+			}
 		}
-	} else {
-		return ODIN_HEAP_SEGMENT_SIZE_OVERRIDE
+		_, swapped := intrinsics.atomic_compare_exchange_strong_explicit(
+			&heap_segment_size,
+			uintptr(0),
+			candidate,
+			.Acq_Rel,
+			.Acquire,
+		)
+		if swapped {
+			segment_size = candidate
+		} else {
+			segment_size = intrinsics.atomic_load_explicit(&heap_segment_size, .Acquire)
+		}
 	}
+	return int(segment_size)
 }
 
 /*
@@ -450,6 +466,9 @@ Segment or zero if it is orphaned.
 
 `heap` points to the `Heap` which owns this Segment or is nil if is orphaned.
 
+`remote_operations` tracks remote frees that may still access `heap` while its
+owning thread exits.
+
 `size` is the exact size of the Segment allocation, used when returning the
 memory to the operating system.
 
@@ -489,6 +508,7 @@ Slab when a request is made for a new bin rank.
 Heap_Segment :: struct {
 	owner: int,  // atomic
 	heap: ^Heap, // atomic
+	remote_operations: int, // atomic
 	size: int,
 
 	prev_segment: ^Heap_Segment,
@@ -679,6 +699,9 @@ heap_make_segment :: proc "contextless" (bin_size: int, replacement: ^Heap_Segme
 	case .Huge:
 		assert_contextless(replacement == nil, "The heap allocator was handed a replacement Segment to fulfill a Huge size class request. This is invalid behavior; Huge allocations are made independently.")
 		book_keeping := size_of(Heap_Segment) + size_of(Heap_Slab) + ODIN_HEAP_MAX_ALIGNMENT
+		if bin_size > max(int) - book_keeping {
+			return nil
+		}
 
 		segment = cast(^Heap_Segment)allocate_virtual_memory_aligned(book_keeping + bin_size, heap_get_segment_size())
 		capacity = book_keeping + bin_size
@@ -872,12 +895,16 @@ heap_get_slab :: proc "contextless" (size: int) -> (slab: ^Heap_Slab) {
 			// make a new one.
 			slab = heap_make_slab(bin_size)
 		}
-		assert_contextless(slab.bin_size == heap_round_to_bin_size(size), "The heap allocator found a slab with the wrong bin size during allocation.")
+		if slab != nil {
+			assert_contextless(slab.bin_size == heap_round_to_bin_size(size), "The heap allocator found a slab with the wrong bin size during allocation.")
+		}
 	} else {
 		// We only round the size request for allocations that will fit into Small
 		// or Large Slabs. For Huge Slabs, their allocations are specifically sized.
 		slab = heap_make_slab(size)
-		assert_contextless(slab.bin_size == size, "The heap allocator made a slab with the wrong bin size during allocation.")
+		if slab != nil {
+			assert_contextless(slab.bin_size == size, "The heap allocator made a slab with the wrong bin size during allocation.")
+		}
 	}
 	return
 }
@@ -1008,14 +1035,20 @@ heap_take_free_list :: proc "contextless" (list: ^Tagged_Pointer) -> ^uintptr {
 // pushed to the remote free list that is on the heap that owns `segment`.
 @(private="file", no_sanitize_address)
 push_onto_remote_free_list :: proc "contextless" (segment: ^Heap_Segment, list: ^Tagged_Pointer, ptr: rawptr) {
+	intrinsics.atomic_add_explicit(&segment.remote_operations, 1, .Acquire)
+	defer intrinsics.atomic_sub_explicit(&segment.remote_operations, 1, .Release)
+
 	old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)list, .Relaxed)
 	for {
 		if is_free_list_closed(old_head) {
 			// The list is closed; we must redirect the pointer to the heap.
 			target_heap := intrinsics.atomic_load_explicit(&segment.heap, .Acquire)
-			assert_contextless(target_heap != nil, "The heap allocator failed to find the owning heap for a segment which had a closed free list.")
-			atomic_pop_push_pointer(&target_heap.remote_free_list, ptr, cast(^uintptr)ptr)
-			return
+			if target_heap != nil {
+				atomic_pop_push_pointer(&target_heap.remote_free_list, ptr, cast(^uintptr)ptr)
+				return
+			}
+			old_head = transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)list, .Acquire)
+			continue
 		}
 
 		// Write the next address to this pointer, continuing the linked list.
@@ -1191,6 +1224,7 @@ Push a non-empty Segment into the global orphanage.
 @(no_sanitize_address)
 heap_orphan_segment :: proc "contextless" (segment: ^Heap_Segment) {
 	intrinsics.atomic_store_explicit(&segment.owner, 0, .Release)
+	intrinsics.atomic_store_explicit(&segment.heap, nil, .Release)
 	old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.in_use, .Relaxed)
 	for {
 		// Set the next pointer in the list to the current head.
@@ -1312,10 +1346,14 @@ heap_adopt_orphan :: proc "contextless" (bin_size: int, class: Heap_Slab_Class) 
 			}
 
 			segment.may_return = segment.free_slabs == len(segment.slabs)
+			if segment.slab_size_class == .Huge && segment.may_return {
+				heap_free_segment(segment)
+				segment = nil
+			}
 		}
 	}
 	// Next try to get an empty segment if that failed.
-	if segment == nil {
+	if segment == nil && class != .Huge {
 		old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.empty, .Relaxed)
 		for {
 			count         := old_head.pointer & ODIN_HEAP_ORPHANAGE_COUNT_BITS
@@ -1381,6 +1419,8 @@ when VIRTUAL_MEMORY_SUPPORTED {
 
 		for segment := local_heap.segments; segment != nil; /**/ {
 			next_segment := segment.next_segment
+			segment.prev_segment = nil
+			segment.next_segment = nil
 
 			// Open all the remote free lists on every Slab, so that they can
 			// hold them until the Segment is claimed by another thread.
@@ -1388,6 +1428,10 @@ when VIRTUAL_MEMORY_SUPPORTED {
 				assert_contextless(slab.bin_size == 0 || is_free_list_closed(transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&slab.remote_free_list, .Acquire)),
 					"The heap allocator found an open free list on a slab as the heap's thread was exiting.")
 				open_free_list(&slab.remote_free_list)
+			}
+			intrinsics.atomic_store_explicit(&segment.heap, nil, .Release)
+			for intrinsics.atomic_load_explicit(&segment.remote_operations, .Acquire) != 0 {
+				intrinsics.cpu_relax()
 			}
 
 			heap_orphan_segment(segment)

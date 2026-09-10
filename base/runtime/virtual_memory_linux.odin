@@ -18,7 +18,7 @@ when ODIN_ARCH == .amd64 {
 	SYS_read   :: uintptr(3)
 	SYS_close  :: uintptr(6)
 
-	SYS_mmap   :: uintptr(90)
+	SYS_mmap   :: uintptr(192) // mmap2
 	SYS_munmap :: uintptr(91)
 	SYS_mremap :: uintptr(163)
 } else when ODIN_ARCH == .arm64 {
@@ -34,7 +34,7 @@ when ODIN_ARCH == .amd64 {
 	SYS_read   :: uintptr(3)
 	SYS_close  :: uintptr(6)
 
-	SYS_mmap   :: uintptr(90)
+	SYS_mmap   :: uintptr(192) // mmap2
 	SYS_munmap :: uintptr(91)
 	SYS_mremap :: uintptr(163)
 } else when ODIN_ARCH == .riscv64 {
@@ -56,8 +56,6 @@ MAP_PRIVATE    :: 0x02
 MAP_ANONYMOUS  :: 0x20
 
 MREMAP_MAYMOVE :: 0x01
-
-ENOMEM         :: ~uintptr(11)
 
 _init_virtual_memory :: proc "contextless" () {
 	page_size = _get_page_size()
@@ -221,6 +219,13 @@ _allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: in
 			// Unmap the pages we don't need.
 			intrinsics.syscall(SYS_munmap, mmap_result, delta)
 		}
+		used_size := size / page_size * page_size
+		if size % page_size != 0 {
+			used_size += page_size
+		}
+		if trailing_size := uintptr(alignment) - delta; trailing_size > 0 {
+			intrinsics.syscall(SYS_munmap, adjusted_result + uintptr(used_size), trailing_size)
+		}
 
 		return rawptr(adjusted_result)
 	} else if size + alignment > page_size {
@@ -257,7 +262,7 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 		// may be) the pages in place, which means we don't have to allocate a
 		// whole new chunk of memory.
 		mremap_result := intrinsics.syscall(SYS_mremap, uintptr(ptr), uintptr(old_size), uintptr(new_size), 0)
-		if mremap_result != ENOMEM {
+		if int(mremap_result) >= 0 {
 			// We got lucky.
 			return rawptr(mremap_result)
 		}
@@ -268,6 +273,9 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 		//
 		// This is costly but unavoidable with the API available to us.
 		result := _allocate_virtual_memory_aligned(new_size, alignment)
+		if result == nil {
+			return nil
+		}
 		intrinsics.mem_copy_non_overlapping(result, ptr, min(new_size, old_size))
 		_free_virtual_memory(ptr, old_size)
 		return result
