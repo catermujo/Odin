@@ -50,8 +50,7 @@ libc_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
 		ptr := uintptr(aligned_mem)
 		aligned_ptr := (ptr + uintptr(a)-1) & ~(uintptr(a)-1)
 		if allocated_mem == nil {
-			aligned_free(old_ptr)
-			aligned_free(allocated_mem)
+			// On failure, realloc leaves the old allocation intact and the fresh-allocation path owns nothing.
 			return nil, .Out_Of_Memory
 		}
 

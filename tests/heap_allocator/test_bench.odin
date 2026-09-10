@@ -161,10 +161,11 @@ test_alloc_write_free :: proc(
 
 	for o in 1..=u64(object_count) {
 		seed := u64(intrinsics.read_cycle_counter()) * o
-		alignment := min(size, runtime.ODIN_HEAP_MAX_ALIGNMENT)
+		alignment := runtime.ODIN_HEAP_MAX_ALIGNMENT
 
 		bytes, alloc_err := allocator.procedure(allocator.data, .Alloc, size, alignment, nil, 0)
 		expect(alloc_err == nil)
+		expect(uintptr(raw_data(bytes)) % uintptr(alignment) == 0)
 		pointers[end_index] = Allocation{
 			data = bytes,
 			seed = seed,
@@ -241,12 +242,13 @@ test_continuous_allocation_of_size_n :: proc(count: int, max_size: int) {
 	allocator := context.allocator
 	base_seed := u64(intrinsics.read_cycle_counter())
 	for size in 0..<max_size {
-		alignment := min(size, runtime.ODIN_HEAP_MAX_ALIGNMENT)
+		alignment := runtime.ODIN_HEAP_MAX_ALIGNMENT
 		seed := base_seed * (1+u64(size))
 
 		for i in 0..<count {
 			bytes, alloc_err := allocator.procedure(allocator.data, .Alloc, size, alignment, nil, 0)
 			expect(alloc_err == nil)
+			expect(uintptr(raw_data(bytes)) % uintptr(alignment) == 0)
 			buf[i] = raw_data(bytes)
 			// Verify the fresh memory is zeroed.
 			verify_zeroed(bytes)
@@ -277,7 +279,7 @@ test_individual_allocation_and_free :: proc(count: int) {
 		if size > 0 && size % (runtime.ODIN_HEAP_MAX_BIN_SIZE/8) == 0 {
 			log.infof("... %i ...", size)
 		}
-		alignment := min(size, runtime.ODIN_HEAP_MAX_ALIGNMENT)
+		alignment := runtime.ODIN_HEAP_MAX_ALIGNMENT
 
 		// Allocate and free twice to make sure that the memory is truly zeroed.
 		//
@@ -290,6 +292,7 @@ test_individual_allocation_and_free :: proc(count: int) {
 		old_ptr: rawptr
 		for i in 0..<2 {
 			bytes, alloc_err := allocator.procedure(allocator.data, .Alloc, size, alignment, nil, 0)
+			expect(uintptr(raw_data(bytes)) % uintptr(alignment) == 0)
 			if i == 0 {
 				old_ptr = raw_data(bytes)
 			} else {
@@ -315,17 +318,19 @@ test_single_alloc_and_resize :: proc(start, target: int) {
 	allocator := context.allocator
 	base_seed := u64(intrinsics.read_cycle_counter())
 
-	alignment := min(start, runtime.ODIN_HEAP_MAX_ALIGNMENT)
+	alignment := runtime.ODIN_HEAP_MAX_ALIGNMENT
 	seed := base_seed * (1+u64(start))
 
 	bytes, alloc_err := allocator.procedure(allocator.data, .Alloc, start, alignment, nil, 0)
 	expect(alloc_err == nil)
+	expect(uintptr(raw_data(bytes)) % uintptr(alignment) == 0)
 	expect(len(bytes) == start)
 	verify_zeroed(bytes)
 	randomize_bytes(bytes, seed)
 
 	resized_bytes_1, resize_1_err := allocator.procedure(allocator.data, .Resize, target, alignment, raw_data(bytes), start)
 	expect(resize_1_err == nil)
+	expect(uintptr(raw_data(resized_bytes_1)) % uintptr(alignment) == 0)
 	expect(len(resized_bytes_1) == target)
 	verify_integrity(resized_bytes_1[:min(start, target)], seed)
 	if target > start {
@@ -335,6 +340,7 @@ test_single_alloc_and_resize :: proc(start, target: int) {
 
 	resized_bytes_2, resize_2_err := allocator.procedure(allocator.data, .Resize, start, alignment, raw_data(resized_bytes_1), target)
 	expect(resize_2_err == nil)
+	expect(uintptr(raw_data(resized_bytes_2)) % uintptr(alignment) == 0)
 	expect(len(resized_bytes_2) == start)
 	verify_integrity(resized_bytes_2[:min(start, target)], seed)
 	if start > target {
@@ -605,15 +611,41 @@ test_orphaned_segment_with_remote_frees :: proc() {
 	log.info("Orphaned segment with remote free test succeeded.")
 }
 
+test_orphaned_huge_segment_with_remote_free :: proc() {
+	Data :: struct {
+		thread: ^thread.Thread,
+		bytes: []byte,
+	}
+
+	task :: proc(t: ^thread.Thread) {
+		data := cast(^Data)t.data
+		data.bytes = make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE + 1)
+	}
+
+	data: Data
+	data.thread = thread.create(task)
+	data.thread.data = &data
+	data.thread.init_context = context
+	thread.start(data.thread)
+	thread.join(data.thread)
+	thread.destroy(data.thread)
+
+	delete(data.bytes)
+	bytes := make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 2)
+	delete(bytes)
+	log.info("Orphaned huge segment with remote free test succeeded.")
+}
+
 test_single_alloc_and_resize_incremental :: proc(start, target: int) {
 	log.infof("Testing allocation of %i bytes, resizing by increments of one until %i is reached.", start, target)
 	allocator := context.allocator
 
-	alignment := min(start, runtime.ODIN_HEAP_MAX_ALIGNMENT)
+	alignment := runtime.ODIN_HEAP_MAX_ALIGNMENT
 	seed := u64(intrinsics.read_cycle_counter()) * (1+u64(start))
 
 	bytes, alloc_err := allocator.procedure(allocator.data, .Alloc, start, alignment, nil, 0)
 	expect(alloc_err == nil)
+	expect(uintptr(raw_data(bytes)) % uintptr(alignment) == 0)
 	verify_zeroed(bytes)
 	randomize_bytes(bytes, seed)
 
@@ -621,6 +653,7 @@ test_single_alloc_and_resize_incremental :: proc(start, target: int) {
 	for new_size := start + 1; new_size < target; new_size += 1 {
 		resized, resize_err := allocator.procedure(allocator.data, .Resize, new_size, alignment, o, new_size - 1)
 		expect(resize_err == nil)
+		expect(uintptr(raw_data(resized)) % uintptr(alignment) == 0)
 
 		verify_integrity(resized[:new_size-1], seed)
 		verify_zeroed(resized[new_size:])
@@ -915,6 +948,21 @@ main :: proc() {
 					runtime.free_virtual_memory(v, size+1)
 				}
 			}
+			{
+				v := runtime.allocate_virtual_memory(runtime.page_size)
+				expect(v != nil)
+				bytes := cast([^]u8)v
+				bytes[0] = 0xaa
+				resized := runtime.resize_virtual_memory(v, runtime.page_size, max(int)/2, runtime.page_size)
+				if resized == nil {
+					expect(bytes[0] == 0xaa)
+					runtime.free_virtual_memory(v, runtime.page_size)
+				} else {
+					resized_bytes := cast([^]u8)resized
+					expect(resized_bytes[0] == 0xaa)
+					runtime.free_virtual_memory(resized, max(int)/2)
+				}
+			}
 			if size := runtime.superpage_size; size > 0 {
 				log.debugf("Testing superpage allocation and alignment ...")
 				v := runtime.allocate_virtual_memory_superpage()
@@ -948,6 +996,7 @@ main :: proc() {
 			}
 
 			test_orphaned_segment_with_remote_frees()
+			test_orphaned_huge_segment_with_remote_free()
 
 			// Reset the heap, removing any of the dirty slabs before the next tests.
 			runtime.compact_local_heap()
@@ -955,6 +1004,17 @@ main :: proc() {
 
 		if opt.serial_tests {
 			log.info("--- Single-threaded tests ---")
+
+			{
+				_, negative_size_err := allocator.procedure(allocator.data, .Alloc, -1, 1, nil, 0)
+				expect(negative_size_err == .Invalid_Argument)
+				_, invalid_alignment_err := allocator.procedure(allocator.data, .Alloc, 1, 3, nil, 0)
+				expect(invalid_alignment_err == .Invalid_Argument)
+				_, excessive_alignment_err := allocator.procedure(allocator.data, .Alloc, 1, runtime.ODIN_HEAP_MAX_ALIGNMENT * 2, nil, 0)
+				expect(excessive_alignment_err == .Invalid_Argument)
+				_, excessive_size_err := allocator.procedure(allocator.data, .Alloc, max(int), 1, nil, 0)
+				expect(excessive_size_err == .Out_Of_Memory)
+			}
 
 			{
 				N :: runtime.ODIN_HEAP_MAX_BIN_SIZE

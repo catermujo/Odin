@@ -13,8 +13,11 @@ heap_allocator :: proc() -> Allocator {
 heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
                             size, alignment: int,
                             old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, Allocator_Error) {
-   assert(alignment <= ODIN_HEAP_MAX_ALIGNMENT, "Heap allocation alignment beyond ODIN_HEAP_MAX_ALIGNMENT bytes is not supported.", loc = loc)
-   assert(alignment >= 0, "Alignment must be greater than or equal to zero.", loc = loc)
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+		if size < 0 || !is_power_of_two_int(alignment) || alignment > ODIN_HEAP_MAX_ALIGNMENT {
+			return nil, .Invalid_Argument
+		}
+	}
 	switch mode {
 	case .Alloc:
 		// All allocations are aligned to at least their size up to

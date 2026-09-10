@@ -112,6 +112,11 @@ wasm_allocator :: proc(a: ^WASM_Allocator) -> Allocator {
 }
 
 wasm_allocator_proc :: proc(a: rawptr, mode: Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, Allocator_Error) {
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+		if size < 0 || !is_power_of_two_int(alignment) {
+			return nil, .Invalid_Argument
+		}
+	}
 	a := (^WASM_Allocator)(a)
 	if a == nil {
 		a = &global_default_wasm_allocator_data
@@ -889,13 +894,13 @@ heap_allocator_proc :: wasm_allocator_proc
 
 @(require_results)
 heap_alloc :: proc(size: int, zero_memory: bool = true) -> (ptr: rawptr) {
-	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Alloc if zero_memory else .Alloc_Non_Zeroed, size, 0, nil, 0)
+	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Alloc if zero_memory else .Alloc_Non_Zeroed, size, align_of(rawptr), nil, 0)
 	return raw_data(bytes)
 }
 
 @(require_results)
 heap_resize :: proc(old_ptr: rawptr, old_size: int, new_size: int, zero_memory: bool = true) -> (new_ptr: rawptr) {
-	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Resize if zero_memory else .Resize_Non_Zeroed, new_size, 0, old_ptr, old_size)
+	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Resize if zero_memory else .Resize_Non_Zeroed, new_size, align_of(rawptr), old_ptr, old_size)
 	return raw_data(bytes)
 }
 

@@ -155,6 +155,9 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 	} else {
 		result = _allocate_virtual_memory_aligned(new_size, alignment)
 	}
+	if result == nil {
+		return nil
+	}
 	intrinsics.mem_copy_non_overlapping(result, ptr, min(new_size, old_size))
 	VirtualFree(ptr, 0, MEM_RELEASE)
 	return result
