@@ -2,13 +2,13 @@
 #+build darwin, netbsd, freebsd, openbsd
 package os
 
-import "base:runtime"
-
-import "core:time"
+import "core:c"
 import "core:strings"
-
 import kq "core:sys/kqueue"
-import    "core:sys/posix"
+import "core:sys/posix"
+import "core:time"
+
+import "base:runtime"
 
 _get_uid :: proc() -> int {
 	return int(posix.getuid())
@@ -253,7 +253,7 @@ _process_wait :: proc(process: Process, timeout: time.Duration) -> (process_stat
 			start := time.tick_now()
 			n, kerr := kq.kevent(queue, changelist[:], eventlist[:], &{
 				tv_sec  = posix.time_t(timeout / time.Second),
-				tv_nsec = i64(timeout % time.Second),
+				tv_nsec = c.long(timeout % time.Second),
 			})
 			if kerr == .EINTR {
 				timeout -= time.tick_since(start)

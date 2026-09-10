@@ -254,7 +254,7 @@ jobs:
       - name: Odin heap allocator tests
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           odin run tests/heap_allocator -vet -strict-style -disallow-do -debug -- -allocator=feoramalloc -vmem-tests -serial-tests -parallel-tests
       - name: Core library tests
         shell: cmd
