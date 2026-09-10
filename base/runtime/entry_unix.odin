@@ -7,7 +7,8 @@ import "base:intrinsics"
 
 when ODIN_BUILD_MODE == .Dynamic {
 	@(link_name="_odin_entry_point", linkage="strong", require/*, link_section=".init"*/)
-	_odin_entry_point :: proc "c" () {
+	_odin_entry_point :: proc "c" (argc: i32, argv: [^]cstring) {
+		args__ = argv[:argc]
 		context = default_context()
 		when ODIN_PLATFORM_SUBTARGET == .Android {
 			args__ = _android_args()
