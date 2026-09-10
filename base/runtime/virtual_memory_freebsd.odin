@@ -95,7 +95,7 @@ _allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: in
 	}
 	result, ok := intrinsics.syscall_bsd(SYS_mmap, 0, uintptr(size), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE|map_aligned_n, ~uintptr(0), 0)
 	if !ok {
-		_allocate_virtual_memory_manually_aligned(size, alignment)
+		return _allocate_virtual_memory_manually_aligned(size, alignment)
 	}
 	return rawptr(result)
 }
@@ -139,6 +139,13 @@ _allocate_virtual_memory_manually_aligned :: proc "contextless" (size: int, alig
 			// Unmap the pages we don't need.
 			intrinsics.syscall_bsd(SYS_munmap, mmap_result, delta)
 		}
+		used_size := size / page_size * page_size
+		if size % page_size != 0 {
+			used_size += page_size
+		}
+		if trailing_size := uintptr(alignment) - delta; trailing_size > 0 {
+			intrinsics.syscall_bsd(SYS_munmap, adjusted_result + uintptr(used_size), trailing_size)
+		}
 
 		return rawptr(adjusted_result)
 	} else if size + alignment > page_size {
@@ -169,6 +176,9 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 		result = _allocate_virtual_memory(new_size)
 	} else {
 		result = _allocate_virtual_memory_aligned(new_size, alignment)
+	}
+	if result == nil {
+		return nil
 	}
 	intrinsics.mem_copy_non_overlapping(result, ptr, min(new_size, old_size))
 	intrinsics.syscall_bsd(SYS_munmap, uintptr(ptr), uintptr(old_size))
