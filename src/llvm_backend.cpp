@@ -2586,6 +2586,39 @@ gb_internal void lb_llvm_profile_module_stats(LLVMModuleRef mod, isize *function
 	*instruction_count = instructions;
 }
 
+gb_internal void lb_remove_lifetime_markers(lbModule *m) {
+	for (LLVMValueRef function = LLVMGetFirstFunction(m->mod);
+	     function != nullptr;
+	     function = LLVMGetNextFunction(function)) {
+		for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function);
+		     block != nullptr;
+		     block = LLVMGetNextBasicBlock(block)) {
+			for (LLVMValueRef instruction = LLVMGetFirstInstruction(block);
+			     instruction != nullptr;
+			     /**/) {
+				LLVMValueRef current_instruction = instruction;
+				instruction = LLVMGetNextInstruction(instruction);
+				if (LLVMGetInstructionOpcode(current_instruction) != LLVMCall) {
+					continue;
+				}
+
+				LLVMValueRef called_value = LLVMGetCalledValue(current_instruction);
+				size_t name_len = 0;
+				char const *name = called_value == nullptr ? nullptr : LLVMGetValueName2(called_value, &name_len);
+				if (name == nullptr) {
+					continue;
+				}
+				String call_name = make_string(cast(u8 const *)name, cast(isize)name_len);
+				if (!string_starts_with(call_name, str_lit("llvm.lifetime."))) {
+					continue;
+				}
+
+				LLVMInstructionEraseFromParent(current_instruction);
+			}
+		}
+	}
+}
+
 gb_internal GB_COMPARE_PROC(lb_llvm_module_pass_worker_profile_cmp) {
 	auto const *x = *cast(lbLLVMModulePassWorkerData *const *)a;
 	auto const *y = *cast(lbLLVMModulePassWorkerData *const *)b;
@@ -2607,6 +2640,20 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 
 	LLVMPassBuilderOptionsRef pb_options = LLVMCreatePassBuilderOptions();
 	defer (LLVMDisposePassBuilderOptions(pb_options));
+	if (is_arch_wasm() && build_context.optimization_level >= 1) {
+		// AlwaysInliner creates lifetime markers for escaping trace frames. Remove
+		// those hints before later optimization passes can elide the frame fields.
+		LLVMErrorRef always_inline_err = LLVMRunPasses(wd->m->mod, "always-inline", wd->target_machine, pb_options);
+		defer (LLVMConsumeError(always_inline_err));
+		if (always_inline_err != nullptr) {
+			char *llvm_error = LLVMGetErrorMessage(always_inline_err);
+			gb_printf_err("LLVM Error:\n%s\n", llvm_error);
+			LLVMDisposeErrorMessage(llvm_error);
+			lb_record_worker_failure();
+			return 1;
+		}
+		lb_remove_lifetime_markers(wd->m);
+	}
 
 	#ifndef CLANGD_TU_llvm_backend_passes
 
