@@ -10,10 +10,10 @@ foreign import lib "system:System.framework"
 foreign lib {
 	vm_page_size: uintptr
 	mach_task_self_: u32
-	mach_vm_allocate :: proc(target: u32, address: ^u64, size: u64, flags: i32) -> i32 ---
-	mach_vm_deallocate :: proc(target: u32, address: u64, size: u64) -> i32 ---
-	mach_vm_protect :: proc(target_task: u32, address: u64, size: u64, set_maximum: b32, new_protection: i32) -> i32 ---
-	mach_vm_map :: proc(
+	@(link_name="mach_vm_deallocate")
+	runtime_mach_vm_deallocate :: proc(target: u32, address: u64, size: u64) -> i32 ---
+	@(link_name="mach_vm_map")
+	runtime_mach_vm_map :: proc(
 		target_task:    u32,
 		address:        ^u64,
 		size:           u64,
@@ -24,19 +24,6 @@ foreign lib {
 		copy:           b32,
 		cur_protection,
 		max_protection: i32,
-		inheritance:    u32,
-	) -> i32 ---
-	mach_vm_remap :: proc(
-		target_task:    u32,
-		target_address: ^u64,
-		size:           u64,
-		mask:           u64,
-		flags:          i32,
-		src_task:       u32,
-		src_address:    u64,
-		copy:           b32,
-		cur_protection,
-		max_protection: ^i32,
 		inheritance:    u32,
 	) -> i32 ---
 }
@@ -77,7 +64,7 @@ _get_superpage_size :: proc "contextless" () -> int {
 
 _allocate_virtual_memory :: proc "contextless" (size: int) -> rawptr {
 	address: u64
-	result := mach_vm_map(mach_task_self_, &address, u64(size), 0, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
+	result := runtime_mach_vm_map(mach_task_self_, &address, u64(size), 0, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
 	if result != 0 {
 		return nil
 	}
@@ -89,7 +76,7 @@ _allocate_virtual_memory_superpage :: proc "contextless" () -> rawptr {
 	flags: i32 = VM_FLAGS_ANYWHERE | VM_FLAGS_SUPERPAGE_SIZE_2MB
 	assert_contextless(superpage_size & (superpage_size-1) == 0, "The superpage size is not a power of two.")
 	alignment_mask: u64 = u64(superpage_size) - 1
-	result := mach_vm_map(mach_task_self_, &address, 2 * Megabyte, alignment_mask, flags, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
+	result := runtime_mach_vm_map(mach_task_self_, &address, 2 * Megabyte, alignment_mask, flags, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
 	if result != 0 {
 		return nil
 	}
@@ -100,7 +87,7 @@ _allocate_virtual_memory_superpage :: proc "contextless" () -> rawptr {
 _allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: int) -> rawptr {
 	address: u64
 	alignment_mask: u64 = u64(alignment) - 1
-	result := mach_vm_map(mach_task_self_, &address, u64(size), alignment_mask, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
+	result := runtime_mach_vm_map(mach_task_self_, &address, u64(size), alignment_mask, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ|VM_PROT_WRITE, VM_PROT_READ|VM_PROT_WRITE, VM_INHERIT_COPY)
 	if result != 0 {
 		return nil
 	}
@@ -108,7 +95,7 @@ _allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: in
 }
 
 _free_virtual_memory :: proc "contextless" (ptr: rawptr, size: int) {
-	mach_vm_deallocate(mach_task_self_, u64(uintptr(ptr)), u64(size))
+	runtime_mach_vm_deallocate(mach_task_self_, u64(uintptr(ptr)), u64(size))
 }
 
 _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_size: int, alignment: int) -> rawptr {
@@ -118,7 +105,10 @@ _resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_si
 	} else {
 		result = _allocate_virtual_memory_aligned(new_size, alignment)
 	}
+	if result == nil {
+		return nil
+	}
 	intrinsics.mem_copy_non_overlapping(result, ptr, min(new_size, old_size))
-	mach_vm_deallocate(mach_task_self_, u64(uintptr(ptr)), u64(old_size))
+	runtime_mach_vm_deallocate(mach_task_self_, u64(uintptr(ptr)), u64(old_size))
 	return result
 }

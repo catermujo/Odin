@@ -2,6 +2,7 @@
 #+build darwin, freebsd, openbsd, netbsd
 package time
 
+import "core:c"
 import "core:sys/posix"
 
 _IS_SUPPORTED :: true
@@ -9,7 +10,7 @@ _IS_SUPPORTED :: true
 _now :: proc "contextless" () -> Time {
 	time_spec_now: posix.timespec
 	posix.clock_gettime(.REALTIME, &time_spec_now)
-	ns := i64(time_spec_now.tv_sec) * 1e9 + time_spec_now.tv_nsec
+	ns := i64(time_spec_now.tv_sec) * 1e9 + i64(time_spec_now.tv_nsec)
 	return Time{_nsec=ns}
 }
 
@@ -20,7 +21,7 @@ _sleep :: proc "contextless" (d: Duration) {
 
 	ts := posix.timespec{
 		tv_sec  = seconds,
-		tv_nsec = nanoseconds,
+		tv_nsec = c.long(nanoseconds),
 	}
 
 	for {
@@ -42,7 +43,7 @@ when ODIN_OS == .Darwin {
 _tick_now :: proc "contextless" () -> Tick {
 	t: posix.timespec
 	posix.clock_gettime(TICK_CLOCK, &t)
-	return Tick{_nsec = i64(t.tv_sec)*1e9 + t.tv_nsec}
+	return Tick{_nsec = i64(t.tv_sec)*1e9 + i64(t.tv_nsec)}
 }
 
 _yield :: proc "contextless" () {

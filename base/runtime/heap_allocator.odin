@@ -15,76 +15,10 @@ heap_allocator :: proc() -> Allocator {
 heap_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode,
                             size, alignment: int,
                             old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, Allocator_Error) {
-   assert(alignment <= ODIN_HEAP_MAX_ALIGNMENT, "Heap allocation alignment beyond ODIN_HEAP_MAX_ALIGNMENT bytes is not supported.", loc = loc)
-   assert(alignment >= 0, "Alignment must be greater than or equal to zero.", loc = loc)
-	//
-	// NOTE(tetra, 2020-01-14): The heap doesn't respect alignment.
-	// Instead, we overallocate by `alignment + size_of(rawptr) - 1`, and insert
-	// padding. We also store the original pointer returned by heap_alloc right before
-	// the pointer we return to the user.
-	//
-
-	aligned_alloc :: proc(size, alignment: int, old_ptr: rawptr, old_size: int, zero_memory := true) -> ([]byte, Allocator_Error) {
-		// Not(flysand): We need to reserve enough space for alignment, which
-		// includes the user data itself, the space to store the pointer to
-		// allocation start, as well as the padding required to align both
-		// the user data and the pointer.
-		a := max(alignment, align_of(rawptr))
-		space := a-1 + size_of(rawptr) + size
-		allocated_mem: rawptr
-
-		force_copy := old_ptr != nil && alignment > align_of(rawptr)
-
-		if old_ptr != nil && !force_copy {
-			original_old_ptr := ([^]rawptr)(old_ptr)[-1]
-			allocated_mem = heap_resize(original_old_ptr, space)
-		} else {
-			allocated_mem = heap_alloc(space, zero_memory)
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+		if size < 0 || !is_power_of_two_int(alignment) || alignment > ODIN_HEAP_MAX_ALIGNMENT {
+			return nil, .Invalid_Argument
 		}
-		aligned_mem := rawptr(([^]u8)(allocated_mem)[size_of(rawptr):])
-
-		ptr := uintptr(aligned_mem)
-		aligned_ptr := (ptr + uintptr(a)-1) & ~(uintptr(a)-1)
-		if allocated_mem == nil {
-			// On failure nothing must be freed: heap_resize (realloc) leaves the
-			// original block intact, and on the copy/fresh path old_ptr has not
-			// been copied or freed yet. Freeing old_ptr here left the caller's
-			// pointer dangling, causing a later double free. (#7262)
-			return nil, .Out_Of_Memory
-		}
-
-		aligned_mem = rawptr(aligned_ptr)
-		([^]rawptr)(aligned_mem)[-1] = allocated_mem
-
-		if force_copy {
-			mem_copy_non_overlapping(aligned_mem, old_ptr, min(old_size, size))
-			aligned_free(old_ptr)
-		}
-
-		return byte_slice(aligned_mem, size), nil
-	}
-
-	aligned_free :: proc(p: rawptr) {
-		if p != nil {
-			heap_free(([^]rawptr)(p)[-1])
-		}
-	}
-
-	aligned_resize :: proc(p: rawptr, old_size: int, new_size: int, new_alignment: int, zero_memory := true) -> (new_memory: []byte, err: Allocator_Error) {
-		if p == nil {
-			return aligned_alloc(new_size, new_alignment, nil, old_size, zero_memory)
-		}
-
-		new_memory = aligned_alloc(new_size, new_alignment, p, old_size, zero_memory) or_return
-
-		when ODIN_OS != .Windows {
-			// NOTE: heap_resize does not zero the new memory, so we do it
-			if zero_memory && new_size > old_size {
-				new_region := raw_data(new_memory[old_size:])
-				conditional_mem_zero(new_region, new_size - old_size)
-			}
-		}
-		return
 	}
 
 	switch mode {

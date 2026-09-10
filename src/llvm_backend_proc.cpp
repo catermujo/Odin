@@ -4692,10 +4692,41 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 			LLVMTypeRef llvm_results = LLVMStructTypeInContext(p->module->ctx, results, 2, false);
 
 			LLVMTypeRef func_type = LLVMFunctionType(llvm_results, llvm_arg_types, arg_count, false);
+			LLVMValueRef *call_args = args;
+			unsigned call_arg_count = arg_count;
 
 			LLVMValueRef inline_asm = nullptr;
 
 			switch (build_context.metrics.arch) {
+			case TargetArch_i386:
+				{
+					GB_ASSERT(build_context.metrics.os == TargetOs_freebsd);
+					GB_ASSERT(arg_count <= 8);
+
+					LLVMTypeRef stack_type = LLVMArrayType(llvm_uintptr, arg_count);
+					LLVMValueRef stack_args = llvm_alloca(p, stack_type, type_align_of(t_uintptr), "bsd_syscall_args");
+					for (unsigned i = 0; i < arg_count; i++) {
+						LLVMValueRef indices[] = {
+							LLVMConstInt(llvm_uintptr, 0, false),
+							LLVMConstInt(llvm_uintptr, i, false),
+						};
+						LLVMValueRef slot = LLVMBuildInBoundsGEP2(p->builder, stack_type, stack_args, indices, gb_count_of(indices), "");
+						LLVMValueRef value = i == 0 ? LLVMConstInt(llvm_uintptr, 0, false) : args[i];
+						LLVMBuildStore(p->builder, value, slot);
+					}
+
+					LLVMTypeRef i386_arg_types[] = {llvm_uintptr, LLVMTypeOf(stack_args)};
+					func_type = LLVMFunctionType(llvm_results, i386_arg_types, gb_count_of(i386_arg_types), false);
+					call_arg_count = gb_count_of(i386_arg_types);
+					call_args = gb_alloc_array(permanent_allocator(), LLVMValueRef, call_arg_count);
+					call_args[0] = args[0];
+					call_args[1] = stack_args;
+
+					char asm_string[] = "xchgl %esp, %esi; int $$0x80; xchgl %esp, %esi; setnb %cl";
+					char constraints[] = "={eax},={cl},{eax},{esi},~{edx},~{cc},~{memory}";
+					inline_asm = llvm_get_inline_asm(func_type, make_string_c(asm_string), make_string_c(constraints));
+				}
+				break;
 			case TargetArch_amd64:
 				{
 					GB_ASSERT(arg_count <= 7);
@@ -4815,7 +4846,7 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 			}
 			
  			lbValue res = {};
- 			res.value = LLVMBuildCall2(p->builder, func_type, inline_asm, args, arg_count, "");
+			res.value = LLVMBuildCall2(p->builder, func_type, inline_asm, call_args, call_arg_count, "");
 			res.type = make_optional_ok_type(t_uintptr, true);
 
 			return res;
