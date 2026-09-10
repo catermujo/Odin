@@ -138,6 +138,10 @@ ODIN_HEAP_MIN_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MIN_BIN_SIZE)
 ODIN_HEAP_MAX_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MAX_BIN_SIZE)
 ODIN_HEAP_BIN_RANKS     :: 1 + ODIN_HEAP_MAX_BIN_SHIFT - ODIN_HEAP_MIN_BIN_SHIFT
 
+// DUMBAI: Keep segment allocation and address masking on one size when virtual-memory init is late.
+@(private="file")
+heap_segment_size: uintptr
+
 // This mask is used to store an atomic count within a `Tagged_Pointer` to
 // limit the number of empty Segments sent into the orphanage.
 ODIN_HEAP_ORPHANAGE_COUNT_BITS :: 0xFFFF
@@ -221,16 +225,13 @@ Allocate a new Segment that may be used to store either Small or Large slabs.
 */
 @(require_results)
 heap_allocate_segment :: #force_inline proc "contextless" () -> ^Heap_Segment {
+	segment_size := heap_get_segment_size()
 	when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE == 0 {
-		if superpage_size != 0 {
+		if superpage_size != 0 && superpage_size == segment_size {
 			return cast(^Heap_Segment)allocate_virtual_memory_superpage()
-		} else {
-			// Use the default segment value.
-			return cast(^Heap_Segment)allocate_virtual_memory_aligned(ODIN_HEAP_SEGMENT_SIZE, ODIN_HEAP_SEGMENT_SIZE)
 		}
-	} else {
-		return cast(^Heap_Segment)allocate_virtual_memory_aligned(ODIN_HEAP_SEGMENT_SIZE_OVERRIDE, ODIN_HEAP_SEGMENT_SIZE_OVERRIDE)
 	}
+	return cast(^Heap_Segment)allocate_virtual_memory_aligned(segment_size, segment_size)
 }
 
 /*
@@ -238,15 +239,30 @@ Get the constant size for all segments. This size also dictates each segment's a
 */
 @(require_results)
 heap_get_segment_size :: #force_inline proc "contextless" () -> int {
-	when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE == 0 {
-		if size := superpage_size; size != 0 {
-			return size
+	segment_size := intrinsics.atomic_load_explicit(&heap_segment_size, .Acquire)
+	if segment_size == 0 {
+		candidate := uintptr(ODIN_HEAP_SEGMENT_SIZE)
+		when ODIN_HEAP_SEGMENT_SIZE_OVERRIDE != 0 {
+			candidate = uintptr(ODIN_HEAP_SEGMENT_SIZE_OVERRIDE)
 		} else {
-			return ODIN_HEAP_SEGMENT_SIZE
+			if superpage_size != 0 {
+				candidate = uintptr(superpage_size)
+			}
 		}
-	} else {
-		return ODIN_HEAP_SEGMENT_SIZE_OVERRIDE
+		_, swapped := intrinsics.atomic_compare_exchange_strong_explicit(
+			&heap_segment_size,
+			uintptr(0),
+			candidate,
+			.Acq_Rel,
+			.Acquire,
+		)
+		if swapped {
+			segment_size = candidate
+		} else {
+			segment_size = intrinsics.atomic_load_explicit(&heap_segment_size, .Acquire)
+		}
 	}
+	return int(segment_size)
 }
 
 /*

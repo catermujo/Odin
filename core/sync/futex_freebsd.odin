@@ -11,7 +11,7 @@ _futex_wait :: proc "contextless" (f: ^Futex, expected: u32) -> bool {
 	timeout_size := cast(rawptr)cast(uintptr)size_of(timeout)
 
 	for {
-		errno := freebsd._umtx_op(f, .WAIT_UINT, cast(c.ulong)expected, timeout_size, &timeout)
+		errno := freebsd._umtx_op(f, .WAIT_UINT, c.ulong(expected), timeout_size, &timeout)
 
 		if errno == nil {
 			return true
@@ -32,10 +32,10 @@ _futex_wait_with_timeout :: proc "contextless" (f: ^Futex, expected: u32, durati
 		return false
 	}
 
-	timeout := freebsd.timespec {cast(freebsd.time_t)duration / 1e9, cast(c.long)duration % 1e9}
+	timeout := freebsd.timespec {cast(freebsd.time_t)duration / 1e9, c.long(duration % 1e9)}
 	timeout_size := cast(rawptr)cast(uintptr)size_of(timeout)
 
-	errno := freebsd._umtx_op(f, .WAIT_UINT, cast(c.ulong)expected, timeout_size, &timeout)
+	errno := freebsd._umtx_op(f, .WAIT_UINT, c.ulong(expected), timeout_size, &timeout)
 	if errno == nil {
 		return true
 	}
@@ -56,7 +56,7 @@ _futex_signal :: proc "contextless" (f: ^Futex) {
 }
 
 _futex_broadcast :: proc "contextless" (f: ^Futex)  {
-	errno := freebsd._umtx_op(f, .WAKE, cast(c.ulong)max(i32), nil, nil)
+	errno := freebsd._umtx_op(f, .WAKE, c.ulong(max(i32)), nil, nil)
 
 	if errno != nil {
 		panic_contextless("_futex_broadcast failure")

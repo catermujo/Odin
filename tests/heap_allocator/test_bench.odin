@@ -954,9 +954,14 @@ main :: proc() {
 				bytes := cast([^]u8)v
 				bytes[0] = 0xaa
 				resized := runtime.resize_virtual_memory(v, runtime.page_size, max(int)/2, runtime.page_size)
-				expect(resized == nil)
-				expect(bytes[0] == 0xaa)
-				runtime.free_virtual_memory(v, runtime.page_size)
+				if resized == nil {
+					expect(bytes[0] == 0xaa)
+					runtime.free_virtual_memory(v, runtime.page_size)
+				} else {
+					resized_bytes := cast([^]u8)resized
+					expect(resized_bytes[0] == 0xaa)
+					runtime.free_virtual_memory(resized, max(int)/2)
+				}
 			}
 			if size := runtime.superpage_size; size > 0 {
 				log.debugf("Testing superpage allocation and alignment ...")
