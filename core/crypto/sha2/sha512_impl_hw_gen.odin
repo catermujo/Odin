@@ -1,4 +1,4 @@
-#+build !arm64
+#+build i386, arm32, wasm32, wasm64p32, riscv64
 package sha2
 
 // is_hardware_accelerated_512 returns true if and only if (⟺) hardware

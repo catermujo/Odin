@@ -7,7 +7,7 @@ import "core:simd/arm"
 // https://blog.michaelbrase.com/2018/05/08/emulating-x86-aes-intrinsics-on-armv8-a/
 
 TARGET_FEATURES :: "neon,aes"
-HAS_GHASH :: false // Temporary
+HAS_GHASH :: true
 
 @(require_results, enable_target_feature = "aes")
 aesdec :: #force_inline proc "c" (data, key: simd.u8x16) -> simd.u8x16 {
