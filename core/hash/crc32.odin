@@ -2,6 +2,12 @@ package hash
 
 @(optimization_mode="favor_size")
 crc32 :: proc "contextless" (data: []byte, seed := u32(0)) -> u32 #no_bounds_check {
+	when ODIN_ARCH == .arm64 || ODIN_ARCH == .arm32 {
+		when CRC32_HW_SUPPORTED {
+			return crc32_hw(data, seed)
+		}
+	}
+
 	crc := ~seed
 	buffer := raw_data(data)
 	length := len(data)
