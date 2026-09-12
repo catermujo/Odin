@@ -24,6 +24,7 @@ CPU_Feature :: enum u64 {
 	rdrand,    // RDRAND instruction (on-chip random number generator)
 	rdseed,    // RDSEED instruction (on-chip random number generator)
 	sha,       // SHA Extensions (SHA-1, SHA-224, SHA-256)
+	sha512,    // SHA-512 vector extensions
 	sse2,      // Streaming SIMD extension 2 (always available on amd64)
 	sse3,      // Streaming SIMD extension 3
 	ssse3,     // Supplemental streaming SIMD extension 3
@@ -149,6 +150,8 @@ _init_cpu_features :: proc "contextless" () {
 	try_set(&_features, .erms,    9, ebx7)
 	try_set(&_features, .rdseed, 18, ebx7)
 	try_set(&_features, .adx,    19, ebx7)
+	eax7_1, _, _, _ := cpuid(7, 1)
+	try_set(&_features, .sha512, 0, eax7_1)
 }
 
 @(private)
