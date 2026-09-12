@@ -39,12 +39,7 @@ is_ghash_supported :: proc "contextless" () -> bool {
 			.pclmulqdq,
 		}
 	} else when ODIN_ARCH == .arm64 || ODIN_ARCH == .arm32{
-		// Once we can actually use this, we can re-enable this.
-		//
-		// return info.cpu_features() >= info.CPU_Features{
-		// 	.pmull,
-		// }
-		return false
+		return info.cpu_features() >= info.CPU_Features{.pmull}
 	} else {
 		return false
 	}

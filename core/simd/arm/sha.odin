@@ -82,6 +82,30 @@ vsha256su1q_u32 :: #force_inline proc "c" (tw0_3, w8_11, w12_15: uint32x4_t) -> 
 }
 
 when ODIN_ARCH == .arm64 {
+	// SHA3 three-input XOR.
+	@(require_results, enable_target_feature = "neon,sha3")
+	veor3q_u64 :: #force_inline proc "c" (a, b, c: uint64x2_t) -> uint64x2_t {
+		return _veor3q_u64(a, b, c)
+	}
+
+	// SHA3 bit clear and exclusive OR.
+	@(require_results, enable_target_feature = "neon,sha3")
+	vbcaxq_u64 :: #force_inline proc "c" (a, b, c: uint64x2_t) -> uint64x2_t {
+		return _vbcaxq_u64(a, b, c)
+	}
+
+	// SHA3 rotate right by one and XOR.
+	@(require_results, enable_target_feature = "neon,sha3")
+	vrax1q_u64 :: #force_inline proc "c" (a, b: uint64x2_t) -> uint64x2_t {
+		return _vrax1q_u64(a, b)
+	}
+
+	// SHA3 XOR and rotate right by an immediate.
+	@(require_results, enable_target_feature = "neon,sha3")
+	vxarq_u64 :: #force_inline proc "c" (a, b: uint64x2_t, $N: u64) -> uint64x2_t {
+		return _vxarq_u64(a, b, N)
+	}
+
 	// SHA512 hash update, first part.
 	//
 	// [Arm's documentation](https://developer.arm.com/architectures/instruction-sets/intrinsics/vsha512hq_u64)
@@ -143,6 +167,15 @@ foreign _ {
 when ODIN_ARCH == .arm64 {
 	@(private, default_calling_convention = "none")
 	foreign _ {
+		@(link_name = "llvm.aarch64.crypto.eor3u.v2i64")
+		_veor3q_u64 :: proc(a, b, c: uint64x2_t) -> uint64x2_t ---
+		@(link_name = "llvm.aarch64.crypto.bcaxu.v2i64")
+		_vbcaxq_u64 :: proc(a, b, c: uint64x2_t) -> uint64x2_t ---
+		@(link_name = "llvm.aarch64.crypto.rax1")
+		_vrax1q_u64 :: proc(a, b: uint64x2_t) -> uint64x2_t ---
+		@(link_name = "llvm.aarch64.crypto.xar")
+		_vxarq_u64 :: proc(a, b: uint64x2_t, #const N: u64) -> uint64x2_t ---
+
 		@(link_name = "llvm.aarch64.crypto.sha512h")
 		_vsha512hq_u64 :: proc(hash_ed, hash_gf, kwh_kwh2: uint64x2_t) -> uint64x2_t ---
 		@(link_name = "llvm.aarch64.crypto.sha512h2")

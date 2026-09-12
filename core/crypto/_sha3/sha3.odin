@@ -73,7 +73,7 @@ keccak_piln := [?]i32 {
 
 // Covers the Keccak permutation rounds, allows for a starting round parameter to support for example Keccak-p[1600,12]
 @(private)
-keccak_permute :: proc "contextless" (st: ^[25]u64, starting_round: i32 = 0) {
+keccak_permute_portable :: proc "contextless" (st: ^[25]u64, starting_round: i32 = 0) {
 	ensure_contextless((starting_round >= 0 && starting_round <= 23), "crypto/sha3: invalid Keccak permutation starting round")
 
 	i, j, r: i32 = ---, ---, starting_round
@@ -125,6 +125,14 @@ keccak_permute :: proc "contextless" (st: ^[25]u64, starting_round: i32 = 0) {
 		for i = 0; i < 25; i += 1 {
 			st[i] = bits.byte_swap(st[i])
 		}
+	}
+}
+
+keccak_permute :: proc "contextless" (st: ^[25]u64, starting_round: i32) {
+	when IS_HARDWARE_ACCELERATED_SHA3 {
+		keccak_permute_hw(st, starting_round)
+	} else {
+		keccak_permute_portable(st, starting_round)
 	}
 }
 

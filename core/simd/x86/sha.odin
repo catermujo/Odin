@@ -1,6 +1,8 @@
 #+build i386, amd64
 package simd_x86
 
+import "core:simd"
+
 @(require_results, enable_target_feature="sha")
 _mm_sha1msg1_epu32 :: #force_inline proc "c" (a, b: __m128i) -> __m128i {
 	return transmute(__m128i)sha1msg1(transmute(i32x4)a, transmute(i32x4)b)
@@ -29,6 +31,18 @@ _mm_sha256msg2_epu32 :: #force_inline proc "c" (a, b: __m128i) -> __m128i {
 _mm_sha256rnds2_epu32 :: #force_inline proc "c" (a, b, k: __m128i) -> __m128i {
 	return transmute(__m128i)sha256rnds2(transmute(i32x4)a, transmute(i32x4)b, transmute(i32x4)k)
 }
+@(require_results, enable_target_feature="sha512")
+_mm256_sha512msg1_epi64 :: #force_inline proc "c" (a: __m256i, b: __m128i) -> __m256i {
+	return transmute(__m256i)sha512msg1(transmute(simd.i64x4)a, transmute(simd.i64x2)b)
+}
+@(require_results, enable_target_feature="sha512")
+_mm256_sha512msg2_epi64 :: #force_inline proc "c" (a, b: __m256i) -> __m256i {
+	return transmute(__m256i)sha512msg2(transmute(simd.i64x4)a, transmute(simd.i64x4)b)
+}
+@(require_results, enable_target_feature="sha512")
+_mm256_sha512rnds2_epi64 :: #force_inline proc "c" (a, b: __m256i, k: __m128i) -> __m256i {
+	return transmute(__m256i)sha512rnds2(transmute(simd.i64x4)a, transmute(simd.i64x4)b, transmute(simd.i64x2)k)
+}
 
 @(private, default_calling_convention="none")
 foreign _ {
@@ -46,4 +60,10 @@ foreign _ {
 	sha256msg2  :: proc(a, b: i32x4) -> i32x4 ---
 	@(link_name="llvm.x86.sha256rnds2")
 	sha256rnds2 :: proc(a, b, k: i32x4) -> i32x4 ---
+	@(link_name="llvm.x86.vsha512msg1")
+	sha512msg1 :: proc(a: simd.i64x4, b: simd.i64x2) -> simd.i64x4 ---
+	@(link_name="llvm.x86.vsha512msg2")
+	sha512msg2 :: proc(a, b: simd.i64x4) -> simd.i64x4 ---
+	@(link_name="llvm.x86.vsha512rnds2")
+	sha512rnds2 :: proc(a, b: simd.i64x4, k: simd.i64x2) -> simd.i64x4 ---
 }
