@@ -19,6 +19,12 @@ import libc_allocator "libc"
 
 // The tests are specific to feoramalloc, but the benchmarks are general-purpose.
 
+startup_allocate :: proc "contextless" () -> []byte {
+	return transmute([]byte)runtime.Raw_Slice{data = runtime.heap_alloc(64), len = 64}
+}
+
+startup_allocation := startup_allocate()
+
 //
 // Utility
 //
@@ -856,6 +862,11 @@ bench_1_producer_n_consumer_for_m_alloc :: proc(thread_count: int, allocs_per_th
 //
 
 main :: proc() {
+	expect(len(startup_allocation) == 64)
+	startup_allocation[0] = 0x5a
+	expect(startup_allocation[0] == 0x5a)
+	defer runtime.heap_free(raw_data(startup_allocation))
+
 	// Need to avoid dynamic allocation as much as possible.
 	//
 	// There are dynamic heap allocations that happen in global variables

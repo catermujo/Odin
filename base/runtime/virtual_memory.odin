@@ -21,6 +21,13 @@ init_virtual_memory :: proc "contextless" () {
 	_init_virtual_memory()
 }
 
+@(private="file")
+ensure_virtual_memory_initialized :: proc "contextless" () {
+	if page_size == 0 {
+		_init_virtual_memory()
+	}
+}
+
 /*
 Allocate virtual memory from the operating system.
 
@@ -30,6 +37,7 @@ system.
 */
 @(require_results)
 allocate_virtual_memory :: proc "contextless" (size: int) -> rawptr {
+	ensure_virtual_memory_initialized()
 	return _allocate_virtual_memory(size)
 }
 
@@ -51,6 +59,7 @@ operating system or if the feature is otherwise unavailable.
 */
 @(require_results)
 allocate_virtual_memory_superpage :: proc "contextless" () -> rawptr {
+	ensure_virtual_memory_initialized()
 	if superpage_size == 0 {
 		return nil
 	}
@@ -68,6 +77,7 @@ data that is at least `size` bytes large but may be larger, due to rounding
 */
 @(require_results)
 allocate_virtual_memory_aligned :: proc "contextless" (size: int, alignment: int) -> rawptr {
+	ensure_virtual_memory_initialized()
 	assert_contextless(is_power_of_two(alignment))
 	return _allocate_virtual_memory_aligned(size, alignment)
 }
@@ -107,6 +117,7 @@ Resize virtual memory allocated by `allocate_virtual_memory`.
 */
 @(require_results)
 resize_virtual_memory :: proc "contextless" (ptr: rawptr, old_size: int, new_size: int, alignment: int = 0) -> rawptr {
+	ensure_virtual_memory_initialized()
 	// * This is due to a restriction of mremap on Linux.
 	assert_contextless(new_size != 0, "Cannot resize virtual memory address to zero.")
 	// * The statement about undefined behavior of incorrect `old_size` is due to
