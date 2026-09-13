@@ -42,7 +42,8 @@ test_argon2id :: proc(t: ^testing.T) {
 		secret, _ := hex.decode(transmute([]byte)(v.secret), context.temp_allocator)
 		ad, _ := hex.decode(transmute([]byte)(v.ad), context.temp_allocator)
 
-		_ = argon2id.derive(v.params, password, salt, tag, secret, ad)
+		derive_error := argon2id.derive(v.params, password, salt, tag, secret, ad)
+		testing.expect_value(t, derive_error, nil)
 
 		tag_str := string(hex.encode(tag, context.temp_allocator))
 
