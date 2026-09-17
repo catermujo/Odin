@@ -260,6 +260,15 @@ test_type_inference_on_literals_for_various_types :: proc(t: ^testing.T) {
 	testing.expect_value(t, group_struct({a = 9}),       Struct{a = 9})
 	testing.expect_value(t, group_struct({}),            Struct{})
 
+	Id :: struct{value: int}
+	Panel :: struct{value: f32}
+	Id_Config :: struct{value: int}
+	Panel_Config :: struct{value: f32}
+	proc_id_panel :: proc(id: Id, config: Id_Config) -> int { return 1 }
+	proc_panel_panel :: proc(panel: Panel, config: Panel_Config) -> int { return 2 }
+	group_distinct_structs :: proc{proc_id_panel, proc_panel_panel}
+	testing.expect_value(t, group_distinct_structs(Id{}, {}), 1)
+
 	Raw_Union :: struct #raw_union{int_: int, f32_: f32}
 	proc_raw_union :: proc(a: Raw_Union) -> Raw_Union { return a }
 	group_raw_union :: proc{proc_nil, proc_raw_union}
