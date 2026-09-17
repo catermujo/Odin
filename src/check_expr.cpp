@@ -7192,6 +7192,22 @@ gb_internal isize get_required_unpack_lhs_count(Entity **lhs, isize lhs_count, i
 	return required_count;
 }
 
+gb_internal bool is_untyped_compound_literal(Ast *node) {
+	node = unparen_expr(node);
+	if (node == nullptr || node->kind != Ast_CompoundLit) {
+		return false;
+	}
+	return node->CompoundLit.type == nullptr;
+}
+
+gb_internal void check_deferred_compound_literal(CheckerContext *c, Operand *operand, Type *type_hint) {
+	if (operand->mode != Addressing_Invalid || !is_untyped_compound_literal(operand->expr) ||
+	    type_hint == nullptr || is_type_polymorphic(type_hint)) {
+		return;
+	}
+	check_expr_with_type_hint(c, operand, operand->expr, type_hint);
+}
+
 gb_internal bool check_assignment_arguments(CheckerContext *ctx, Array<Operand> const &lhs, Array<Operand> *operands, Slice<Ast *> const &rhs) {
 	bool optional_ok = false;
 	isize tuple_index = 0;
@@ -7280,7 +7296,7 @@ enum UnpackFlag : u32 {
 
 
 gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize lhs_count, Array<Operand> *operands, Slice<Ast *> const &rhs_arguments, UnpackFlags flags,
-	isize variadic_index = -1, isize lhs_required_count_override = -1) {
+	isize variadic_index = -1, isize lhs_required_count_override = -1, bool defer_untyped_compound_literals = false) {
 	auto const &add_dependencies_from_unpacking = [](CheckerContext *c, Entity **lhs, isize lhs_count, isize tuple_index, isize tuple_count) -> isize {
 		if (lhs == nullptr || c->decl == nullptr) {
 			return tuple_count;
@@ -7366,6 +7382,8 @@ gb_internal bool check_unpack_arguments(CheckerContext *ctx, Entity **lhs, isize
 			o.mode = Addressing_Value;
 			o.expr = rhs;
 			add_type_and_value(c, rhs, o.mode, o.type, o.value);
+		} else if (defer_untyped_compound_literals && type_hint == nullptr && is_untyped_compound_literal(rhs)) {
+			o.expr = rhs;
 		} else {
 			if (!defer_polymorphic_compound_literal(c, &o, rhs, polymorphic_type_hint)) {
 				check_expr_base(c, &o, rhs, type_hint);
@@ -7582,6 +7600,10 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 	for (isize i = 0; i < positional_operand_count; i++) {
 		ordered_operands[i] = positional_operands[i];
 		visited[i] = true;
+		if (!checking_proc_group) {
+			Entity *e = pt->params->Tuple.variables[i];
+			check_deferred_compound_literal(c, &ordered_operands[i], e->type);
+		}
 	}
 
 	auto variadic_operands = slice(slice_from_array(positional_operands), positional_operand_count, positional_operands.count);
@@ -7626,6 +7648,10 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 
 			visited[param_index] = true;
 			ordered_operands[param_index] = operand;
+			if (!checking_proc_group) {
+				Entity *e = pt->params->Tuple.variables[param_index];
+				check_deferred_compound_literal(c, &ordered_operands[param_index], e->type);
+			}
 		}
 	}
 
@@ -7651,6 +7677,10 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 				} else {
 					GB_ASSERT(variadic_operands.count != 0);
 					*variadic_operand = variadic_operands[0];
+					if (!checking_proc_group) {
+						Type *variadic_type = pt->params->Tuple.variables[pt->variadic_index]->type;
+						check_deferred_compound_literal(c, variadic_operand, variadic_type);
+					}
 					variadic_operand->type = default_type(variadic_operand->type);
 					actually_variadic = true;
 				}
@@ -7928,6 +7958,12 @@ gb_internal CallArgumentError check_call_arguments_internal(CheckerContext *c, A
 
 		for_array(operand_index, variadic_operands) {
 			Operand *o = &variadic_operands[operand_index];
+			if (checking_proc_group && is_untyped_compound_literal(o->expr)) {
+				continue;
+			}
+			if (!checking_proc_group) {
+				check_deferred_compound_literal(c, o, vari_expand ? slice : t);
+			}
 			if (vari_expand) {
 				t = slice;
 				if (operand_index > 0) {
@@ -9312,7 +9348,7 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 		}
 	}
 
-	check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index, lhs_required_count);
+	check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index, lhs_required_count, true);
 
 	for_array(i, named_args) {
 		Ast *arg = named_args[i];
@@ -9341,7 +9377,11 @@ gb_internal CallArgumentData check_call_arguments_proc_group(CheckerContext *c, 
 			}
 		}
 		Operand o = {};
-		check_expr_with_type_hint(c, &o, value, type_hint);
+		if (type_hint == nullptr && is_untyped_compound_literal(value)) {
+			o.expr = value;
+		} else {
+			check_expr_with_type_hint(c, &o, value, type_hint);
+		}
 		array_add(&named_operands, o);
 	}
 
