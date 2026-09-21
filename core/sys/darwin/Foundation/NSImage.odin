@@ -17,3 +17,13 @@ Image_initWithSize :: proc "c" (self: ^Image, size: Size) -> ^Image {
 Image_addRepresentation :: proc(self: ^Image, rep: ^ImageRep) {
 	msgSend(nil, self, "addRepresentation:", rep)
 }
+
+@(objc_type = Image, objc_name = "imageWithSystemSymbolName", objc_is_class_method = true)
+Image_imageWithSystemSymbolName :: proc "c" (name, description: ^String) -> ^Image {
+	return msgSend(^Image, Image, "imageWithSystemSymbolName:accessibilityDescription:", name, description)
+}
+
+@(objc_type = Image, objc_name = "setTemplate")
+Image_setTemplate :: proc "c" (self: ^Image, is_template: bool) {
+	msgSend(nil, self, "setTemplate:", is_template)
+}

@@ -816,6 +816,26 @@ Window_setAcceptsMouseMovedEvents :: proc "c" (self: ^Window, ok: BOOL) {
 Window_setStyleMask :: proc "c" (self: ^Window, style_mask: WindowStyleMask) {
 	msgSend(nil, self, "setStyleMask:", style_mask)
 }
+@(objc_type=Window, objc_name="styleMask")
+Window_styleMask :: proc "c" (self: ^Window) -> WindowStyleMask {
+	return msgSend(WindowStyleMask, self, "styleMask")
+}
+@(objc_type=Window, objc_name="ignoresMouseEvents")
+Window_ignoresMouseEvents :: proc "c" (self: ^Window) -> BOOL {
+	return msgSend(BOOL, self, "ignoresMouseEvents")
+}
+@(objc_type=Window, objc_name="setIgnoresMouseEvents")
+Window_setIgnoresMouseEvents :: proc "c" (self: ^Window, ignores_mouse_events: BOOL) {
+	msgSend(nil, self, "setIgnoresMouseEvents:", ignores_mouse_events)
+}
+@(objc_type=Window, objc_name="hidesOnDeactivate")
+Window_hidesOnDeactivate :: proc "c" (self: ^Window) -> BOOL {
+	return msgSend(BOOL, self, "hidesOnDeactivate")
+}
+@(objc_type=Window, objc_name="setHidesOnDeactivate")
+Window_setHidesOnDeactivate :: proc "c" (self: ^Window, hides_on_deactivate: BOOL) {
+	msgSend(nil, self, "setHidesOnDeactivate:", hides_on_deactivate)
+}
 @(objc_type=Window, objc_name="performClose")
 Window_performClose :: proc "c" (self: ^Window, sender: id) {
 	msgSend(nil, self, "performClose:", sender)
@@ -951,6 +971,10 @@ Window_collectionBehavior :: proc "c" (self: ^Window) -> WindowCollectionBehavio
 @(objc_type = Window, objc_name = "setLevel")
 Window_setLevel :: proc "c" (self: ^Window, level: WindowLevel) {
 	msgSend(nil, self, "setLevel:", level)
+}
+@(objc_type = Window, objc_name = "level")
+Window_level :: proc "c" (self: ^Window) -> WindowLevel {
+	return msgSend(WindowLevel, self, "level")
 }
 @(objc_type = Window, objc_name = "keyWindow")
 Window_keyWindow :: proc "c" (self: ^Window) -> BOOL {
