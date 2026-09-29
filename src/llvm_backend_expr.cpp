@@ -2900,55 +2900,12 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 			return lb_emit_conv(p, res, t);
 		}
 
-		if (is_type_integer_128bit(dst)) {
-			TEMPORARY_ALLOCATOR_GUARD();
-
-			auto args = array_make<lbValue>(temporary_allocator(), 1);
-			args[0] = lb_emit_conv(p, value, t_f64);
-			char const *call = "fixdfti";
-			if (is_type_unsigned(dst)) {
-				call = "fixunsdfti";
-			}
-			lbValue res_i128 = lb_emit_runtime_call(p, call, args);
-			return lb_emit_conv(p, res_i128, t);
-		}
-		// the intermediate int must be at least as wide as the dest,
-		// otherwise e.g. f32 -> u64 truncates through a 32-bit fptoui
-		i64 sz = gb_max(type_size_of(src), type_size_of(dst));
-
 		lbValue res = {};
 		res.type = t;
-		if (is_type_unsigned(dst)) {
-			switch (sz) {
-			case 2:
-			case 4:
-				res.value = LLVMBuildFPToUI(p->builder, value.value, lb_type(m, t_u32), "");
-				res.value = LLVMBuildIntCast2(p->builder, res.value, lb_type(m, t), false, "");
-				break;
-			case 8:
-				res.value = LLVMBuildFPToUI(p->builder, value.value, lb_type(m, t_u64), "");
-				res.value = LLVMBuildIntCast2(p->builder, res.value, lb_type(m, t), false, "");
-				break;
-			default:
-				GB_PANIC("Unhandled float type");
-				break;
-			}
-		} else {
-			switch (sz) {
-			case 2:
-			case 4:
-				res.value = LLVMBuildFPToSI(p->builder, value.value, lb_type(m, t_i32), "");
-				res.value = LLVMBuildIntCast2(p->builder, res.value, lb_type(m, t), true, "");
-				break;
-			case 8:
-				res.value = LLVMBuildFPToSI(p->builder, value.value, lb_type(m, t_i64), "");
-				res.value = LLVMBuildIntCast2(p->builder, res.value, lb_type(m, t), true, "");
-				break;
-			default:
-				GB_PANIC("Unhandled float type");
-				break;
-			}
-		}
+		LLVMValueRef args[] = {value.value};
+		LLVMTypeRef types[] = {lb_type(m, t), lb_type(m, src)};
+		char const *intrinsic = is_type_unsigned(dst) ? "llvm.fptoui.sat" : "llvm.fptosi.sat";
+		res.value = lb_call_intrinsic(p, intrinsic, args, gb_count_of(args), types, gb_count_of(types));
 		return res;
 	}
 	if (is_type_integer(src) && is_type_float(dst)) {
@@ -3000,11 +2957,10 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 			if (are_types_identical(src_elem, dst_elem)) {
 				res.value = value.value;
 			} else if (is_type_float(src_elem) && is_type_integer(dst_elem)) {
-				if (is_type_unsigned(dst_elem)) {
-					res.value = LLVMBuildFPToUI(p->builder, value.value, lb_type(m, t), "");
-				} else {
-					res.value = LLVMBuildFPToSI(p->builder, value.value, lb_type(m, t), "");
-				}
+				LLVMValueRef args[] = {value.value};
+				LLVMTypeRef types[] = {lb_type(m, t), lb_type(m, src)};
+				char const *intrinsic = is_type_unsigned(dst_elem) ? "llvm.fptoui.sat" : "llvm.fptosi.sat";
+				res.value = lb_call_intrinsic(p, intrinsic, args, gb_count_of(args), types, gb_count_of(types));
 			} else if (is_type_integer(src_elem) && is_type_float(dst_elem)) {
 				if (is_type_unsigned(src_elem)) {
 					res.value = LLVMBuildUIToFP(p->builder, value.value, lb_type(m, t), "");
@@ -3382,7 +3338,15 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 					LLVMValueRef src_vector = LLVMBuildLoad2(p->builder, src_vector_type, src_ptr, "");
 					LLVMSetAlignment(src_vector, cast(unsigned)type_align_of(se));
 
-					LLVMValueRef dst_vector = LLVMBuildCast(p->builder, op, src_vector, dst_vector_type, "");
+					LLVMValueRef dst_vector = nullptr;
+					if (is_type_float(se) && is_type_integer(de)) {
+						LLVMValueRef args[] = {src_vector};
+						LLVMTypeRef types[] = {dst_vector_type, src_vector_type};
+						char const *intrinsic = is_type_unsigned(de) ? "llvm.fptoui.sat" : "llvm.fptosi.sat";
+						dst_vector = lb_call_intrinsic(p, intrinsic, args, gb_count_of(args), types, gb_count_of(types));
+					} else {
+						dst_vector = LLVMBuildCast(p->builder, op, src_vector, dst_vector_type, "");
+					}
 
 					LLVMValueRef store = LLVMBuildStore(p->builder, dst_vector, dst_ptr);
 					LLVMSetAlignment(store, cast(unsigned)type_align_of(de));
