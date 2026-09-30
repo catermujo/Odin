@@ -462,6 +462,9 @@ gb_internal void write_canonical_params(TypeWriter *w, Type *params) {
 
 		switch (v->kind) {
 		case Entity_Variable:
+			if (v->flags&EntityFlag_ByPtr) {
+				type_writer_appendc(w, CANONICAL_PARAM_BY_PTR);
+			}
 			if (v->flags&EntityFlag_CVarArg) {
 				type_writer_appendc(w, CANONICAL_PARAM_C_VARARG);
 			}
