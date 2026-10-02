@@ -12116,6 +12116,11 @@ gb_internal ExprKind check_ternary_if_expr(CheckerContext *c, Operand *o, Ast *n
 			o->type = type_hint;
 		}
 	}
+	if (cond.mode == Addressing_Constant && is_type_boolean(cond.type) &&
+	    x.mode == Addressing_Constant && y.mode == Addressing_Constant) {
+		o->mode = Addressing_Constant;
+		o->value = cond.value.value_bool ? x.value : y.value;
+	}
 	return kind;
 }
 
