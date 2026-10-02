@@ -1714,7 +1714,6 @@ gb_internal void check_assignment(CheckerContext *c, Operand *operand, Type *typ
 			error(operand->expr,
 			      "Cannot assign overloaded procedure group '%s' to '%s' in %.*s%.*s",
 			      expr_str,
-			      *type_strings[0].value,
 			      *type_strings[1].value,
 			      LIT(article),
 			      LIT(context_name));
