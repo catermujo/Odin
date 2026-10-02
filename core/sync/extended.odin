@@ -26,7 +26,7 @@ is not allowed to become negative.
 **Note**: Just like any synchronization primitives, a wait group cannot be
 copied after first use. See documentation for `Mutex` or `Cond`.
 */
-Wait_Group :: struct {
+Wait_Group :: struct #no_copy {
 	counter: int,
 	mutex:   Mutex,
 	cond:    Cond,
@@ -144,7 +144,7 @@ thread procedure.
 		thread.destroy(t)
 	}
 */
-Barrier :: struct {
+Barrier :: struct #no_copy {
 	mutex: Mutex,
 	cond:  Cond,
 	index:         int,
@@ -206,7 +206,7 @@ When a thread calls `auto_reset_event_wait`, its execution will be blocked,
 until the event is signalled by another thread. The call to
 `auto_reset_event_signal` wakes up exactly one thread waiting for the event.
 */
-Auto_Reset_Event :: struct {
+Auto_Reset_Event :: struct #no_copy {
 	// status ==  0: Event is reset and no threads are waiting
 	// status ==  1: Event is signalled
 	// status == -N: Event is reset and N threads are waiting
@@ -261,7 +261,7 @@ of entries into the critical section.
 This type of synchronization primitive is applicable for short critical sections
 in low-contention systems, as it uses a spinlock under the hood.
 */
-Ticket_Mutex :: struct {
+Ticket_Mutex :: struct #no_copy {
 	ticket:  uint,
 	serving: uint,
 }
@@ -315,8 +315,7 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=ticket_mutex_unlock)
-ticket_mutex_guard :: proc "contextless" (m: ^Ticket_Mutex) -> bool {
+ticket_mutex_guard :: proc "contextless" (m: ^Ticket_Mutex) -> bool #scope_exit(.implicit, ticket_mutex_unlock(m)) {
 	ticket_mutex_lock(m)
 	return true
 }
@@ -333,7 +332,7 @@ Once a lock on a benaphore is acquired by a thread, no other thread is allowed
 into any critical sections, associted with the same benaphore, until the lock
 is released.
 */
-Benaphore :: struct {
+Benaphore :: struct #no_copy {
 	counter: i32,
 	sema:    Sema,
 }
@@ -404,8 +403,7 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=benaphore_unlock)
-benaphore_guard :: proc "contextless" (m: ^Benaphore) -> bool {
+benaphore_guard :: proc "contextless" (m: ^Benaphore) -> bool #scope_exit(.implicit, benaphore_unlock(m)) {
 	benaphore_lock(m)
 	return true
 }
@@ -425,7 +423,7 @@ to acquire another lock on the same benaphore. When a thread has acquired the
 lock on a benaphore, the benaphore will stay locked until the thread releases
 the lock as many times as it has been locked by the thread.
 */
-Recursive_Benaphore :: struct {
+Recursive_Benaphore :: struct #no_copy {
 	counter:   int,
 	owner:     int,
 	recursion: i32,
@@ -525,8 +523,7 @@ section by calling this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=recursive_benaphore_unlock)
-recursive_benaphore_guard :: proc "contextless" (m: ^Recursive_Benaphore) -> bool {
+recursive_benaphore_guard :: proc "contextless" (m: ^Recursive_Benaphore) -> bool #scope_exit(.implicit, recursive_benaphore_unlock(m)) {
 	recursive_benaphore_lock(m)
 	return true
 }
@@ -537,7 +534,7 @@ Once action.
 `Once` a synchronization primitive, that only allows a single entry into a
 critical section from a single thread.
 */
-Once :: struct {
+Once :: struct #no_copy {
 	m:    Mutex,
 	done: bool,
 }
@@ -637,7 +634,7 @@ A Parker is an associated token which is initially not present:
 * The `unpark` procedure automatically makes the token available if it
   was not already.
 */
-Parker :: struct {
+Parker :: struct #no_copy {
 	state: Futex,
 }
 
@@ -714,7 +711,7 @@ A one-shot event is an associated token which is initially not present:
 * The `one_shot_event_signal` procedure automatically makes the token
   available if its was not already.
 */
-One_Shot_Event :: struct {
+One_Shot_Event :: struct #no_copy {
 	state: Futex,
 }
 

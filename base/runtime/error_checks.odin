@@ -1,6 +1,6 @@
+#+no-instrumentation
 package runtime
 
-@(no_instrumentation)
 bounds_trap :: proc "contextless" () -> ! {
 	when ODIN_OS == .Windows {
 		windows_trap_array_bounds()
@@ -11,12 +11,21 @@ bounds_trap :: proc "contextless" () -> ! {
 	}
 }
 
-@(no_instrumentation)
 type_assertion_trap_contextless :: proc "contextless" () -> ! {
 	when ODIN_OS == .Windows {
 		windows_trap_type_assertion()
 	} else when ODIN_OS == .Orca {
 		abort_ext("", "", 0, "type assertion trap")
+	} else {
+		trap()
+	}
+}
+
+downcast_assertion_trap_contextless :: proc "contextless" () -> ! {
+	when ODIN_OS == .Windows {
+		windows_trap_type_assertion()
+	} else when ODIN_OS == .Orca {
+		abort_ext("", "", 0, "downcast assertion trap")
 	} else {
 		trap()
 	}
@@ -28,9 +37,9 @@ bounds_check_error :: proc "contextless" (file: string, line, column: i32, index
 	if uint(index) < uint(count) {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, index, count: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Index ")
 		print_i64(i64(index))
 		print_string(" is out of range 0..<")
@@ -41,9 +50,26 @@ bounds_check_error :: proc "contextless" (file: string, line, column: i32, index
 	handle_error(file, line, column, index, count)
 }
 
-@(no_instrumentation)
+@(disabled=ODIN_NO_BOUNDS_CHECK)
+array_len_mismatch_error :: proc "contextless" (file: string, line, column: i32, lhs_len, rhs_len: int) {
+	if lhs_len == rhs_len {
+		return
+	}
+	@(cold)
+	handle_error :: proc "contextless" (file: string, line, column: i32, lhs_len, rhs_len: int) -> ! {
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
+		print_string(" Array length mismatch: lhs len = ")
+		print_i64(i64(lhs_len))
+		print_string(", rhs len = ")
+		print_i64(i64(rhs_len))
+		print_byte('\n')
+		bounds_trap()
+	}
+	handle_error(file, line, column, lhs_len, rhs_len)
+}
+
 slice_handle_error :: proc "contextless" (file: string, line, column: i32, lo, hi: int, len: int) -> ! {
-	print_caller_location(Source_Code_Location{file, line, column, ""})
+	print_caller_location(Source_Code_Location{file, line, column, "", ""})
 	print_string(" Invalid slice indices ")
 	print_i64(i64(lo))
 	print_string(":")
@@ -54,9 +80,8 @@ slice_handle_error :: proc "contextless" (file: string, line, column: i32, lo, h
 	bounds_trap()
 }
 
-@(no_instrumentation)
 multi_pointer_slice_handle_error :: proc "contextless" (file: string, line, column: i32, lo, hi: int) -> ! {
-	print_caller_location(Source_Code_Location{file, line, column, ""})
+	print_caller_location(Source_Code_Location{file, line, column, "", ""})
 	print_string(" Invalid slice indices ")
 	print_i64(i64(lo))
 	print_string(":")
@@ -95,9 +120,9 @@ dynamic_array_expr_error :: proc "contextless" (file: string, line, column: i32,
 	if 0 <= low && low <= high && high <= max {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, low, high, max: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Invalid dynamic array indices ")
 		print_i64(i64(low))
 		print_string(":")
@@ -117,9 +142,9 @@ matrix_bounds_check_error :: proc "contextless" (file: string, line, column: i32
 	   uint(column_index) < uint(column_count) {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (file: string, line, column: i32, row_index, column_index, row_count, column_count: int) -> ! {
-		print_caller_location(Source_Code_Location{file, line, column, ""})
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
 		print_string(" Matrix indices [")
 		print_i64(i64(row_index))
 		print_string(", ")
@@ -135,19 +160,75 @@ matrix_bounds_check_error :: proc "contextless" (file: string, line, column: i32
 	handle_error(file, line, column, row_index, column_index, row_count, column_count)
 }
 
+optional_value_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
+	if ok {
+		return
+	}
+	@(cold)
+	handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
+		p := context.assertion_failure_proc
+		if p == nil {
+			p = default_assertion_failure_proc
+		}
+		p("optional value", "Invalid optional value", Source_Code_Location{file, line, column, "", ""})
+	}
+	handle_error(file, line, column)
+}
+
+optional_value_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32) {
+	if ok {
+		return
+	}
+	@(cold)
+	handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
+		print_caller_location(Source_Code_Location{file, line, column, "", ""})
+		print_string(" Invalid optional value\n")
+		type_assertion_trap_contextless()
+	}
+	handle_error(file, line, column)
+}
+
 
 when ODIN_NO_RTTI {
-	type_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
+	downcast_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
 			p := context.assertion_failure_proc
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, ""})
+		p("downcast assertion", "Invalid downcast", Source_Code_Location{file, line, column, "", ""})
+		}
+		handle_error(file, line, column)
+	}
+
+	downcast_assertion_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32) {
+		if ok {
+			return
+		}
+		@(cold)
+		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
+			print_string(" Invalid downcast\n")
+			downcast_assertion_trap_contextless()
+		}
+		handle_error(file, line, column)
+	}
+
+	type_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32) {
+		if ok {
+			return
+		}
+		@(cold)
+		handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
+			p := context.assertion_failure_proc
+			if p == nil {
+				p = default_assertion_failure_proc
+			}
+		p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column)
 	}
@@ -156,9 +237,9 @@ when ODIN_NO_RTTI {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion\n")
 			type_assertion_trap_contextless()
 		}
@@ -169,13 +250,13 @@ when ODIN_NO_RTTI {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "odin" (file: string, line, column: i32) -> ! {
 			p := context.assertion_failure_proc
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, ""})
+			p("type assertion", "Invalid type assertion", Source_Code_Location{file, line, column, "", ""})
 		}
 
 		handle_error(file, line, column)
@@ -185,9 +266,9 @@ when ODIN_NO_RTTI {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion\n")
 			type_assertion_trap_contextless()
 		}
@@ -197,11 +278,151 @@ when ODIN_NO_RTTI {
 	@(private="file")
 	TYPE_ASSERTION_BUFFER_SIZE :: 1024
 
+	@(private="file")
+	@(require_results)
+	write_u128 :: proc "contextless" (j: ^int, dst: []byte, x: u128) -> bool {
+		if j^ < len(dst) {
+			b :: u128(10)
+			digits := "0123456789"
+			u := x
+
+			a: [129]byte
+			i := len(a)
+			for u >= b {
+				i -= 1
+				a[i] = digits[int(u % b)]
+				u /= b
+			}
+			i -= 1
+			a[i] = digits[int(u % b)]
+
+			return write_string(j, dst, string(a[i:]))
+		}
+		return false
+	}
+
+	@(private="file")
+	@(require_results)
+	write_i128 :: proc "contextless" (j: ^int, dst: []byte, x: i128) -> bool {
+		if j^ < len(dst) {
+			b :: u128(10)
+			digits := "0123456789"
+			neg := x < 0
+			u := cast(u128)x
+			if neg {
+				u = (~u) + 1
+			}
+
+			a: [129]byte
+			i := len(a)
+			for u >= b {
+				i -= 1
+				a[i] = digits[int(u % b)]
+				u /= b
+			}
+			i -= 1
+			a[i] = digits[int(u % b)]
+			if neg {
+				i -= 1
+				a[i] = '-'
+			}
+
+			return write_string(j, dst, string(a[i:]))
+		}
+		return false
+	}
+
+	@(private="file")
+	@(require_results)
+	downcast_assertion_write_value :: proc "contextless" (i: ^int, buf: []byte, from: typeid, value_lo, value_hi: u64) -> bool {
+		write_string(i, buf, " (value: ") or_return
+
+		value := (u128(value_hi) << u128(64)) | u128(value_lo)
+		is_signed := false
+		bit_count := 64
+		if from != nil {
+			if ti := type_info_core(type_info_of(from)); ti != nil {
+				bit_count = int(8 * ti.size)
+				#partial switch v in ti.variant {
+				case Type_Info_Integer:
+					is_signed = v.signed
+				case Type_Info_Rune:
+					is_signed = true
+				}
+			}
+		}
+
+		if is_signed {
+			if 0 < bit_count && bit_count < 128 {
+				sign_bit := u128(1) << u128(bit_count-1)
+				if value & sign_bit != 0 {
+					mask := (~u128(0)) << u128(bit_count)
+					value |= mask
+				}
+			}
+			write_i128(i, buf, cast(i128)value) or_return
+		} else {
+			write_u128(i, buf, value) or_return
+		}
+
+		write_byte(i, buf, ')') or_return
+		return true
+	}
+
+	@(private="file")
+	@(require_results)
+	downcast_assertion_write_message :: proc "contextless" (i: ^int, buf: []byte, from, to: typeid, value_lo, value_hi: u64) -> bool {
+		write_string(i, buf, "Invalid downcast from ")     or_return
+		write_typeid(i, buf, from)                         or_return
+		write_string(i, buf, " to ")                       or_return
+		write_typeid(i, buf, to)                           or_return
+		downcast_assertion_write_value(i, buf, from, value_lo, value_hi) or_return
+		return true
+	}
+
+	downcast_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) {
+		if ok {
+			return
+		}
+		@(cold)
+		handle_error :: proc "odin" (file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) -> ! {
+			buf: [TYPE_ASSERTION_BUFFER_SIZE]byte
+			i := 0
+			_ = downcast_assertion_write_message(&i, buf[:], from, to, value_lo, value_hi)
+
+			p := context.assertion_failure_proc
+			if p == nil {
+				p = default_assertion_failure_proc
+			}
+		p("downcast assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
+		}
+		handle_error(file, line, column, from, to, value_lo, value_hi)
+	}
+
+	downcast_assertion_check_contextless :: proc "contextless" (ok: bool, file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) {
+		if ok {
+			return
+		}
+		@(cold)
+		handle_error :: proc "contextless" (file: string, line, column: i32, from, to: typeid, value_lo, value_hi: u64) -> ! {
+			buf: [TYPE_ASSERTION_BUFFER_SIZE]byte
+			i := 0
+			_ = downcast_assertion_write_message(&i, buf[:], from, to, value_lo, value_hi)
+
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
+			print_string(" ")
+			print_string(string(buf[:i]))
+			print_byte('\n')
+			downcast_assertion_trap_contextless()
+		}
+		handle_error(file, line, column, from, to, value_lo, value_hi)
+	}
+
 	type_assertion_check_with_context :: proc "odin" (ok: bool, file: string, line, column: i32, from, to: typeid) {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "odin" (file: string, line, column: i32, from, to: typeid) -> ! {
 			do_msg :: proc "contextless" (i: ^int, buf: []byte, file: string, line, column: i32, from, to: typeid) -> bool {
 				write_string(i, buf, "Invalid type assertion from ") or_return
@@ -219,7 +440,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+		p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column, from, to)
 	}
@@ -228,9 +449,9 @@ when ODIN_NO_RTTI {
 		if ok {
 			return
 		}
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32, from, to: typeid) -> ! {
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion from ")
 			print_typeid(from)
 			print_string(" to ")
@@ -282,7 +503,7 @@ when ODIN_NO_RTTI {
 			return
 		}
 
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "odin" (file: string, line, column: i32, from, to: typeid, from_data: rawptr) -> ! {
 			do_msg :: proc "contextless" (i: ^int, buf: []byte, file: string, line, column: i32, from, to, actual: typeid) -> bool {
 				write_string(i, buf, "Invalid type assertion from ") or_return
@@ -306,7 +527,7 @@ when ODIN_NO_RTTI {
 			if p == nil {
 				p = default_assertion_failure_proc
 			}
-			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, ""})
+			p("type assertion", string(buf[:i]), Source_Code_Location{file, line, column, "", ""})
 		}
 		handle_error(file, line, column, from, to, from_data)
 	}
@@ -316,12 +537,12 @@ when ODIN_NO_RTTI {
 			return
 		}
 
-		@(cold, no_instrumentation)
+		@(cold)
 		handle_error :: proc "contextless" (file: string, line, column: i32, from, to: typeid, from_data: rawptr) -> ! {
 
 			actual := type_assertion_variant_type(from, from_data)
 
-			print_caller_location(Source_Code_Location{file, line, column, ""})
+			print_caller_location(Source_Code_Location{file, line, column, "", ""})
 			print_string(" Invalid type assertion from ")
 			print_typeid(from)
 			print_string(" to ")
@@ -343,7 +564,7 @@ make_slice_error_loc :: #force_inline proc "contextless" (loc := #caller_locatio
 	if 0 <= len {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (loc: Source_Code_Location, len: int) -> ! {
 		print_caller_location(loc)
 		print_string(" Invalid slice length for make: ")
@@ -359,7 +580,7 @@ make_dynamic_array_error_loc :: #force_inline proc "contextless" (loc := #caller
 	if 0 <= len && len <= cap {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (loc: Source_Code_Location, len, cap: int)  -> ! {
 		print_caller_location(loc)
 		print_string(" Invalid dynamic array parameters for make: ")
@@ -377,7 +598,7 @@ make_map_expr_error_loc :: #force_inline proc "contextless" (loc := #caller_loca
 	if 0 <= cap {
 		return
 	}
-	@(cold, no_instrumentation)
+	@(cold)
 	handle_error :: proc "contextless" (loc: Source_Code_Location, cap: int)  -> ! {
 		print_caller_location(loc)
 		print_string(" Invalid map capacity for make: ")

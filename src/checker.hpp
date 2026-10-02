@@ -109,11 +109,43 @@ struct DeferredProcedure {
 	Entity *entity;
 };
 
+enum ScopeExitPolicy {
+	ScopeExitPolicy_Invalid,
+	ScopeExitPolicy_Explicit,
+	ScopeExitPolicy_Implicit,
+};
+
+enum ScopeExitBindingSource {
+	ScopeExitBinding_Input,
+	ScopeExitBinding_Result,
+};
+
+struct ScopeExitBinding {
+	ScopeExitBindingSource source;
+	i32 index;
+	bool by_pointer;
+};
+
+struct ScopeExitContract {
+	ScopeExitPolicy policy;
+	Entity *cleanup;
+	Slice<ScopeExitBinding> bindings;
+	TokenPos pos;
+};
+
 
 enum InstrumentationFlag : i32 {
 	Instrumentation_Enabled  = -1,
 	Instrumentation_Default  = 0,
 	Instrumentation_Disabled = +1,
+};
+
+enum OperatorOverloadKind : u8 {
+	OperatorOverloadKind_Invalid,
+	OperatorOverloadKind_Binary,
+	OperatorOverloadKind_IndexGet,
+	OperatorOverloadKind_IndexSet,
+	OperatorOverloadKind_Iterator,
 };
 
 struct AttributeContext {
@@ -127,12 +159,15 @@ struct AttributeContext {
 	String  deprecated_message;
 	String  warning_message;
 	DeferredProcedure deferred_procedure;
+	TokenKind operator_overload_binary_kind;
+	OperatorOverloadKind operator_overload_kind;
 	bool    is_export             : 1;
 	bool    is_static             : 1;
 	bool    require_results       : 1;
 	bool    require_declaration   : 1;
 	bool    has_disabled_proc     : 1;
 	bool    disabled_proc         : 1;
+	bool    has_operator_overload : 1;
 	bool    test                  : 1;
 	bool    init                  : 1;
 	bool    fini                  : 1;
@@ -149,6 +184,7 @@ struct AttributeContext {
 	i64 foreign_import_priority_index;
 	String extra_linker_flags;
 	InstrumentationFlag no_instrumentation;
+	bool    no_warn_excessive_inlining : 1;
 
 	String  objc_class;
 	String  objc_name;
@@ -203,6 +239,20 @@ struct VariadicReuseData {
 	i64 max_count;
 };
 
+enum TriggerTraceKind : u8 {
+	TriggerTrace_Invalid,
+	TriggerTrace_Import,
+	TriggerTrace_Use,
+};
+
+struct TriggerTraceFrame {
+	TriggerTraceKind kind;
+	TokenPos         pos;
+	String           name;
+};
+
+enum { MAX_TRIGGER_TRACE_FRAMES = 32 };
+
 // DeclInfo is used to store information of certain declarations to allow for "any order" usage
 struct DeclInfo {
 	DeclInfo *    parent; // NOTE(bill): only used for procedure literals at the moment
@@ -251,6 +301,8 @@ struct DeclInfo {
 	Array<VariadicReuseData> variadic_reuses;
 	i64 variadic_reuse_max_bytes;
 	i64 variadic_reuse_max_align;
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	// NOTE(bill): this is to prevent a race condition since these procedure literals can be created anywhere at any time
 	std::atomic<struct lbModule *> code_gen_module;
@@ -266,6 +318,8 @@ struct ProcInfo {
 	u64       tags;
 	bool      generated_from_polymorphic;
 	Ast *     poly_def_node;
+	i32       trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 
@@ -564,6 +618,8 @@ struct Scope {
 	RwMutex mutex;
 	ScopeMap elements;
 	PtrSet<Scope *> imported;
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	DeclInfo *decl_info;
 
@@ -683,9 +739,26 @@ struct LoadDirectoryCache {
 };
 
 
+struct GeneratedProcCacheEntry {
+	Entity *       entity;
+	Slice<Operand> operands;
+};
+
+struct ProcGroupCallCacheEntry {
+	Entity *       proc_group;
+	Entity *       entity;
+	Slice<Operand> positional_operands;
+	Slice<Operand> named_operands;
+	Slice<String>  named_argument_names;
+	isize          candidate_count;
+	bool           variadic_expand;
+};
+
 struct GenProcsData {
-	Array<Entity *> procs;
-	RwMutex         mutex;
+	Array<Entity *>                        procs;
+	PtrMap<u64, GeneratedProcCacheEntry *> procs_by_operands;
+	PtrMap<u64, GeneratedProcCacheEntry *> failed_procs_by_operands;
+	RwMutex                                mutex;
 };
 
 struct GenTypesData {
@@ -795,6 +868,21 @@ struct CheckerInfo {
 	Entity *instrumentation_enter_entity;
 	Entity *instrumentation_exit_entity;
 
+	BlockingMutex operator_overload_mutex;
+	Array<Entity *> operator_overloads[Token_Count];
+	Array<Entity *> index_operator_get_overloads;
+	Array<Entity *> index_operator_set_overloads;
+	Array<Entity *> iterator_operator_overloads;
+	BlockingMutex overloaded_operator_call_mutex;
+	PtrMap<Ast *, Ast *> overloaded_operator_calls;
+	BlockingMutex assignment_operation_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_operation_expr_map;
+	BlockingMutex assignment_overloaded_call_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_overloaded_call_expr_map;
+	BlockingMutex range_stmt_iterator_overload_state_mutex;
+	PtrMap<Ast *, Entity *> range_stmt_iterator_overload_state_map;
+	PtrMap<u64, ProcGroupCallCacheEntry *> proc_group_call_cache;
+
 
 	BlockingMutex                       load_directory_mutex;
 	StringMap<LoadDirectoryCache *>     load_directory_cache;
@@ -845,6 +933,7 @@ struct CheckerContext {
 	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	bool       allow_arrow_right_selector_expr;
+	bool       allow_scope_exit_opener;
 	bool       allow_c_vararg_param;
 	bool       allow_in_progress_type_operand; // a bare type name may still be being checked (polymorphic record arguments)
 	u8         bit_field_bit_size;
@@ -852,10 +941,24 @@ struct CheckerContext {
 
 	Ast *assignment_lhs_hint;
 	Ast *asm_template_hint;
+	i32  trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 gb_internal u64 check_vet_flags(CheckerContext *c);
 gb_internal u64 check_vet_flags(Ast *node);
+
+gb_internal void checker_context_clear_trigger_trace(CheckerContext *ctx);
+gb_internal void checker_context_copy_trigger_trace(CheckerContext *dst, CheckerContext const *src);
+gb_internal void checker_context_set_trigger_trace_from_proc_info(CheckerContext *ctx, ProcInfo const *pi);
+gb_internal void checker_context_set_trigger_trace_from_scope(CheckerContext *ctx, Scope const *scope);
+gb_internal void checker_context_build_import_trigger_trace(CheckerContext *ctx, AstPackage *pkg);
+gb_internal void checker_context_prepend_trigger_trace(CheckerContext *ctx, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void decl_info_copy_trigger_trace(DeclInfo *decl, CheckerContext const *ctx);
+gb_internal void proc_info_copy_trigger_trace(ProcInfo *pi, CheckerContext const *ctx);
+gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void checker_context_print_trigger_trace_from(CheckerContext *ctx, i32 start_index);
+gb_internal void checker_context_print_trigger_trace(CheckerContext *ctx);
 
 
 struct Checker {

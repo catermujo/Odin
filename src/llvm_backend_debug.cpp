@@ -36,6 +36,31 @@ gb_internal void lb_add_raddbg_string(lbModule *m, char const *a, char const *b,
 	mpsc_enqueue(&m->gen->raddebug_section_strings, str);
 }
 
+gb_internal LLVMMetadataRef lb_get_procedure_scope_metadata(lbProcedure *p, Scope *s) {
+	if (p == nullptr || s == nullptr) {
+		return nullptr;
+	}
+	for_array(i, p->debug_scope_metadata) {
+		if (p->debug_scope_metadata[i].scope == s) {
+			return p->debug_scope_metadata[i].metadata;
+		}
+	}
+	return nullptr;
+}
+
+gb_internal void lb_set_procedure_scope_metadata(lbProcedure *p, Scope *s, LLVMMetadataRef md) {
+	if (p == nullptr || s == nullptr || md == nullptr) {
+		return;
+	}
+	for_array(i, p->debug_scope_metadata) {
+		if (p->debug_scope_metadata[i].scope == s) {
+			p->debug_scope_metadata[i].metadata = md;
+			return;
+		}
+	}
+	array_add(&p->debug_scope_metadata, {s, md});
+}
+
 
 
 gb_internal LLVMMetadataRef lb_get_current_debug_scope(lbProcedure *p) {
@@ -43,7 +68,7 @@ gb_internal LLVMMetadataRef lb_get_current_debug_scope(lbProcedure *p) {
 
 	for (isize i = p->scope_stack.count-1; i >= 0; i--) {
 		Scope *s = p->scope_stack[i];
-		LLVMMetadataRef md = lb_get_llvm_metadata(p->module, s);
+		LLVMMetadataRef md = lb_get_procedure_scope_metadata(p, s);
 		if (md) {
 			return md;
 		}
@@ -75,7 +100,9 @@ gb_internal void lb_debug_file_line(lbModule *m, Ast *node, LLVMMetadataRef *fil
 }
 
 gb_internal LLVMMetadataRef lb_debug_procedure_parameters(lbModule *m, Type *type) {
-	if (is_type_proc(type)) {
+	if (is_type_proc(type) && !is_type_closure(type)) {
+		// a closure is a 2-word {fn,env} aggregate, not a single function pointer; describe it
+		// accurately so debuggers see both words.
 		return lb_debug_type(m, t_rawptr);
 	}
 	if (type->kind == Type_Tuple && type->Tuple.variables.count == 1) {
@@ -109,7 +136,7 @@ gb_internal LLVMMetadataRef lb_debug_type_internal_proc(lbModule *m, Type *type)
 	bool return_is_tuple = false;
 	if (type->Proc.result_count != 0) {
 		Type *single_ret = reduce_tuple_to_single_type(type->Proc.results);
-		if (is_type_proc(single_ret)) {
+		if (is_type_proc(single_ret) && !is_type_closure(single_ret)) {
 			single_ret = t_rawptr;
 		}
 		if (is_type_tuple(single_ret) && is_calling_convention_odin(type->Proc.calling_convention)) {

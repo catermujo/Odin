@@ -1,3 +1,5 @@
+gb_internal bool check_no_copy_assignment(Operand const &o, String const &context);
+
 gb_internal bool is_diverging_expr(Ast *expr) {
 	expr = unparen_expr(expr);
 	if (expr->kind != Ast_CallExpr) {
@@ -185,6 +187,8 @@ gb_internal bool check_has_break_expr_list(Slice<Ast *> const &exprs, String con
 	return false;
 }
 
+String label_string(Ast *node);
+
 gb_internal bool check_has_break(Ast *stmt, String const &label, bool implicit) {
 	switch (stmt->kind) {
 	case Ast_BranchStmt:
@@ -201,6 +205,18 @@ gb_internal bool check_has_break(Ast *stmt, String const &label, bool implicit) 
 
 	case Ast_DeferStmt:
 		return check_has_break(stmt->DeferStmt.stmt, label, implicit);
+
+	case Ast_WithStmt:
+		if (stmt->WithStmt.init && check_has_break(stmt->WithStmt.init, label, implicit)) {
+			return true;
+		}
+		if (stmt->WithStmt.label == nullptr) {
+			return check_has_break(stmt->WithStmt.body, label, implicit);
+		}
+		if (label_string(stmt->WithStmt.label) == label) {
+			return check_has_break(stmt->WithStmt.body, label, false);
+		}
+		break;
 
 	case Ast_BlockStmt:
 		return check_has_break_list(stmt->BlockStmt.stmts, label, implicit);
@@ -337,6 +353,10 @@ gb_internal bool check_is_terminating(Ast *node, String const &label) {
 		}
 	case_end;
 
+	case_ast_node(ws, WithStmt, node);
+		return check_is_terminating(ws->body, label);
+	case_end;
+
 	case_ast_node(ws, WhenStmt, node);
 		// TODO(bill): Is this logic correct for when statements?
 		auto const &tv = ws->cond->tav;
@@ -429,6 +449,7 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 	}
 
 	Ast *node = unparen_expr(lhs->expr);
+	check_no_copy_assignment(*rhs, context_name);
 
 	// NOTE(bill): Ignore assignments to '_'
 	if (is_blank_ident(node)) {
@@ -654,7 +675,26 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 		ctx->bit_field_bit_size = lhs_e->Variable.bit_field_bit_size;
 	}
 
-	check_assignment(ctx, rhs, assignment_type, context_name);
+	bool assigned_via_matrix_component_cast = false;
+	if (assignment_type != nullptr && rhs->mode != Addressing_Invalid) {
+		Ast *lhs_expr = unparen_expr(lhs->expr);
+		if (lhs_expr != nullptr && lhs_expr->kind == Ast_IndexExpr) {
+			Type *indexed_type = type_of_expr(lhs_expr->IndexExpr.expr);
+			Type *indexed_base = base_type(type_deref(indexed_type));
+			if (indexed_base != nullptr && indexed_base->kind == Type_Matrix) {
+				Operand rhs_probe = *rhs;
+				if (!check_is_assignable_to(ctx, &rhs_probe, assignment_type) &&
+				    check_is_castable_to(ctx, &rhs_probe, assignment_type)) {
+					check_cast(ctx, rhs, assignment_type);
+					assigned_via_matrix_component_cast = rhs->mode != Addressing_Invalid;
+				}
+			}
+		}
+	}
+
+	if (!assigned_via_matrix_component_cast) {
+		check_assignment(ctx, rhs, assignment_type, context_name);
+	}
 
 	ctx->bit_field_bit_size = prev_bit_field_bit_size;
 
@@ -668,6 +708,14 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 
 gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags);
 gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
+	bool statement_timing_enabled = checker_procedure_body_timing_state.enabled;
+	if (statement_timing_enabled) {
+		checker_statement_timing_begin(node->kind);
+	}
+	defer (if (statement_timing_enabled) {
+		checker_statement_timing_end();
+	});
+
 	u32 prev_state_flags = ctx->state_flags;
 
 	if (node->state_flags != 0) {
@@ -688,6 +736,14 @@ gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
 		} else if (in & StateFlag_type_assert) {
 			out |= StateFlag_type_assert;
 			out &= ~StateFlag_no_type_assert;
+		}
+
+		if (in & StateFlag_no_downcast_assert) {
+			out |= StateFlag_no_downcast_assert;
+			out &= ~StateFlag_downcast_assert;
+		} else if (in & StateFlag_downcast_assert) {
+			out |= StateFlag_downcast_assert;
+			out &= ~StateFlag_no_downcast_assert;
 		}
 
 		ctx->state_flags = out;
@@ -1760,6 +1816,200 @@ gb_internal bool all_operands_valid(Array<Operand> const &operands) {
 	return true;
 }
 
+gb_internal bool check_range_stmt_custom_iterator_overload(CheckerContext *ctx, AstRangeStmt *rs, Operand *container_operand) {
+	GB_ASSERT(ctx != nullptr);
+	GB_ASSERT(rs != nullptr);
+	GB_ASSERT(container_operand != nullptr);
+
+	if (container_operand->mode == Addressing_Invalid || container_operand->mode == Addressing_Type) {
+		return false;
+	}
+	if (container_operand->type == nullptr || container_operand->type == t_invalid) {
+		return false;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto procs = iterator_operator_overload_procs_cloned(ctx, temporary_allocator());
+	if (procs.count == 0) {
+		return false;
+	}
+
+	AstFile *f = rs->expr->file();
+	Token proc_token = make_token_ident(str_lit("in"));
+	proc_token.pos = rs->in_token.pos;
+
+	Entity proc_group = {};
+	proc_group.kind = Entity_ProcGroup;
+	proc_group.state = EntityState_Resolved;
+	proc_group.token = proc_token;
+	proc_group.scope = ctx->scope;
+	proc_group.ProcGroup.entities = procs;
+
+	// Placeholder for candidate probing before we add a hidden state variable.
+	Token state_token = make_token_ident(str_lit("__for_in_state"));
+	state_token.pos = rs->in_token.pos;
+	Ast *state_ident = ast_ident(f, state_token);
+	Token and_token = {Token_And, 0, token_strings[Token_And], rs->in_token.pos};
+	Ast *state_addr = ast_unary_expr(f, and_token, state_ident);
+
+	auto args = array_make<Ast *>(temporary_allocator(), 0, 2);
+	array_add(&args, rs->expr);
+	array_add(&args, state_addr);
+
+	Token open  = {Token_OpenParen,  0, token_strings[Token_OpenParen],  rs->in_token.pos};
+	Token close = {Token_CloseParen, 0, token_strings[Token_CloseParen], rs->in_token.pos};
+	Ast *proc_expr = ast_ident(f, proc_token);
+	Ast *call = ast_call_expr(f, proc_expr, args, open, close, {});
+	ast_node(ce, CallExpr, call);
+	AstSplitArgs *split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+	split_args->positional = slice_from_array(args);
+	split_args->named = {};
+	ce->split_args = split_args;
+
+	Operand overload_operand = {};
+	overload_operand.mode = Addressing_ProcGroup;
+	overload_operand.proc_group = &proc_group;
+	overload_operand.expr = proc_expr;
+
+	Operand state_ptr_operand = {};
+	state_ptr_operand.mode = Addressing_Value;
+	state_ptr_operand.type = alloc_type_pointer(t_int);
+	state_ptr_operand.expr = state_addr;
+
+	auto positional_operands = array_make<Operand>(temporary_allocator(), 0, 2);
+	array_add(&positional_operands, *container_operand);
+	array_add(&positional_operands, state_ptr_operand);
+	auto named_operands = array_make<Operand>(temporary_allocator(), 0, 0);
+
+	struct IteratorOverloadCandidate {
+		Entity *proc;
+		isize value_count;
+	};
+
+	auto candidates = array_make<IteratorOverloadCandidate>(temporary_allocator(), 0, procs.count);
+	ctx->in_proc_group = true;
+	for (Entity *p : procs) {
+		if (p == nullptr || (p->flags & EntityFlag_Disabled)) {
+			continue;
+		}
+		Type *pt = base_type(p->type);
+		if (!(pt != nullptr && is_type_proc(pt))) {
+			continue;
+		}
+
+		CallArgumentData data = {};
+		CheckerContext probe = *ctx;
+		probe.no_polymorphic_errors = true;
+		probe.allow_polymorphic_types = is_type_polymorphic(pt);
+		probe.hide_polymorphic_errors = true;
+
+		Operand candidate_operand = overload_operand;
+		bool is_candidate = check_call_arguments_single(&probe, call, &candidate_operand,
+			p, pt,
+			positional_operands, named_operands,
+			CallArgumentErrorMode::NoErrors,
+			&data, true);
+		if (is_candidate) {
+			GB_ASSERT(pt->Proc.results != nullptr);
+			isize result_count = pt->Proc.results->Tuple.variables.count;
+			GB_ASSERT(result_count >= 2);
+			IteratorOverloadCandidate candidate = {};
+			candidate.proc = p;
+			candidate.value_count = result_count-1; // trailing boolean is the loop condition
+			array_add(&candidates, candidate);
+		}
+	}
+	ctx->in_proc_group = false;
+
+	if (candidates.count == 0) {
+		return false;
+	}
+
+	isize requested_value_count = rs->vals.count;
+	bool found_satisfying = false;
+	isize target_value_count = 0;
+
+	for (auto const &candidate : candidates) {
+		if (candidate.value_count >= requested_value_count) {
+			if (!found_satisfying || candidate.value_count < target_value_count) {
+				found_satisfying = true;
+				target_value_count = candidate.value_count;
+			}
+		}
+	}
+	if (!found_satisfying) {
+		// Fall back to the widest candidate so diagnostics can mention the largest available arity.
+		for (auto const &candidate : candidates) {
+			if (candidate.value_count > target_value_count) {
+				target_value_count = candidate.value_count;
+			}
+		}
+	}
+
+	auto selected_procs = array_make<Entity *>(temporary_allocator(), 0, candidates.count);
+	for (auto const &candidate : candidates) {
+		if (candidate.value_count == target_value_count) {
+			array_add(&selected_procs, candidate.proc);
+		}
+	}
+	GB_ASSERT(selected_procs.count > 0);
+	proc_group.ProcGroup.entities = selected_procs;
+
+	// Reserve a hidden state variable in the range statement scope.
+	String base_name = str_lit("__for_in_state");
+	Token unique_state_token = make_token_ident(base_name);
+	unique_state_token.pos = rs->in_token.pos;
+	for (isize i = 0;; i++) {
+		gbString tmp = gb_string_make_reserve(temporary_allocator(), base_name.len + 32);
+		tmp = gb_string_append_length(tmp, cast(char const *)base_name.text, base_name.len);
+		if (i > 0) {
+			tmp = gb_string_append_fmt(tmp, "$%td", i);
+		}
+		String state_name = make_string(cast(u8 const *)tmp, gb_string_length(tmp));
+		InternedString interned = string_interner_insert(state_name);
+		if (scope_lookup_current(ctx->scope, interned) == nullptr) {
+			unique_state_token = make_token_ident(state_name);
+			unique_state_token.pos = rs->in_token.pos;
+			break;
+		}
+	}
+
+	Ast *real_state_ident = ast_ident(f, unique_state_token);
+	Entity *state_entity = alloc_entity_variable(ctx->scope, unique_state_token, t_int, EntityState_Resolved);
+	state_entity->identifier = real_state_ident;
+	add_entity(ctx, ctx->scope, real_state_ident, state_entity);
+	DeclInfo *decl = make_decl_info(ctx->scope, ctx->decl);
+	add_entity_and_decl_info(ctx, real_state_ident, state_entity, decl);
+	set_range_stmt_iterator_overload_state_entity(ctx, cast(Ast *)rs, state_entity);
+
+	// Rebuild call with the real state variable.
+	Ast *real_state_addr = ast_unary_expr(f, and_token, real_state_ident);
+	auto real_args = array_make<Ast *>(temporary_allocator(), 0, 2);
+	array_add(&real_args, rs->expr);
+	array_add(&real_args, real_state_addr);
+	Ast *real_proc_expr = ast_ident(f, proc_token);
+	Ast *real_call = ast_call_expr(f, real_proc_expr, real_args, open, close, {});
+	ast_node(real_ce, CallExpr, real_call);
+	AstSplitArgs *real_split_args = gb_alloc_item(temporary_allocator(), AstSplitArgs);
+	real_split_args->positional = slice_from_array(real_args);
+	real_split_args->named = {};
+	real_ce->split_args = real_split_args;
+
+	Operand real_overload_operand = {};
+	real_overload_operand.mode = Addressing_ProcGroup;
+	real_overload_operand.proc_group = &proc_group;
+	real_overload_operand.expr = real_proc_expr;
+	check_call_expr(ctx, &real_overload_operand, real_call, nullptr, slice_from_array(real_args), ProcInlining_none, ProcTailing_none, nullptr);
+	if (real_overload_operand.mode == Addressing_Invalid || real_overload_operand.type == nullptr || real_overload_operand.type == t_invalid) {
+		return false;
+	}
+	add_type_and_value(ctx, real_call, real_overload_operand.mode, real_overload_operand.type, real_overload_operand.value);
+	rs->expr = real_call;
+	real_overload_operand.expr = real_call;
+	*container_operand = real_overload_operand;
+	return true;
+}
+
 gb_internal bool check_stmt_internal_builtin_proc_id(Ast *expr, BuiltinProcId *id_) {
 	BuiltinProcId id = BuiltinProc_Invalid;
 	Entity *e = entity_of_node(expr);
@@ -1857,6 +2107,14 @@ gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags)
 					}
 				}
 			}
+
+			if (check_range_stmt_custom_iterator_overload(ctx, rs, &operand)) {
+				expr = unparen_expr(rs->expr);
+				if (operand.mode == Addressing_Invalid) {
+					goto skip_expr_range_stmt;
+				}
+			}
+
 			bool is_ptr = is_type_pointer(operand.type);
 			Type *t = base_type(type_deref(operand.type));
 
@@ -2549,6 +2807,19 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 			error(as->op, "Missing LHS in assignment statement");
 			return;
 		}
+		if (lhs_count == 1 && as->rhs.count == 1) {
+			Ast *lhs_expr = unparen_expr(as->lhs[0]);
+			if (lhs_expr->kind == Ast_IndexExpr) {
+				Operand setter_call = {};
+				if (check_index_set_expr_custom_overload(ctx, &setter_call, lhs_expr, as->rhs[0])) {
+					if (setter_call.mode == Addressing_Invalid) {
+						return;
+					}
+					set_assignment_overloaded_call_expr(ctx, node, setter_call.expr);
+					return;
+				}
+			}
+		}
 
 		TEMPORARY_ALLOCATOR_GUARD();
 
@@ -2597,21 +2868,81 @@ gb_internal void check_assign_stmt(CheckerContext *ctx, Ast *node) {
 			return;
 		}
 		Operand lhs = {Addressing_Invalid};
+		check_expr(ctx, &lhs, as->lhs[0]);
+		if (lhs.mode == Addressing_Invalid) {
+			return;
+		}
+
+		Token binary_op = op;
+		binary_op.kind = cast(TokenKind)(cast(i32)binary_op.kind - (Token_AddEq - Token_Add));
+		binary_op.string = substring(binary_op.string, 0, binary_op.string.len - 1);
+
+		Type *lhs_bt = base_type(lhs.type);
+		if (is_type_slice(lhs_bt) || is_type_dynamic_array(lhs_bt) || is_type_fixed_capacity_dynamic_array(lhs_bt)) {
+			Operand rhs_raw = {Addressing_Invalid};
+			check_expr(ctx, &rhs_raw, as->rhs[0]);
+			if (rhs_raw.mode == Addressing_Invalid) {
+				return;
+			}
+
+			Type *elem_type = base_any_array_type(lhs_bt);
+			Operand rhs_array = rhs_raw;
+			Operand rhs_elem  = rhs_raw;
+			bool rhs_is_container = check_is_assignable_to(ctx, &rhs_array, lhs.type);
+			bool rhs_is_scalar = false;
+			if (!rhs_is_container) {
+				rhs_is_scalar = check_is_assignable_to(ctx, &rhs_elem, elem_type);
+			}
+
+			if (!rhs_is_container && !rhs_is_scalar) {
+				gbString lhs_str = type_to_string(lhs.type);
+				gbString elem_str = type_to_string(elem_type);
+				TypeDiagnosticString type_strings[] = {
+					{&lhs_str, lhs.type},
+					{&elem_str, elem_type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(op, "Assignment operator '%.*s' with '%s' requires RHS assignable to '%s' or '%s'", LIT(op.string), *type_strings[0].value, *type_strings[0].value, *type_strings[1].value);
+				gb_string_free(elem_str);
+				gb_string_free(lhs_str);
+				return;
+			}
+
+			Operand elem_op = {};
+			elem_op.mode = Addressing_Value;
+			elem_op.type = elem_type;
+			elem_op.expr = as->lhs[0];
+			if (!check_binary_op(ctx, &elem_op, binary_op)) {
+				return;
+			}
+
+			Operand rhs = rhs_is_container ? rhs_array : rhs_elem;
+			rhs.mode = Addressing_Value;
+			rhs.type = lhs.type;
+			rhs.expr = as->rhs[0];
+			rhs.value = {};
+			check_assignment_variable(ctx, &lhs, &rhs, str_lit("assignment operation"));
+			return;
+		}
+
 		Operand rhs = {Addressing_Invalid};
 		Ast *binary_expr = alloc_ast_node(node->file(), Ast_BinaryExpr);
 		ast_node(be, BinaryExpr, binary_expr);
 		be->op = op;
-		be->op.kind = cast(TokenKind)(cast(i32)be->op.kind - (Token_AddEq - Token_Add));
+		be->op.kind = binary_op.kind;
 		// NOTE(bill): Only use the first one will be used
 		be->left  = as->lhs[0];
 		be->right = as->rhs[0];
 
-		check_expr(ctx, &lhs, as->lhs[0]);
 		check_binary_expr(ctx, &rhs, binary_expr, nullptr, true);
 		if (rhs.mode != Addressing_Invalid) {
-			be->op.string = substring(be->op.string, 0, be->op.string.len - 1);
+			be->op.string = binary_op.string;
+			add_type_and_value(ctx, binary_expr, rhs.mode, rhs.type, rhs.value);
 			rhs.expr = binary_expr;
 			check_assignment_variable(ctx, &lhs, &rhs, str_lit("assignment operation"));
+			if (get_overloaded_operator_call_expr(ctx->info, binary_expr) != nullptr) {
+				set_assignment_operation_expr(ctx, node, binary_expr);
+			}
 		}
 	}
 }
@@ -2649,9 +2980,86 @@ gb_internal void check_if_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 	check_close_scope(ctx);
 }
 
+gb_internal Ast *scope_exit_opener_call(Ast *stmt) {
+	if (stmt == nullptr) {
+		return nullptr;
+	}
+	Ast *expr = nullptr;
+	switch (stmt->kind) {
+	case Ast_ExprStmt:
+		expr = stmt->ExprStmt.expr;
+		break;
+	case Ast_AssignStmt:
+		if (stmt->AssignStmt.rhs.count == 1) {
+			expr = stmt->AssignStmt.rhs[0];
+		}
+		break;
+	case Ast_ValueDecl:
+		if (stmt->ValueDecl.values.count == 1) {
+			expr = stmt->ValueDecl.values[0];
+		}
+		break;
+	}
+	expr = unparen_expr(expr);
+	return expr != nullptr && expr->kind == Ast_CallExpr ? expr : nullptr;
+}
+
+gb_internal void check_with_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
+	ast_node(ws, WithStmt, node);
+	check_open_scope(ctx, node);
+	check_label(ctx, ws->label, node);
+
+	if (ws->init != nullptr) {
+		check_stmt(ctx, ws->init, 0);
+	}
+
+	Ast *opener_call = scope_exit_opener_call(ws->opener);
+	if (opener_call == nullptr) {
+		error(ws->opener, "A 'with' opener must be a direct scope-exit call or a declaration/assignment whose RHS is one");
+	} else {
+		bool prev_allow = ctx->allow_scope_exit_opener;
+		ctx->allow_scope_exit_opener = true;
+		check_stmt(ctx, ws->opener, 0);
+		ctx->allow_scope_exit_opener = prev_allow;
+
+		Entity *entity = entity_of_node(opener_call);
+		if (entity == nullptr ||
+		    (entity->kind != Entity_Procedure) ||
+		    (!entity_has_scope_exit_contract(entity) && !entity_has_deferred_procedure(entity))) {
+			error(opener_call, "A 'with' opener must call a procedure with a scope-exit contract or legacy deferred attribute");
+		}
+	}
+
+	if (ws->body == nullptr || ws->body->kind != Ast_BlockStmt) {
+		error(node, "A 'with' statement requires a block body");
+	} else {
+		check_stmt_list(ctx, ws->body->BlockStmt.stmts, mod_flags);
+	}
+
+	check_close_scope(ctx);
+}
+
 // NOTE(bill): This is very basic escape analysis
 // This needs to be improved tremendously, and a lot of it done during the
 // middle-end (or LLVM side) to improve checks and error messages
+gb_internal bool is_expr_based_on_pointer(Ast *expr) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr) {
+		return false;
+	}
+
+	switch (expr->kind) {
+	case_ast_node(se, SelectorExpr, expr);
+		return is_expr_based_on_pointer(se->expr);
+	case_end;
+	case_ast_node(de, DerefExpr, expr);
+		return is_type_pointer(type_of_expr(de->expr));
+	case_end;
+	}
+
+	return is_type_pointer(type_of_expr(expr));
+}
+
 void check_unsafe_return(Operand const &o, Type *type, Ast *expr) {
 	auto const unsafe_return_error = [](Operand const &o, char const *msg, Type *extra_type=nullptr) {
 		gbString s = expr_to_string(o.expr);
@@ -2685,7 +3093,7 @@ void check_unsafe_return(Operand const &o, Type *type, Ast *expr) {
 		} else if (x->kind == Ast_IndexExpr) {
 			Entity *f = entity_of_node(x->IndexExpr.expr);
 			if (f && (is_type_array_like(f->type) || is_type_matrix(f->type))) {
-				if (is_entity_local_variable(f)) {
+				if (is_entity_local_variable(f) && !is_expr_based_on_pointer(x->IndexExpr.expr)) {
 					unsafe_return_error(o, "the address of an indexed variable", f->type);
 				}
 			}
@@ -2883,6 +3291,10 @@ gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) 
 		check_if_stmt(ctx, node, mod_flags);
 	case_end;
 
+	case_ast_node(ws, WithStmt, node);
+		check_with_stmt(ctx, node, mod_flags);
+	case_end;
+
 	case_ast_node(ws, WhenStmt, node);
 		check_when_stmt(ctx, ws, flags);
 	case_end;
@@ -3024,6 +3436,7 @@ gb_internal void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) 
 			switch (parent->kind) {
 			case Ast_BlockStmt:
 			case Ast_IfStmt:
+			case Ast_WithStmt:
 			case Ast_SwitchStmt:
 			case Ast_TypeSwitchStmt:
 				if (token.kind != Token_break) {

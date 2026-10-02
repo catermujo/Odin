@@ -50,6 +50,28 @@
 	optimization of Odin programs	
 **************************************************************************/
 
+gb_internal bool lb_is_float_or_float_vector_llvm_type(LLVMTypeRef t) {
+	if (t == nullptr) {
+		return false;
+	}
+
+	switch (LLVMGetTypeKind(t)) {
+	case LLVMHalfTypeKind:
+	case LLVMFloatTypeKind:
+	case LLVMDoubleTypeKind:
+	case LLVMX86_FP80TypeKind:
+	case LLVMFP128TypeKind:
+	case LLVMPPC_FP128TypeKind:
+		return true;
+
+	case LLVMVectorTypeKind:
+		return lb_is_float_or_float_vector_llvm_type(LLVMGetElementType(t));
+
+	default:
+		return false;
+	}
+}
+
 gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 	Entity *e = p->entity;
 	if (e == nullptr) {
@@ -60,16 +82,26 @@ gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 
 	u64 fast_math_flags = e->Procedure.fast_math_flags;
 	LLVMFastMathFlags llvm_flags = 0;
-	if (fast_math_flags & OdinFastMath_Allow_Reassoc)    llvm_flags |= LLVMFastMathAllowReassoc;
-	if (fast_math_flags & OdinFastMath_No_NaNs)          llvm_flags |= LLVMFastMathNoNaNs;
-	if (fast_math_flags & OdinFastMath_No_Infs)          llvm_flags |= LLVMFastMathNoInfs;
-	if (fast_math_flags & OdinFastMath_No_Signed_Zeros)  llvm_flags |= LLVMFastMathNoSignedZeros;
-	if (fast_math_flags & OdinFastMath_Allow_Reciprocal) llvm_flags |= LLVMFastMathAllowReciprocal;
-	if (fast_math_flags & OdinFastMath_Allow_Contract)   llvm_flags |= LLVMFastMathAllowContract;
-	if (fast_math_flags & OdinFastMath_Approx_Func)      llvm_flags |= LLVMFastMathApproxFunc;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Reassoc))    llvm_flags |= LLVMFastMathAllowReassoc;
+	if (fast_math_flags & (1ull << OdinFastMath_No_NaNs))          llvm_flags |= LLVMFastMathNoNaNs;
+	if (fast_math_flags & (1ull << OdinFastMath_No_Infs))          llvm_flags |= LLVMFastMathNoInfs;
+	if (fast_math_flags & (1ull << OdinFastMath_No_Signed_Zeros))  llvm_flags |= LLVMFastMathNoSignedZeros;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Reciprocal)) llvm_flags |= LLVMFastMathAllowReciprocal;
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Contract))   llvm_flags |= LLVMFastMathAllowContract;
+	if (fast_math_flags & (1ull << OdinFastMath_Approx_Func))      llvm_flags |= LLVMFastMathApproxFunc;
 
 	if (llvm_flags == 0) {
 		return;
+	}
+
+	if (fast_math_flags & (1ull << OdinFastMath_Allow_Contract)) {
+		char const *name = "fp-contract";
+		char const *value = "fast";
+		LLVMAttributeRef attr = LLVMCreateStringAttribute(
+			p->module->ctx,
+			name, cast(unsigned)gb_strlen(name),
+			value, cast(unsigned)gb_strlen(value));
+		LLVMAddAttributeAtIndex(p->value, LLVMAttributeIndex_FunctionIndex, attr);
 	}
 
 	for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(p->value);
@@ -92,7 +124,15 @@ gb_internal void lb_run_fast_float_math_pass(lbProcedure *p) {
 			case LLVMFPTrunc:
 			case LLVMFPExt:
 			case LLVMFCmp:
+			case LLVMPHI:
+			case LLVMSelect:
 				LLVMSetFastMathFlags(instr, llvm_flags);
+				break;
+			case LLVMCall:
+			case LLVMInvoke:
+				if (lb_is_float_or_float_vector_llvm_type(LLVMTypeOf(instr))) {
+					LLVMSetFastMathFlags(instr, llvm_flags);
+				}
 				break;
 			}
 		}
@@ -487,5 +527,3 @@ gb_internal void lb_run_remove_unused_globals_pass(lbModule *m) {
 		}
 	}
 }
-
-

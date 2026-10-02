@@ -5,7 +5,7 @@ OPENEXRCORE_SHARED :: #config(OPENEXRCORE_SHARED, false)
 
 when ODIN_OS == .Windows {
 	when OPENEXRCORE_SHARED {
-		#panic("Dynamic linking is not supported for OpenEXRCore yet")
+		#panic("Dynamic linking is not supported for OpenEXRCore yet", #trigger_location)
 	} else {
 		foreign import lib_ "OpenEXRCore-3_3.lib"
 	}

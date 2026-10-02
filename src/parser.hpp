@@ -89,6 +89,18 @@ struct ImportedFile {
 	isize       index;
 };
 
+enum OdinFastMathFlag : u8 {
+	OdinFastMath_Allow_Reassoc    = 0,
+	OdinFastMath_No_NaNs          = 1,
+	OdinFastMath_No_Infs          = 2,
+	OdinFastMath_No_Signed_Zeros  = 3,
+	OdinFastMath_Allow_Reciprocal = 4,
+	OdinFastMath_Allow_Contract   = 5,
+	OdinFastMath_Approx_Func      = 6,
+
+	OdinFastMath_COUNT,
+};
+
 enum AstFileFlag : u32 {
 	AstFile_IsPrivatePkg = 1<<0,
 	AstFile_IsPrivateFile = 1<<1,
@@ -96,6 +108,8 @@ enum AstFileFlag : u32 {
 	AstFile_IsLazy    = 1<<4,
 
 	AstFile_NoInstrumentation = 1<<5,
+	AstFile_HasDeferredBuildTags = 1<<6,
+	AstFile_ExcludedByDeferredBuildTags = 1<<7,
 };
 
 enum AstDelayQueueKind {
@@ -128,6 +142,7 @@ struct AstFile {
 
 	u64          vet_flags;
 	u64          feature_flags;
+	u64          fast_math_flags;
 	bool         vet_flags_set;
 	bool         feature_flags_set;
 
@@ -153,6 +168,8 @@ struct AstFile {
 	ParseFileError last_error;
 	f64            time_to_tokenize; // seconds
 	f64            time_to_parse;    // seconds
+	Array<String>  deferred_build_tags;
+	Array<struct WhenExpr *> deferred_when_exprs;
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
 	CommentGroup *line_comment;     // Comment after the semicolon
@@ -233,6 +250,7 @@ struct Parser {
 	std::atomic<isize>     file_to_process_count;
 	std::atomic<isize>     total_token_count;
 	std::atomic<isize>     total_line_count;
+	std::atomic<bool>      has_deferred_build_tag_files;
 
 	std::atomic<isize>     total_seen_load_directive_count;
 
@@ -283,6 +301,8 @@ enum ProcTag {
 	ProcTag_require_results = 1<<4,
 	ProcTag_optional_ok     = 1<<5,
 	ProcTag_optional_allocator_error = 1<<6,
+	ProcTag_downcast_assert    = 1<<7,
+	ProcTag_no_downcast_assert = 1<<8,
 };
 
 enum ProcCallingConvention : i32 {
@@ -335,11 +355,13 @@ gb_internal ProcCallingConvention default_calling_convention(void) {
 	return ProcCC_Odin;
 }
 
-enum StateFlag : u8 {
+enum StateFlag : u16 {
 	StateFlag_bounds_check    = 1<<0,
 	StateFlag_no_bounds_check = 1<<1,
 	StateFlag_type_assert     = 1<<2,
 	StateFlag_no_type_assert  = 1<<3,
+	StateFlag_downcast_assert    = 1<<8,
+	StateFlag_no_downcast_assert = 1<<9,
 
 	StateFlag_SelectorCallExpr = 1<<5,
 	StateFlag_DirectiveWasFalse = 1<<6,
@@ -464,6 +486,7 @@ struct AsmMemClassify {
 	AST_KIND(ProcLit, "procedure literal", struct { \
 		Ast *type; \
 		Ast *body; \
+		Ast *scope_exit_contract; \
 		u64  tags; \
 		ProcInlining inlining; \
 		ProcTailing  tailing; \
@@ -699,6 +722,14 @@ AST_KIND(_ComplexStmtBegin, "", bool) \
 		bool partial; \
 	}) \
 	AST_KIND(DeferStmt,  "defer statement",  struct { Token token; Ast *stmt; }) \
+	AST_KIND(WithStmt, "with statement", struct { \
+		Scope *scope; \
+		Token token; \
+		Ast *label; \
+		Ast *init; \
+		Ast *opener; \
+		Ast *body; \
+	}) \
 	AST_KIND(BranchStmt, "branch statement", struct { Token token; Ast *label; }) \
 	AST_KIND(UsingStmt,  "using statement",  struct { \
 		Token token; \
@@ -762,6 +793,13 @@ AST_KIND(_DeclEnd,   "", bool) \
 		Slice<Ast *> elems; \
 		Token open, close;  \
 	}) \
+	AST_KIND(ScopeExit, "scope exit contract", struct { \
+		Token token; \
+		Ast *policy; \
+		Ast *cleanup; \
+		Token open; \
+		Token close; \
+	}) \
 	AST_KIND(Field, "field", struct { \
 		Slice<Ast *> names;         \
 		Ast *        type;          \
@@ -810,6 +848,8 @@ AST_KIND(_TypeBegin, "", bool) \
 		ProcCallingConvention calling_convention; \
 		bool generic; \
 		bool diverging; \
+		bool is_lambda; /* 'lambda' keyword variant; carries a capture list and lowers to a closure */ \
+		Slice<Ast *> captures; /* capture entries: Ast_Ident = by value, &ident (UnaryExpr) = by reference */ \
 	}) \
 	AST_KIND(PointerType, "pointer type", struct { \
 		Token token; \
@@ -933,7 +973,7 @@ gb_global isize const ast_variant_sizes[] = {
 
 struct AstCommonStuff {
 	AstKind         kind; // u16
-	u8              state_flags;
+	u16             state_flags;
 	std::atomic<u8> viral_state_flags;
 	i32             file_id;
 	TypeAndValue    tav; // NOTE(bill): Making this a pointer is slower
@@ -941,7 +981,7 @@ struct AstCommonStuff {
 
 struct Ast {
 	AstKind         kind; // u16
-	u8              state_flags;
+	u16             state_flags;
 	std::atomic<u8> viral_state_flags;
 	i32             file_id;
 	TypeAndValue    tav; // NOTE(bill): Making this a pointer is slower
@@ -997,6 +1037,39 @@ gb_internal gb_inline bool is_ast_when_stmt(Ast *node) {
 gb_internal gb_inline gbAllocator ast_allocator(AstFile *f) {
 	return permanent_allocator();
 }
+
+enum BuildTagConditionValue {
+	BuildTagCondition_False,
+	BuildTagCondition_True,
+	BuildTagCondition_Unknown,
+};
+
+enum WhenExprKind {
+	WhenExpr_Ident,
+	WhenExpr_Integer,
+	WhenExpr_Bool,
+	WhenExpr_Unary,
+	WhenExpr_Binary,
+};
+
+struct WhenExpr {
+	WhenExprKind kind;
+	TokenPos pos;
+	union {
+		String       ident;
+		i64          integer;
+		bool         boolean;
+		struct { WhenExpr *expr; i32 op; } unary;
+		struct { WhenExpr *left, *right; i32 op; } binary;
+	};
+};
+
+typedef BuildTagConditionValue WhenExprIdentResolverProc(void *user_data, TokenPos pos, String name, ExactValue *value);
+
+gb_internal WhenExpr *parse_when_tag_expr(String s, TokenPos pos);
+gb_internal BuildTagConditionValue evaluate_when_tag_expr(WhenExpr *expr, WhenExprIdentResolverProc *resolver, void *user_data, ExactValue *value);
+
+gb_internal BuildTagConditionValue evaluate_build_tag_condition(Token token_for_pos, String s);
 
 gb_internal Ast *alloc_ast_node(AstFile *f, AstKind kind);
 

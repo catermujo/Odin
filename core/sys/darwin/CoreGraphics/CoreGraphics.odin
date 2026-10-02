@@ -19,7 +19,9 @@ foreign CoreGraphics {
 	GetOnlineDisplayList                 :: proc(maxDisplays: c.uint32_t, onlineDisplays: [^]DirectDisplayID, displayCount: ^c.uint32_t) -> Error ---
 	MainDisplayID                        :: proc() -> DirectDisplayID ---
 	OpenGLDisplayMaskToDisplayID         :: proc(mask: OpenGLDisplayMask) -> DirectDisplayID ---
+	SessionCopyCurrentDictionary         :: proc() -> CF.Dictionary ---
 	WarpMouseCursorPosition              :: proc(newCursorPosition: Point) -> Error ---
+	WindowLevelForKey                    :: proc(key: WindowLevelKey) -> WindowLevel ---
 }
 
 DirectDisplayID :: c.uint32_t
@@ -47,6 +49,32 @@ EventSourceStateID :: enum c.int32_t {
 Float :: CF.CGFloat
 
 KeyCode :: c.uint16_t
+
+WindowLevel :: c.int32_t
+
+WindowLevelKey :: enum c.int32_t {
+	Base              = 0,
+	Minimum           = 1,
+	Desktop           = 2,
+	BackstopMenu      = 3,
+	Normal            = 4,
+	Floating          = 5,
+	TornOffMenu       = 6,
+	Dock              = 7,
+	MainMenu          = 8,
+	Status            = 9,
+	ModalPanel        = 10,
+	PopUpMenu         = 11,
+	Dragging          = 12,
+	ScreenSaver       = 13,
+	Maximum           = 14,
+	Overlay           = 15,
+	Help              = 16,
+	Utility           = 17,
+	DesktopIcon       = 18,
+	Cursor            = 19,
+	AssistiveTechHigh = 20,
+}
 
 OpenGLDisplayMask :: c.uint32_t
 

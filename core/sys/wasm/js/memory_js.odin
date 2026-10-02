@@ -4,12 +4,19 @@ package wasm_js_interface
 import "base:runtime"
 import "base:intrinsics"
 
+foreign import emscripten "env"
+
+foreign emscripten {
+	emscripten_notify_memory_growth :: proc "contextless" (memory_index: u32) ---
+}
+
 PAGE_SIZE :: 64 * 1024
 page_alloc :: proc(page_count: int) -> (data: []byte, err: runtime.Allocator_Error) {
 	prev_page_count := intrinsics.wasm_memory_grow(0, uintptr(page_count))
 	if prev_page_count < 0 {
 		return nil, .Out_Of_Memory
 	}
+	emscripten_notify_memory_growth(0)
 
 	ptr := ([^]u8)(uintptr(prev_page_count) * PAGE_SIZE)
 	return ptr[:page_count * PAGE_SIZE], nil
@@ -41,4 +48,3 @@ page_allocator :: proc() -> runtime.Allocator {
 		data = nil,
 	}
 }
-

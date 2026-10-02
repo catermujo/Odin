@@ -1650,7 +1650,7 @@ DYNAMIC_ARENA_OUT_OF_BAND_SIZE_DEFAULT :: 6554
 /*
 Dynamic arena allocator data.
 */
-Dynamic_Arena :: struct {
+Dynamic_Arena :: struct #no_copy {
 	block_size:           int,
 	out_band_size:        int,
 	minimum_alignment:    int,
@@ -1721,11 +1721,11 @@ Destroy a dynamic arena.
 This procedure frees all allocations made on a dynamic arena, including the
 unused blocks, as well as the arrays for storing blocks.
 */
-dynamic_arena_destroy :: proc(a: ^Dynamic_Arena) {
-	dynamic_arena_free_all(a)
-	delete(a.unused_blocks)
-	delete(a.used_blocks)
-	delete(a.out_band_allocations)
+dynamic_arena_destroy :: proc(a: ^Dynamic_Arena, loc := #caller_location) {
+	dynamic_arena_free_all(a, loc)
+	delete(a.unused_blocks, loc)
+	delete(a.used_blocks, loc)
+	delete(a.out_band_allocations, loc)
 	zero(a, size_of(a^))
 }
 

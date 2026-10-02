@@ -152,6 +152,7 @@ struct TypeStruct {
 	Wait_Signal     polymorphic_wait_signal;
 
 	Type *          soa_elem;
+	Type *          soa_index;
 	i32             soa_count;
 	StructSoaKind   soa_kind;
 	Wait_Signal     fields_wait_signal;
@@ -162,6 +163,7 @@ struct TypeStruct {
 	bool            are_offsets_set             : 1;
 	bool            is_packed                   : 1;
 	bool            is_raw_union                : 1;
+	bool            is_no_copy                  : 1;
 	bool            is_all_or_none              : 1;
 	bool            is_simple                   : 1;
 	bool            is_poly_specialized         : 1;
@@ -210,6 +212,13 @@ struct TypeProc {
 	bool     diverging; // no return
 	bool     return_by_pointer;
 	bool     optional_ok;
+	// closures (the 'lambda' keyword). A closure value is a 2-word {fn_ptr, env_ptr} fat
+	// pointer instead of a bare function pointer. `captures` holds the body-local shadow entities
+	// (one per capture, in env-field order); each shadow's aliased_of points at the captured outer
+	// variable and Variable.field_index is its env slot.
+	bool     is_closure;
+	Slice<Entity *> captures;
+	Type *   env_type; // anonymous struct laying out the captured environment (one field per capture)
 };
 
 struct TypeNamed {
@@ -324,7 +333,7 @@ enum TypeKind {
 	Type_Count,
 };
 
-gb_global String const type_strings[] = {
+gb_global String const type_kind_strings[] = {
 	{cast(u8 *)"Invalid", gb_size_of("Invalid")},
 #define TYPE_KIND(k, ...) {cast(u8 *)#k, gb_size_of(#k)-1},
 	TYPE_KINDS
@@ -411,6 +420,7 @@ enum : int {
 
 gb_internal bool is_type_comparable(Type *t);
 gb_internal bool is_type_simple_compare(Type *t);
+gb_internal bool is_type_trivially_copyable(Type *t);
 gb_internal Type *type_deref(Type *t, bool allow_multi_pointer=false);
 gb_internal Type *base_type(Type *t);
 gb_internal Type *alloc_type_multi_pointer(Type *elem);
@@ -808,18 +818,6 @@ gb_global Type *t_atomic_memory_order = nullptr;
 
 
 
-
-enum OdinFastMathFlag : u8 {
-	OdinFastMath_Allow_Reassoc    = 0,
-	OdinFastMath_No_NaNs          = 1,
-	OdinFastMath_No_Infs          = 2,
-	OdinFastMath_No_Signed_Zeros  = 3,
-	OdinFastMath_Allow_Reciprocal = 4,
-	OdinFastMath_Allow_Contract   = 5,
-	OdinFastMath_Approx_Func      = 6,
-
-	OdinFastMath_COUNT,
-};
 
 char const *OdinFastMathFlag_strings[OdinFastMath_COUNT] = {
 	"Allow_Reassoc",
@@ -1752,6 +1750,12 @@ gb_internal bool is_type_proc(Type *t) {
 	if (t == nullptr) { return false; }
 	return t->kind == Type_Proc;
 }
+// a closure is a 'lambda' value: a 2-word {fn, env} fat pointer rather than a bare function pointer.
+gb_internal bool is_type_closure(Type *t) {
+	t = base_type(t);
+	if (t == nullptr) { return false; }
+	return t->kind == Type_Proc && t->Proc.is_closure;
+}
 gb_internal bool is_type_asm_proc(Type *t) {
 	t = base_type(t);
 	if (t == nullptr) { return false; }
@@ -2039,6 +2043,11 @@ gb_internal bool is_type_raw_union(Type *t) {
 	t = base_type(t);
 	if (t == nullptr) { return false; }
 	return (t->kind == Type_Struct && t->Struct.is_raw_union);
+}
+gb_internal bool is_type_no_copy(Type *t) {
+	t = base_type(t);
+	if (t == nullptr) { return false; }
+	return (t->kind == Type_Struct && t->Struct.is_no_copy);
 }
 gb_internal bool is_type_enum(Type *t) {
 	t = base_type(t);
@@ -2782,6 +2791,10 @@ gb_internal bool elem_type_can_be_constant(Type *t) {
 	if (is_type_any(t)) {
 		return false;
 	}
+	if (is_type_closure(t)) {
+		// a closure carries a runtime environment pointer, so it can never be a compile-time constant.
+		return false;
+	}
 	if (is_type_raw_union(t)) {
 		return is_type_raw_union_constantable(t);
 	}
@@ -2817,83 +2830,121 @@ gb_internal bool is_type_lock_free(Type *t) {
 
 
 
-gb_internal bool is_type_comparable(Type *t) {
+gb_internal bool is_type_comparable_internal(Type *t, PtrSet<Type *> *visiting) {
 	t = base_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	// Recursive value types are invalid, but must not recurse until the checker stack overflows
+	// before check_for_type_cycles can report the declaration error.
+	if (ptr_set_update(visiting, t)) {
+		return false;
+	}
+
+	bool result = false;
 	switch (t->kind) {
 	case Type_Basic:
 		switch (t->Basic.kind) {
 		case Basic_UntypedNil:
 		case Basic_any:
-			return false;
+			result = false;
+			break;
 		case Basic_rune:
-			return true;
 		case Basic_string:
 		case Basic_cstring:
 		case Basic_string16:
 		case Basic_cstring16:
-			return true;
 		case Basic_typeid:
-			return true;
+			result = true;
+			break;
+		default:
+			result = true;
+			break;
 		}
-		return true;
+		break;
 	case Type_Pointer:
-		return true;
 	case Type_SoaPointer:
-		return true;
 	case Type_MultiPointer:
-		return true;
+		result = true;
+		break;
 	case Type_Enum:
-		return is_type_comparable(core_type(t));
+		result = is_type_comparable_internal(core_type(t), visiting);
+		break;
 	case Type_EnumeratedArray:
-		return is_type_comparable(t->EnumeratedArray.elem);
+		result = is_type_comparable_internal(t->EnumeratedArray.elem, visiting);
+		break;
 	case Type_Array:
-		return is_type_comparable(t->Array.elem);
+		result = is_type_comparable_internal(t->Array.elem, visiting);
+		break;
 	case Type_Proc:
-		return true;
+		// bare procs compare as function pointers; a closure is a 2-word {fn,env} aggregate and is
+		// not comparable (matching slices/maps), which also keeps the scalar-compare codegen path unreached.
+		result = !t->Proc.is_closure;
+		break;
 	case Type_Matrix:
-		return is_type_comparable(t->Matrix.elem);
+		result = is_type_comparable_internal(t->Matrix.elem, visiting);
+		break;
 
 	case Type_FixedCapacityDynamicArray:
-		return false;
+		result = false;
+		break;
 
 	case Type_BitSet:
-		return true;
+		result = true;
+		break;
 
 	case Type_Struct:
 		if (t->Struct.soa_kind != StructSoa_None) {
-			return false;
+			break;
 		}
 		// an unspecialized polymorphic record has no values to compare
 		if (is_type_polymorphic_record_unspecialized(t)) {
-			return false;
+			break;
 		}
 		if (t->Struct.is_raw_union) {
-			return is_type_simple_compare(t);
+			result = is_type_simple_compare(t);
+			break;
 		}
+		result = true;
 		for_array(i, t->Struct.fields) {
 			Entity *f = t->Struct.fields[i];
-			if (!is_type_comparable(f->type)) {
-				return false;
+			if (!is_type_comparable_internal(f->type, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_Union:
+		result = true;
 		for_array(i, t->Union.variants) {
 			Type *v = t->Union.variants[i];
-			if (!is_type_comparable(v)) {
-				return false;
+			if (!is_type_comparable_internal(v, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_SimdVector:
-		return true;
+		result = true;
+		break;
 
 	case Type_BitField:
-		return is_type_comparable(t->BitField.backing_type);
+		result = is_type_comparable_internal(t->BitField.backing_type, visiting);
+		break;
 	}
-	return false;
+
+	ptr_set_remove(visiting, t);
+	return result;
+}
+
+gb_internal bool is_type_comparable(Type *t) {
+	PtrSet<Type *> visiting = {};
+	ptr_set_init(&visiting);
+	bool result = is_type_comparable_internal(t, &visiting);
+	ptr_set_destroy(&visiting);
+	return result;
 }
 
 // NOTE(bill): type can be easily compared using memcmp
@@ -2922,10 +2973,12 @@ gb_internal bool is_type_simple_compare(Type *t) {
 	case Type_Pointer:
 	case Type_MultiPointer:
 	case Type_SoaPointer:
-	case Type_Proc:
 	case Type_BitSet:
 	case Type_BitField:
 		return true;
+	case Type_Proc:
+		// closures are 2-word aggregates and not (simply) comparable; bare procs are pointers.
+		return !t->Proc.is_closure;
 
 	case Type_Matrix:
 		return is_type_simple_compare(t->Matrix.elem);
@@ -3040,6 +3093,135 @@ gb_internal bool is_type_nearly_simple_compare(Type *t) {
 	case Type_Map:
 		return false;
 
+	}
+
+	return false;
+}
+
+// A pointer-shaped primitive: a type whose value is (or holds) a raw address.
+// Pointers themselves are trivially copyable, but a struct/union/array that
+// *contains* a pointer-typed field is not — the user rule is "a struct
+// containing pointers is not [POD]", and we extend that to any aggregate.
+gb_internal bool is_pointer_typed_primitive(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+	case Type_Proc:           // function pointer (bare proc)
+		return true;
+	case Type_Basic:
+		return (t->Basic.flags & BasicFlag_Pointer) != 0; // rawptr, uintptr
+	}
+	return false;
+}
+
+// NOTE: A type is "trivially copyable" if memcpy() of a value of this type
+// yields a fully usable copy. Pointers themselves qualify — ^T, rawptr,
+// uintptr, bare procs are all just addresses, fine to copy. But an aggregate
+// that contains a pointer field is NOT trivially copyable: the copy's pointer
+// still aliases the original's pointee, so the copy is lifetime-tied to
+// something else (string data, slice data, dynarray data, map internals,
+// closure env, ...). Bare pointer values are explicit about this; aggregate
+// pointer fields are easy to miss.
+//
+// Trivially copyable: numerics, bool, rune, rawptr, uintptr, typeid, ^T,
+// [^]T, ^#soa[N]T, bare procs, enums, bit sets, bit fields, arrays /
+// enumerated arrays / simd vectors / matrices / fixed-capacity dynamic arrays
+// of trivially copyable element, structs (incl. soa structs and raw unions)
+// where every field is trivially copyable AND no field is a pointer-typed
+// primitive, unions where every variant is trivially copyable AND no variant
+// is a pointer-typed primitive, generic T.
+//
+// NOT trivially copyable: string/cstring/string16/cstring16, []T, [dynamic]T,
+// map[K]V, any, closures (they're an aggregate with the env pointer field).
+gb_internal bool is_type_trivially_copyable(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Basic:
+		// numerics, bool, rune, rawptr, uintptr, typeid
+		if (t->Basic.flags & (BasicFlag_Numeric | BasicFlag_Boolean | BasicFlag_Rune | BasicFlag_Pointer)) {
+			return true;
+		}
+		return t->Basic.kind == Basic_typeid;
+
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+		return true;
+
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *e = t->Array.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_FixedCapacityDynamicArray: {
+		Type *e = t->FixedCapacityDynamicArray.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_SimdVector: {
+		Type *e = t->SimdVector.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_Matrix: {
+		Type *e = t->Matrix.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_BitSet:
+	case Type_Enum:
+	case Type_BitField:
+		return true;
+
+	case Type_Proc:
+		// Bare procs are just code addresses.
+		// Closures are {fn, env} — env is a pointer field → not POD.
+		return !t->Proc.is_closure;
+
+	case Type_Struct:
+		for_array(i, t->Struct.fields) {
+			Entity *f = t->Struct.fields[i];
+			if (!is_type_trivially_copyable(f->type)) return false;
+			if (is_pointer_typed_primitive(f->type))  return false;
+		}
+		return true;
+
+	case Type_Union:
+		for_array(i, t->Union.variants) {
+			Type *v = t->Union.variants[i];
+			if (!is_type_trivially_copyable(v)) return false;
+			if (is_pointer_typed_primitive(v))  return false;
+		}
+		return true;
+
+	case Type_Generic:
+		// Unbound type parameter — assume trivially copyable.
+		return true;
+
+	case Type_Tuple:
+		for_array(i, t->Tuple.variables) {
+			Type *vt = t->Tuple.variables[i]->type;
+			if (!is_type_trivially_copyable(vt)) return false;
+			if (is_pointer_typed_primitive(vt))  return false;
+		}
+		return true;
 	}
 
 	return false;
@@ -3232,7 +3414,8 @@ gb_internal bool are_proc_properties_identical(Type *x, Type *y) {
 	       x->Proc.c_vararg    == y->Proc.c_vararg    &&
 	       x->Proc.variadic    == y->Proc.variadic    &&
 	       x->Proc.diverging   == y->Proc.diverging   &&
-	       x->Proc.optional_ok == y->Proc.optional_ok;
+	       x->Proc.optional_ok == y->Proc.optional_ok &&
+	       x->Proc.is_closure  == y->Proc.is_closure; // a closure type is never identical to a bare proc
 }
 
 gb_internal bool are_types_identical_internal(Type *x, Type *y, bool check_tuple_names) {
@@ -3364,6 +3547,7 @@ gb_internal bool are_types_identical_internal(Type *x, Type *y, bool check_tuple
 
 	case Type_Struct:
 		if (x->Struct.is_raw_union   == y->Struct.is_raw_union &&
+		    x->Struct.is_no_copy     == y->Struct.is_no_copy &&
 		    x->Struct.fields.count   == y->Struct.fields.count &&
 		    x->Struct.is_packed      == y->Struct.is_packed &&
 		    x->Struct.is_all_or_none == y->Struct.is_all_or_none &&
@@ -3643,19 +3827,13 @@ gb_internal Type *union_tag_type(Type *u) {
 	return t_uint;
 }
 
-gb_internal bool type_conversion_is_variant(Type *dst, Type *src) {
+gb_internal bool type_conversion_is_variant(Type *src, Type *dst) {
 	dst = base_type(core_broadcastable_elem_type(dst));
 	if (dst == nullptr) { return false; }
 
 	switch (dst->kind) {
 	case Type_Union:
-		if (union_is_variant_of(dst, src)) {
-			return true;
-		}
-		if (dst->Union.variants.count == 1) {
-			return type_conversion_is_variant(dst->Union.variants[0], src);
-		}
-		return false;
+		return union_is_variant_of(dst, src);
 	}
 	return false;
 }
@@ -4603,6 +4781,10 @@ gb_internal i64 type_align_of_internal(Type *t, TypePath *path) {
 
 	case Type_SoaPointer:
 		return build_context.int_size;
+
+	case Type_Proc:
+		// closures and bare procs are both pointer-aligned; only the size differs.
+		return build_context.ptr_size;
 	}
 
 	// NOTE(bill): Things that are bigger than build_context.ptr_size, are actually comprised of smaller types
@@ -4938,6 +5120,10 @@ gb_internal i64 type_size_of_internal(Type *t, TypePath *path) {
 			return FAILURE_SIZE;
 		}
 		return type_size_of_internal(t->BitField.backing_type, path);
+
+	case Type_Proc:
+		// a closure is a fat pointer {fn_ptr, env_ptr}; a bare proc is a single function pointer.
+		return t->Proc.is_closure ? 2*build_context.ptr_size : build_context.ptr_size;
 	}
 
 	// Catch all
@@ -5592,11 +5778,12 @@ gb_internal gbString write_type_to_string(gbString str, Type *type, bool shortha
 			str = gb_string_appendc(str, ")");
 		}
 
-		if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
-		if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
-		if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
-		if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
-		if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
+			if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
+			if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
+			if (type->Struct.is_no_copy)        str = gb_string_appendc(str, " #no_copy");
+			if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
+			if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
+			if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
 
 		str = gb_string_appendc(str, " {");
 

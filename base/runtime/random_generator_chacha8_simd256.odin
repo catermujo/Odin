@@ -192,6 +192,6 @@ _mm_mm256_extracti128_si256 :: #force_inline proc "c" (a: u32x8, $OFFSET: int) -
 	} else when OFFSET == 1 {
 		return intrinsics.simd_shuffle(a, a, 4, 5, 6, 7)
 	} else {
-		#panic("chacha8rand: invalid offset")
+		#panic("chacha8rand: invalid offset", #trigger_location)
 	}
 }

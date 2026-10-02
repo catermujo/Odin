@@ -1,4 +1,6 @@
 gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags);
+gb_internal bool is_type_no_copy(Type *t);
+gb_internal bool check_no_copy_assignment(Operand const &o, String const &context);
 
 // NOTE(bill): 'content_name' is for debugging and error messages
 gb_internal Type *check_init_variable(CheckerContext *ctx, Entity *e, Operand *operand, String context_name) {
@@ -140,6 +142,12 @@ gb_internal void check_init_variables(CheckerContext *ctx, Entity **lhs, isize l
 		check_init_variable(ctx, e, o, context_name);
 		if (d != nullptr) {
 			d->init_expr = o->expr;
+		}
+		if (o->type && is_type_no_copy(o->type)) {
+			ERROR_BLOCK();
+			if (check_no_copy_assignment(*o, str_lit("initialization"))) {
+				error_line("\tInitialization of a #no_copy type must be either implicitly zero, a constant literal, or a return value from a call expression");
+			}
 		}
 	}
 	if (rhs_count > 0 && lhs_count != rhs_count) {
@@ -721,11 +729,16 @@ gb_internal void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr
 					gbString expr_str = expr_to_string(init);
 					gbString op_type_str = type_to_string(entity->type);
 					gbString type_str = type_to_string(e->type);
+					TypeDiagnosticString type_strings[] = {
+						{&op_type_str, entity->type},
+						{&type_str, e->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(e->token,
 					      "Cannot assign '%s' of type '%s' to '%s'",
 					      expr_str,
-					      op_type_str,
-					      type_str);
+					      *type_strings[0].value,
+					      *type_strings[1].value);
 
 					gb_string_free(type_str);
 					gb_string_free(op_type_str);
@@ -996,9 +1009,6 @@ gb_internal Entity *init_entity_foreign_library(CheckerContext *ctx, Entity *e) 
 	} else {
 		String name = ident->Ident.token.string;
 		Entity *found = scope_lookup(ctx->scope, ident->Ident.interned, ident->Ident.hash);
-		if (found != nullptr) {
-			found = resolve_alias_entity(ctx, found, nullptr);
-		}
 
 		if (found == nullptr) {
 			if (is_blank_ident(name)) {
@@ -1285,13 +1295,199 @@ gb_internal void check_foreign_procedure(CheckerContext *ctx, Entity *e, DeclInf
 			      "\tat %s",
 			      LIT(name), token_pos_to_string(pos));
 		}
-	} else if (name == "main") {
+	} else if (name == "main" && !build_context.no_entry_point) {
 		error(d->proc_lit, "The link name 'main' is reserved for internal use");
 	} else {
 		string_map_set(fp, key, e);
 	}
 
 	mutex_unlock(&ctx->info->foreign_mutex);
+}
+
+gb_internal bool proc_type_ast_has_results(Ast *proc_type_node) {
+	if (proc_type_node == nullptr || proc_type_node->kind != Ast_ProcType) {
+		return false;
+	}
+
+	Ast *results = proc_type_node->ProcType.results;
+	if (results == nullptr || results->kind != Ast_FieldList) {
+		return false;
+	}
+	return results->FieldList.list.count > 0;
+}
+
+gb_internal bool find_scope_exit_binding(TypeProc *pt, Entity *entity, ScopeExitBindingSource *source_, i32 *index_) {
+	if (pt->params != nullptr) {
+		for_array(i, pt->params->Tuple.variables) {
+			if (pt->params->Tuple.variables[i] == entity) {
+				if (source_) *source_ = ScopeExitBinding_Input;
+				if (index_) *index_ = cast(i32)i;
+				return true;
+			}
+		}
+	}
+	if (pt->results != nullptr) {
+		for_array(i, pt->results->Tuple.variables) {
+			Entity *result = pt->results->Tuple.variables[i];
+			if (result == entity && result->token.string.len > 0) {
+				if (source_) *source_ = ScopeExitBinding_Result;
+				if (index_) *index_ = cast(i32)i;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+gb_internal void check_scope_exit_contract(CheckerContext *ctx, Entity *src, Ast *node, AttributeContext const &ac) {
+	if (node == nullptr) {
+		return;
+	}
+	GB_ASSERT(node->kind == Ast_ScopeExit);
+	AstScopeExit *contract_ast = &node->ScopeExit;
+
+	ScopeExitPolicy policy = ScopeExitPolicy_Invalid;
+	Ast *policy_expr = unparen_expr(contract_ast->policy);
+	if (policy_expr != nullptr && policy_expr->kind == Ast_ImplicitSelectorExpr) {
+		Ast *selector = policy_expr->ImplicitSelectorExpr.selector;
+		if (selector != nullptr && selector->kind == Ast_Ident) {
+			String name = selector->Ident.token.string;
+			if (name == "explicit") {
+				policy = ScopeExitPolicy_Explicit;
+			} else if (name == "implicit") {
+				policy = ScopeExitPolicy_Implicit;
+			}
+		}
+	}
+	if (policy == ScopeExitPolicy_Invalid) {
+		error(contract_ast->policy, "Expected '#scope_exit(.explicit, ...)' or '#scope_exit(.implicit, ...)'" );
+		return;
+	}
+
+	if (ac.deferred_procedure.entity != nullptr) {
+		error(node, "A procedure cannot mix '#scope_exit' with a legacy 'deferred_*' attribute");
+		return;
+	}
+
+	Ast *cleanup_expr = unparen_expr(contract_ast->cleanup);
+	if (cleanup_expr == nullptr || cleanup_expr->kind != Ast_CallExpr) {
+		error(contract_ast->cleanup, "Scope-exit cleanup must be a direct procedure call");
+		return;
+	}
+	AstCallExpr *cleanup_call = &cleanup_expr->CallExpr;
+	if (cleanup_call->ellipsis.kind != Token_Invalid) {
+		error(cleanup_expr, "Scope-exit cleanup calls cannot be variadic");
+	}
+	for (Ast *arg : cleanup_call->args) {
+		if (arg->kind == Ast_FieldValue) {
+			error(arg, "Scope-exit cleanup bindings cannot use named arguments");
+			return;
+		}
+	}
+
+	Ast *cleanup_proc_expr = unparen_expr(cleanup_call->proc);
+	Operand cleanup_proc_operand = {};
+	check_expr_base(ctx, &cleanup_proc_operand, cleanup_proc_expr, nullptr);
+	Entity *cleanup = entity_of_node(cleanup_proc_expr);
+	if (cleanup == nullptr || cleanup->kind != Entity_Procedure) {
+		error(cleanup_call->proc, "Expected a procedure for scope-exit cleanup");
+		return;
+	}
+	if (cleanup == src) {
+		error(node, "A procedure cannot use itself as scope-exit cleanup");
+		return;
+	}
+	if (cleanup->flags & EntityFlag_Disabled) {
+		return;
+	}
+	if (is_type_polymorphic(src->type) || is_type_polymorphic(cleanup->type)) {
+		error(node, "Scope-exit contracts cannot use polymorphic procedures");
+		return;
+	}
+
+	Type *cleanup_type = base_type(cleanup->type);
+	if (cleanup_type == nullptr || cleanup_type->kind != Type_Proc) {
+		error(cleanup_call->proc, "Invalid scope-exit cleanup procedure");
+		return;
+	}
+	TypeProc *cleanup_pt = &cleanup_type->Proc;
+	if (cleanup_pt->result_count != 0) {
+		error(cleanup_expr, "Scope-exit cleanup must return no values");
+	}
+	if (cleanup_pt->variadic) {
+		error(cleanup_expr, "Scope-exit cleanup cannot be variadic");
+	}
+
+	Type *src_type = base_type(src->type);
+	if (src_type == nullptr || src_type->kind != Type_Proc) {
+		return;
+	}
+	TypeProc *src_pt = &src_type->Proc;
+	if (cleanup_call->args.count > cleanup_pt->param_count) {
+		error(cleanup_expr, "Scope-exit cleanup provides too many bindings");
+		return;
+	}
+	for (isize i = cleanup_call->args.count; i < cleanup_pt->param_count; i++) {
+		Entity *param = cleanup_pt->params->Tuple.variables[i];
+		if (param->kind != Entity_Variable || param->Variable.param_value.kind == ParameterValue_Invalid) {
+			error(param->token, "Scope-exit cleanup must provide a binding for this parameter");
+			return;
+		}
+	}
+
+	ScopeExitContract contract = {};
+	contract.policy = policy;
+	contract.cleanup = cleanup;
+	contract.pos = ast_token(node).pos;
+	contract.bindings = slice_make<ScopeExitBinding>(permanent_allocator(), cleanup_call->args.count);
+
+	for_array(i, cleanup_call->args) {
+		Ast *arg = unparen_expr(cleanup_call->args[i]);
+		bool by_pointer = false;
+		if (arg != nullptr && arg->kind == Ast_UnaryExpr && arg->UnaryExpr.op.kind == Token_And) {
+			by_pointer = true;
+			arg = unparen_expr(arg->UnaryExpr.expr);
+		}
+		if (arg == nullptr || arg->kind != Ast_Ident) {
+			error(cleanup_call->args[i], "Scope-exit cleanup bindings must be named inputs or results, optionally prefixed with '&'");
+			return;
+		}
+		Operand binding_operand = {};
+		check_expr_base(ctx, &binding_operand, arg, nullptr);
+
+		Entity *binding_entity = entity_of_node(arg);
+		ScopeExitBindingSource source = ScopeExitBinding_Input;
+		i32 index = -1;
+		if (!find_scope_exit_binding(src_pt, binding_entity, &source, &index)) {
+			error(arg, "Scope-exit cleanup binding must name an input or named result of the procedure");
+			return;
+		}
+
+		Type *binding_type = source == ScopeExitBinding_Input
+			? src_pt->params->Tuple.variables[index]->type
+			: src_pt->results->Tuple.variables[index]->type;
+		if (by_pointer) {
+			binding_type = alloc_type_pointer(binding_type);
+		}
+		Type *cleanup_param_type = cleanup_pt->params->Tuple.variables[i]->type;
+		if (!are_types_identical(binding_type, cleanup_param_type)) {
+			gbString binding_str = type_to_string(binding_type);
+			gbString cleanup_str = type_to_string(cleanup_param_type);
+			TypeDiagnosticString type_strings[] = {
+				{&binding_str, binding_type},
+				{&cleanup_str, cleanup_param_type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(arg, "Scope-exit cleanup parameter type does not match binding: %s != %s", *type_strings[0].value, *type_strings[1].value);
+			gb_string_free(cleanup_str);
+			gb_string_free(binding_str);
+			return;
+		}
+
+		contract.bindings[i] = ScopeExitBinding{source, index, by_pointer};
+	}
+
+	src->Procedure.scope_exit_contract = contract;
 }
 
 gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
@@ -1315,50 +1511,200 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 	defer (check_close_scope(ctx));
 	ctx->scope->procedure_entity = e;
 
-	Type *decl_type = nullptr;
-
-	if (d->type_expr != nullptr) {
-		decl_type = check_type(ctx, d->type_expr);
-		if (!is_type_proc(decl_type)) {
-			gbString str = type_to_string(decl_type);
-			error(d->type_expr, "Expected a procedure type, got '%s'", str);
-			gb_string_free(str);
-		}
-	}
-
-
-	auto tmp_ctx = *ctx;
-	tmp_ctx.allow_polymorphic_types = true;
-	if (decl_type != nullptr) {
-		tmp_ctx.type_hint = decl_type;
-	}
-	check_procedure_type(&tmp_ctx, proc_type, pl->type);
-
-	if (decl_type != nullptr) {
-		Operand x = {};
-		x.type = e->type;
-		x.mode = Addressing_Variable;
-		if (!check_is_assignable_to(ctx, &x, decl_type)) {
-			gbString expr_str = expr_to_string(d->proc_lit);
-			gbString op_type_str = type_to_string(e->type);
-			gbString type_str = type_to_string(decl_type);
-			error(e->token,
-			      "Cannot assign '%s' of type '%s' to '%s'",
-			      expr_str,
-			      op_type_str,
-			      type_str);
-
-			gb_string_free(type_str);
-			gb_string_free(op_type_str);
-			gb_string_free(expr_str);
-		}
-	}
-
 	TypeProc *pt = &proc_type->Proc;
 	AttributeContext ac = make_attribute_context(e->Procedure.link_prefix, e->Procedure.link_suffix);
-
+	AstFile *file = e->token.pos.file_id ? global_files[e->token.pos.file_id] : nullptr;
+	ac.fast_math_flags = ast_file_fast_math_flags(file);
 	if (d != nullptr) {
 		check_decl_attributes(ctx, d->attributes, proc_decl_attribute, &ac);
+	}
+
+	bool disabled_proc = ac.has_disabled_proc && ac.disabled_proc;
+	if (disabled_proc) {
+		e->flags |= EntityFlag_Disabled;
+	}
+
+	Type *decl_type = nullptr;
+	if (!disabled_proc) {
+		if (d->type_expr != nullptr) {
+			decl_type = check_type(ctx, d->type_expr);
+			if (!is_type_proc(decl_type)) {
+				gbString str = type_to_string(decl_type);
+				error(d->type_expr, "Expected a procedure type, got '%s'", str);
+				gb_string_free(str);
+			}
+		}
+
+		auto tmp_ctx = *ctx;
+		tmp_ctx.allow_polymorphic_types = true;
+		if (decl_type != nullptr) {
+			tmp_ctx.type_hint = decl_type;
+		}
+		check_procedure_type(&tmp_ctx, proc_type, pl->type);
+
+		check_scope_exit_contract(ctx, e, pl->scope_exit_contract, ac);
+
+		if (decl_type != nullptr) {
+			Operand x = {};
+			x.type = e->type;
+			x.mode = Addressing_Variable;
+			if (!check_is_assignable_to(ctx, &x, decl_type)) {
+				gbString expr_str = expr_to_string(d->proc_lit);
+				gbString op_type_str = type_to_string(e->type);
+				gbString type_str = type_to_string(decl_type);
+				TypeDiagnosticString type_strings[] = {
+					{&op_type_str, e->type},
+					{&type_str, decl_type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(e->token,
+				      "Cannot assign '%s' of type '%s' to '%s'",
+				      expr_str,
+				      *type_strings[0].value,
+				      *type_strings[1].value);
+
+				gb_string_free(type_str);
+				gb_string_free(op_type_str);
+				gb_string_free(expr_str);
+			}
+		}
+	} else {
+		ast_node(proc_ast, ProcType, pl->type);
+		ProcCallingConvention cc = proc_ast->calling_convention;
+		if (cc == ProcCC_ForeignBlockDefault) {
+			cc = ProcCC_CDecl;
+			if (ctx->foreign_context.default_cc > 0) {
+				cc = ctx->foreign_context.default_cc;
+			}
+		}
+		if (cc == ProcCC_Invalid) {
+			cc = default_calling_convention();
+		}
+		pt->node = pl->type;
+		pt->scope = ctx->scope;
+		pt->params = nullptr;
+		pt->param_count = 0;
+		pt->results = nullptr;
+		pt->result_count = 0;
+		pt->variadic = false;
+		pt->variadic_index = -1;
+		pt->calling_convention = cc;
+		pt->is_polymorphic = false;
+		pt->specialization_count = 0;
+		pt->diverging = proc_ast->diverging;
+		pt->optional_ok = false;
+	}
+
+	if (ac.has_operator_overload) {
+		bool valid_operator_overload = true;
+		isize required_param_count = pt->param_count;
+		if (pt->params != nullptr) {
+			required_param_count = pt->params->Tuple.variables.count;
+			for (isize i = required_param_count-1; i >= 0; i--) {
+				Entity *param = pt->params->Tuple.variables[i];
+				bool has_default = false;
+				if (param != nullptr) {
+					switch (param->kind) {
+					case Entity_Variable:
+						has_default = param->Variable.param_value.kind != ParameterValue_Invalid;
+						break;
+					case Entity_Constant:
+						has_default = param->Constant.param_value.kind != ParameterValue_Invalid;
+						break;
+					default:
+						has_default = false;
+						break;
+					}
+				}
+				if (!has_default) {
+					break;
+				}
+				required_param_count--;
+			}
+		}
+		if (e->Procedure.is_foreign) {
+			error(e->token, "Procedures with @(operator=\"...\") cannot be foreign");
+			valid_operator_overload = false;
+		}
+		if ((e->scope->flags & (ScopeFlag_File|ScopeFlag_Pkg)) == 0) {
+			error(e->token, "Procedures with @(operator=\"...\") must be declared at file scope");
+			valid_operator_overload = false;
+		}
+		if (pt->variadic) {
+			error(e->token, "Procedures with @(operator=\"...\") cannot be variadic");
+			valid_operator_overload = false;
+		}
+		switch (ac.operator_overload_kind) {
+		case OperatorOverloadKind_Binary:
+		case OperatorOverloadKind_IndexGet:
+			if (pt->param_count < 2 || required_param_count != 2 || pt->result_count < 1) {
+				error(e->token, "Procedures with @(operator=\"...\") for binary operators and '[]' must take two required parameters (additional parameters must have defaults) and at least one result");
+				valid_operator_overload = false;
+			}
+			break;
+		case OperatorOverloadKind_IndexSet:
+			if (pt->param_count < 3 || required_param_count != 3 || pt->result_count != 0) {
+				error(e->token, "Procedures with @(operator=\"[]=\") must take three required parameters (additional parameters must have defaults) and zero results");
+				valid_operator_overload = false;
+			}
+			break;
+		case OperatorOverloadKind_Iterator:
+			if (pt->param_count < 2 || required_param_count != 2 || pt->result_count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must take two required parameters (additional parameters must have defaults) and at least two results (with a trailing boolean)");
+				valid_operator_overload = false;
+				break;
+			}
+
+			if (pt->params == nullptr || pt->params->Tuple.variables.count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must have at least two parameters");
+				valid_operator_overload = false;
+				break;
+			}
+			if (pt->results == nullptr || pt->results->Tuple.variables.count < 2) {
+				error(e->token, "Procedures with @(operator=\"in\") must have at least two results");
+				valid_operator_overload = false;
+				break;
+			}
+
+			{
+				Type *iter_state = pt->params->Tuple.variables[1]->type;
+				if (!is_type_pointer(iter_state) || !are_types_identical(type_deref(iter_state), t_int)) {
+					error(e->token, "Procedures with @(operator=\"in\") must use '^int' as their second parameter");
+					valid_operator_overload = false;
+				}
+			}
+			{
+				auto result_vars = pt->results->Tuple.variables;
+				Type *final_result = result_vars[result_vars.count-1]->type;
+				if (!is_type_boolean(final_result)) {
+					error(e->token, "Procedures with @(operator=\"in\") must have a trailing boolean result");
+					valid_operator_overload = false;
+				}
+			}
+			break;
+		default:
+			error(e->token, "Invalid internal operator overload kind");
+			valid_operator_overload = false;
+			break;
+		}
+		if (valid_operator_overload) {
+			switch (ac.operator_overload_kind) {
+			case OperatorOverloadKind_Binary:
+				add_operator_overload_proc(ctx, ac.operator_overload_binary_kind, e);
+				break;
+			case OperatorOverloadKind_IndexGet:
+				add_index_get_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_IndexSet:
+				add_index_set_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_Iterator:
+				add_iterator_operator_overload_proc(ctx, e);
+				break;
+			case OperatorOverloadKind_Invalid:
+				break;
+			}
+		}
 	}
 
 	if (ac.test) {
@@ -1415,6 +1761,11 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		case Instrumentation_Enabled:  has_instrumentation = true; break;
 		case Instrumentation_Default:  break;
 		case Instrumentation_Disabled: has_instrumentation = false;  break;
+		}
+
+		if (build_context.no_instrumentation_force_inline &&
+		    pl->inlining == ProcInlining_inline) {
+			has_instrumentation = false;
 		}
 	}
 
@@ -1490,6 +1841,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 	e->Procedure.no_sanitize_address = ac.no_sanitize_address;
 	e->Procedure.no_sanitize_memory  = ac.no_sanitize_memory;
 	e->Procedure.no_sanitize_thread  = ac.no_sanitize_thread;
+	e->Procedure.no_warn_excessive_inlining = ac.no_warn_excessive_inlining;
 
 	e->Procedure.fast_math_flags = ac.fast_math_flags;
 
@@ -1505,9 +1857,15 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		if (ac.disabled_proc) {
 			e->flags |= EntityFlag_Disabled;
 		}
-		Type *t = base_type(e->type);
-		GB_ASSERT(t->kind == Type_Proc);
-		if (t->Proc.result_count != 0) {
+		bool has_results = false;
+		if (disabled_proc) {
+			has_results = proc_type_ast_has_results(pl->type);
+		} else {
+			Type *t = base_type(e->type);
+			GB_ASSERT(t->kind == Type_Proc);
+			has_results = t->Proc.result_count != 0;
+		}
+		if (has_results) {
 			error(e->token, "Procedure with the 'disabled' attribute may not have any return values");
 		}
 	}
@@ -1601,7 +1959,8 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		d->scope = ctx->scope;
 
 		GB_ASSERT(pl->body->kind == Ast_BlockStmt);
-		if (!pt->is_polymorphic) {
+		if (!pt->is_polymorphic && (e->flags & EntityFlag_Disabled) == 0) {
+			decl_info_copy_trigger_trace(d, ctx);
 			check_procedure_later(ctx->checker, ctx->file, e->token, d, proc_type, pl->body, pl->tags);
 		}
 	} else if (!is_foreign && !e->Procedure.is_objc_impl_or_import) {
@@ -1673,7 +2032,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 				      "Non unique linking name for procedure '%.*s'\n"
 				      "\tother at %s",
 				      LIT(name), token_pos_to_string(pos));
-			} else if (name == "main") {
+			} else if (name == "main" && !build_context.no_entry_point) {
 				if (d->entity.load()->pkg->kind != Package_Runtime) {
 					error(d->proc_lit, "The link name 'main' is reserved for internal use");
 				}
@@ -1693,8 +2052,10 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, Ast *init_expr) {
 	GB_ASSERT(e->type == nullptr);
 	GB_ASSERT(e->kind == Entity_Variable);
+	checker_global_variable_timing_state.variable_decl_count += 1;
 
 	if (e->flags & EntityFlag_Visited) {
+		checker_global_variable_timing_state.early_visited_count += 1;
 		e->type = t_invalid;
 		return;
 	}
@@ -1706,8 +2067,17 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	DeclInfo *decl = decl_info_of_entity(e);
 	GB_ASSERT(decl == ctx->decl);
 	if (decl != nullptr) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		check_decl_attributes(ctx, decl->attributes, var_decl_attribute, &ac);
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_Attributes, time_stamp_time_now() - start);
+		}
 	}
+
+	u64 foreign_and_links_ticks = 0;
 
 	if (ac.require_declaration) {
 		e->flags |= EntityFlag_Require;
@@ -1738,7 +2108,14 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	String context_name = str_lit("variable declaration");
 
 	if (type_expr != nullptr) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		e->type = check_type(ctx, type_expr);
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_ExplicitType, time_stamp_time_now() - start);
+		}
 	}
 	if (e->type != nullptr) {
 		if (is_type_polymorphic(base_type(e->type))) {
@@ -1756,12 +2133,19 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 
 
 	if (e->Variable.is_foreign) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		if (init_expr != nullptr) {
 			error(e->token, "A foreign variable declaration cannot have a default value");
 		}
 		init_entity_foreign_library(ctx, e);
 		if (is_arch_wasm() && e->Variable.foreign_library != nullptr) {
 			error(e->token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block");
+		}
+		if (checker_global_variable_timing_state.enabled) {
+			foreign_and_links_ticks += time_stamp_time_now() - start;
 		}
 	}
 	if (ac.link_name.len > 0) {
@@ -1772,6 +2156,10 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	}
 
 	if (e->Variable.is_foreign || e->Variable.is_export) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		String name = e->token.string;
 		if (e->Variable.link_name.len > 0) {
 			name = e->Variable.link_name;
@@ -1795,10 +2183,16 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 		} else {
 			string_map_set(fp, key, e);
 		}
+		if (checker_global_variable_timing_state.enabled) {
+			foreign_and_links_ticks += time_stamp_time_now() - start;
+		}
 	}
 	
 	if (e->Variable.link_name.len > 0) {
 		e->flags |= EntityFlag_CustomLinkName;
+	}
+	if (checker_global_variable_timing_state.enabled && foreign_and_links_ticks > 0) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_ForeignAndLinks, foreign_and_links_ticks);
 	}
 
 	if (init_expr == nullptr) {
@@ -1809,6 +2203,10 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 	}
 
 	Operand o = {};
+	u64 init_expr_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		init_expr_start = time_stamp_time_now();
+	}
 	check_expr_with_type_hint(ctx, &o, init_expr, e->type);
 	if (check_vet_shadowing_assignment(ctx->checker, e, init_expr)) {
 		error(e->token, "Illegal declaration cycle of `%.*s`", LIT(e->token.string));
@@ -1816,8 +2214,25 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 		o.type = t_invalid;
 		e->type = t_invalid;
 	}
+	if (checker_global_variable_timing_state.enabled) {
+		u64 init_expr_ticks = time_stamp_time_now() - init_expr_start;
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_InitExpr, init_expr_ticks);
+		checker_global_variable_timing_note_init_expr(e, init_expr, init_expr_ticks);
+	}
+
+	u64 init_variable_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		init_variable_start = time_stamp_time_now();
+	}
 	check_init_variable(ctx, e, &o, str_lit("variable declaration"));
+	if (checker_global_variable_timing_state.enabled) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_InitVariable, time_stamp_time_now() - init_variable_start);
+	}
 	if (e->Variable.is_rodata && o.mode != Addressing_Constant) {
+		u64 start = 0;
+		if (checker_global_variable_timing_state.enabled) {
+			start = time_stamp_time_now();
+		}
 		ERROR_BLOCK();
 		error(o.expr, "Variables declared with @(rodata) must have constant initialization");
 		Ast *expr = unparen_expr(o.expr);
@@ -1840,9 +2255,19 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 				}
 			}
 		}
+		if (checker_global_variable_timing_state.enabled) {
+			checker_global_variable_timing_add(CheckerGlobalVariableTiming_RodataValidation, time_stamp_time_now() - start);
+		}
 	}
 
+	u64 rtti_start = 0;
+	if (checker_global_variable_timing_state.enabled) {
+		rtti_start = time_stamp_time_now();
+	}
 	check_rtti_type_disallowed(e->token, e->type, "A variable declaration is using a type, %s, which has been disallowed");
+	if (checker_global_variable_timing_state.enabled) {
+		checker_global_variable_timing_add(CheckerGlobalVariableTiming_RttiDisallowed, time_stamp_time_now() - rtti_start);
+	}
 }
 
 gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, DeclInfo *d) {
@@ -2140,16 +2565,21 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 	if (e->state == EntityState_Resolved)  {
 		return;
 	}
-	bool is_lazy = (e->flags & EntityFlag_Lazy) != 0;
-	if (is_lazy) {
+	if (e->flags & EntityFlag_Lazy) {
 		mutex_lock(&ctx->info->lazy_mutex);
-		if (e->state == EntityState_Resolved) {
-			// NOTE: another thread checked it whilst this one waited
-			mutex_unlock(&ctx->info->lazy_mutex);
-			return;
+	}
+
+	bool entity_timing_started = false;
+	if (checker_global_entity_timing_state.enabled) {
+		CheckerGlobalEntityTimingKind kind = checker_global_entity_timing_kind_from_entity_kind(e->kind);
+		if (kind != CheckerGlobalEntityTiming_Invalid) {
+			checker_global_entity_timing_begin(kind);
+			entity_timing_started = true;
 		}
 	}
-	GlobalEntityTimingFrame timing_frame = global_entity_timing_begin(e);
+	defer (if (entity_timing_started) {
+		checker_global_entity_timing_end();
+	});
 
 	String name = e->token.string;
 
@@ -2232,22 +2662,11 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 
 	}
 end:;
-	global_entity_timing_end(timing_frame, e);
 	// NOTE(bill): Add it to the list of checked entities
-	if (is_lazy) {
+	if (e->flags & EntityFlag_Lazy) {
 		array_add(&ctx->info->entities, e);
 		mutex_unlock(&ctx->info->lazy_mutex);
 	}
-}
-
-// A lazy entity is only ever in progress on the thread holding `lazy_mutex`, so taking it (it is
-// recursive) waits out another thread and is a no-op on the thread that is checking it
-gb_internal void wait_for_lazy_entity(CheckerContext *ctx, Entity *e) {
-	if ((e->flags & EntityFlag_Lazy) == 0 || e->state == EntityState_Resolved) {
-		return;
-	}
-	mutex_lock(&ctx->info->lazy_mutex);
-	mutex_unlock(&ctx->info->lazy_mutex);
 }
 
 
@@ -2293,6 +2712,8 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		return false;
 	}
 	GB_ASSERT(body->kind == Ast_BlockStmt);
+	bool procedure_timing_enabled = checker_procedure_body_timing_state.enabled;
+	u64 parameter_setup_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	String proc_name = {};
 	if (token.kind == Token_Ident) {
@@ -2397,9 +2818,15 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		}
 	}
 	rw_mutex_unlock(&ctx->scope->mutex);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ParameterSetup, time_stamp_time_now() - parameter_setup_start);
+	}
 
-
+	u64 where_clause_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	bool where_clause_ok = evaluate_where_clauses(ctx, nullptr, decl->scope, &decl->proc_lit->ProcLit.where_clauses, !decl->where_clauses_evaluated.load(std::memory_order_relaxed));
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_WhereClauses, time_stamp_time_now() - where_clause_start);
+	}
 	if (!where_clause_ok) {
 		// NOTE(bill, 2019-08-31): Don't check the body as the where clauses failed
 		return false;
@@ -2423,7 +2850,11 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 			GB_ASSERT(decl->defer_use_checked.load(std::memory_order_relaxed) == false);
 		}
 
+		u64 statements_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 		check_stmt_list(ctx, bs->stmts, Stmt_CheckScopeDecls);
+		if (procedure_timing_enabled) {
+			checker_procedure_body_timing_add(CheckerProcedureBodyTiming_Statements, time_stamp_time_now() - statements_start);
+		}
 
 		decl->defer_use_checked.store(true, std::memory_order_relaxed);
 
@@ -2440,6 +2871,7 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 			}
 		}
 
+		u64 termination_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 		if (type->Proc.result_count > 0) {
 			if (!check_is_terminating(body, str_lit(""))) {
 				if (token.kind == Token_Ident) {
@@ -2459,14 +2891,26 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 				}
 			}
 		}
+		if (procedure_timing_enabled) {
+			checker_procedure_body_timing_add(CheckerProcedureBodyTiming_Termination, time_stamp_time_now() - termination_start);
+		}
 
 	}
+	u64 scope_usage_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	check_close_scope(ctx);
 
 	check_scope_usage(ctx->checker, ctx->scope, check_vet_flags(body));
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ScopeUsage, time_stamp_time_now() - scope_usage_start);
+	}
 
+	u64 dependency_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	add_deps_from_child_to_parent(decl);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_DependencyPropagation, time_stamp_time_now() - dependency_start);
+	}
 
+	u64 variadic_reuse_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	for (VariadicReuseData const &vr : decl->variadic_reuses) {
 		GB_ASSERT(vr.slice_type->kind == Type_Slice);
 		Type *elem = vr.slice_type->Slice.elem;
@@ -2474,6 +2918,9 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		i64 align = type_align_of(elem);
 		decl->variadic_reuse_max_bytes = gb_max(decl->variadic_reuse_max_bytes, size*vr.max_count);
 		decl->variadic_reuse_max_align = gb_max(decl->variadic_reuse_max_align, align);
+	}
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_VariadicReuse, time_stamp_time_now() - variadic_reuse_start);
 	}
 
 	return true;

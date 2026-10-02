@@ -1,18 +1,32 @@
 // #define NO_ARRAY_BOUNDS_CHECK
+#ifndef CLANGD_TU_common
 #include "common.cpp"
+#endif
+#ifndef CLANGD_TU_timings
 #include "timings.cpp"
+#endif
+#ifndef CLANGD_TU_tokenizer
 #include "tokenizer.cpp"
+#endif
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(push)
 	#pragma warning(disable: 4505)
 #endif
+#ifndef CLANGD_TU_big_int
 #include "big_int.cpp"
+#endif
+#ifndef CLANGD_TU_big_rat
 #include "big_rat.cpp"
+#endif
 #if defined(GB_SYSTEM_WINDOWS)
 	#pragma warning(pop)
 #endif
+#ifndef CLANGD_TU_exact_value
 #include "exact_value.cpp"
+#endif
+#ifndef CLANGD_TU_build_settings
 #include "build_settings.cpp"
+#endif
 gb_global ThreadPool global_thread_pool;
 gb_internal void init_global_thread_pool(void) {
 	isize thread_count = gb_max(build_context.thread_count, 1);
@@ -71,23 +85,48 @@ gb_global Timings global_timings = {0};
 
 #include "asm_tables.cpp"
 
+#ifndef CLANGD_TU_parser
 #include "parser.cpp"
+
+#endif
+#ifndef CLANGD_TU_checker
 #include "checker.cpp"
+#endif
+#ifndef CLANGD_TU_docs
 #include "docs.cpp"
+#endif
+
+#ifndef CLANGD_TU_cached
 
 #include "cached.cpp"
 
-#include "linker.cpp"
-#include "bundle_command.cpp"
+#endif
 
+#ifndef CLANGD_TU_linker
+
+#include "linker.cpp"
+
+#endif
+#ifndef CLANGD_TU_bundle_command
+#include "bundle_command.cpp"
+#endif
+
+
+#include "codegen_plan.hpp"
+#include "codegen_plan.cpp"
+#ifndef CLANGD_TU_llvm_backend
 #include "llvm_backend.cpp"
+#endif
+
+#ifndef CLANGD_TU_bug_report
 
 #include "bug_report.cpp"
+
+#endif
 
 #if defined(GB_SYSTEM_OSX) || defined(GB_SYSTEM_UNIX)
 int run_subprocess(const char *name, const char **args, bool honor_path = false);
 #endif
-
 // NOTE(bill): 'name' is used in debugging and profiling modes
 gb_internal i32 system_exec_command_line_app_internal(bool exit_on_err, char const *name, char const *fmt, va_list va) {
 	isize const cmd_cap = 64<<20; // 64 MiB should be more than enough
@@ -422,13 +461,17 @@ enum BuildFlagKind {
 	BuildFlag_KeepTempFiles,
 	BuildFlag_Collection,
 	BuildFlag_Define,
+	BuildFlag_TestFiles,
 	BuildFlag_BuildMode,
 	BuildFlag_KeepExecutable,
 	BuildFlag_Target,
 	BuildFlag_Subtarget,
 	BuildFlag_Debug,
 	BuildFlag_DisableAssert,
+	BuildFlag_EmitDowncastAssert,
 	BuildFlag_NoBoundsCheck,
+	BuildFlag_NoInstrumentationForceInline,
+	BuildFlag_NoWarnExcessiveInlining,
 	BuildFlag_WebkitSwitchWorkaround,
 	BuildFlag_NoTypeAssert,
 	BuildFlag_LifetimeMarkers,
@@ -686,13 +729,17 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_KeepTempFiles,           str_lit("keep-temp-files"),           BuildFlagParam_None,    Command__does_build | Command_strip_semicolon);
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
+	add_flag(&build_flags, BuildFlag_TestFiles,               str_lit("test-files"),                BuildFlagParam_None,    Command_check);
 	add_flag(&build_flags, BuildFlag_BuildMode,               str_lit("build-mode"),                BuildFlagParam_String,  Command__does_build); // Commands_build is not used to allow for a better error message
 	add_flag(&build_flags, BuildFlag_KeepExecutable,          str_lit("keep-executable"),           BuildFlagParam_None,    Command__does_build | Command_test);
 	add_flag(&build_flags, BuildFlag_Target,                  str_lit("target"),                    BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Subtarget,               str_lit("subtarget"),                 BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Debug,                   str_lit("debug"),                     BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_DisableAssert,           str_lit("disable-assert"),            BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_EmitDowncastAssert,      str_lit("emit-downcast-assert"),      BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoBoundsCheck,           str_lit("no-bounds-check"),           BuildFlagParam_None,    Command__does_check);
+	add_flag(&build_flags, BuildFlag_NoInstrumentationForceInline, str_lit("no-instrumentation-force-inline"), BuildFlagParam_None, Command__does_check);
+	add_flag(&build_flags, BuildFlag_NoWarnExcessiveInlining,      str_lit("no-warn-excessive-inlining"),      BuildFlagParam_None, Command__does_check);
 	add_flag(&build_flags, BuildFlag_WebkitSwitchWorkaround,  str_lit("webkit-switch-workaround"),  BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_NoTypeAssert,            str_lit("no-type-assert"),            BuildFlagParam_None,    Command__does_check);
 	add_flag(&build_flags, BuildFlag_LifetimeMarkers,         str_lit("lifetime-markers"),          BuildFlagParam_None,    Command__does_build);
@@ -943,7 +990,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							}
 							break;
 						case BuildFlagParam_Float:
-							if (value.kind != ExactValue_Float && value.kind != ExactValue_Rational) {
+							if (value.kind != ExactValue_Float) {
 								gb_printf_err("%.*s expected a floating pointer number, got %.*s\n", LIT(name), LIT(param));
 								bad_flags = true;
 								ok = false;
@@ -1197,6 +1244,9 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							// NOTE(bill): Allow for multiple library collections
 							continue;
 						}
+						case BuildFlag_TestFiles:
+							build_context.include_test_files = true;
+							break;
 						case BuildFlag_Define: {
 							GB_ASSERT(value.kind == ExactValue_String);
 							String str = value.value_string;
@@ -1309,11 +1359,12 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								String str = value.value_string;
 								bool found = false;
 
-								if (selected_target_metrics->metrics->os != TargetOs_darwin &&
-										selected_target_metrics->metrics->os != TargetOs_linux &&
-									 (selected_target_metrics->metrics->os != TargetOs_freestanding ||
-										selected_target_metrics->metrics->arch != TargetArch_arm32)) {
-									gb_printf_err("-subtarget can only be used with darwin, linux or freestanding_arm32 based targets at the moment\n");
+								bool allow_subtarget =
+									selected_target_metrics->metrics->os == TargetOs_darwin ||
+									selected_target_metrics->metrics->os == TargetOs_linux ||
+									is_target_freestanding_thumbv6m(selected_target_metrics->metrics);
+								if (!allow_subtarget) {
+									gb_printf_err("-subtarget can only be used with darwin, linux, and freestanding_thumbv6m targets at the moment\n");
 									bad_flags = true;
 									break;
 								}
@@ -1390,8 +1441,17 @@ gb_internal bool parse_build_flags(Array<String> args) {
 						case BuildFlag_DisableAssert:
 							build_context.ODIN_DISABLE_ASSERT = true;
 							break;
+						case BuildFlag_EmitDowncastAssert:
+							build_context.emit_downcast_assert = true;
+							break;
 						case BuildFlag_NoBoundsCheck:
 							build_context.no_bounds_check = true;
+							break;
+						case BuildFlag_NoInstrumentationForceInline:
+							build_context.no_instrumentation_force_inline = true;
+							break;
+						case BuildFlag_NoWarnExcessiveInlining:
+							build_context.no_warn_excessive_inlining = true;
 							break;
 						case BuildFlag_WebkitSwitchWorkaround:
 							build_context.webkit_switch_workaround = true;
@@ -2189,7 +2249,7 @@ gb_internal void check_defines(BuildContext *bc, Checker *c) {
 		ExactValue value = entry.value;
 		GB_ASSERT(value.kind != ExactValue_Invalid);
 
-		bool found = false;
+		bool found = map_get(&bc->used_defined_values, entry.key) != nullptr;
 		for_array(i, c->info.defineables) {
 			Defineable *def = &c->info.defineables[i];
 			if (def->name == name) {
@@ -2394,6 +2454,9 @@ gb_internal void show_timings(Checker *c, Timings *t) {
 	}
 
 	timings_print_all(t);
+	show_checker_global_entity_timings(t);
+	show_checker_procedure_body_timings(t);
+	show_checker_statement_timings(t);
 
 	PRINT_PEAK_USAGE();
 
@@ -2752,6 +2815,7 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		print_usage_line(3, "odin check .                     Type checks package in current directory.");
 		print_usage_line(3, "odin check <dir>                 Type checks package in <dir>.");
 		print_usage_line(3, "odin check filename.odin -file   Type checks single-file package, must contain entry point.");
+		print_usage_line(3, "odin check <dir> -test-files     Type checks package including #+test files.");
 	} else if (command == "test") {
 		print_usage_header_once();
 		print_usage_line(1, "test    Builds and runs procedures with the attribute @(test) in the initial package.");
@@ -2850,6 +2914,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 			print_usage_line(3, "@(init) @(fini) (-disable-init-fini)");
 			print_usage_line(3, "Anything Objective-C related");
 			print_usage_line(3, "The default paths to the library collections 'core' and 'vendor'");
+		}
+	}
+	if (command == "check") {
+		if (print_flag("-test-files")) {
+			print_usage_line(2, "Includes files tagged with #+test while type checking.");
 		}
 	}
 
@@ -2954,6 +3023,11 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	if (run_or_build) {
 		if (print_flag("-dynamic-map-calls")) {
 			print_usage_line(2, "Uses dynamic map calls to minimize code generation at the cost of runtime execution.");
+		}
+
+		if (print_flag("-emit-downcast-assert")) {
+			print_usage_line(2, "Emits runtime checks for explicit integer casts that narrow bit width,");
+			print_usage_line(2, "or convert between signed and unsigned integers of the same width.");
 		}
 	}
 
@@ -3136,9 +3210,17 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		}
 	}
 
-	if (run_or_build) {
+	if (run_or_build || check) {
 		if (print_flag("-no-bounds-check")) {
 			print_usage_line(2, "Disables bounds checking program wide.");
+		}
+
+		if (print_flag("-no-instrumentation-force-inline")) {
+			print_usage_line(2, "Skips instrumentation for procedures marked '#force_inline'.");
+		}
+
+		if (print_flag("-no-warn-excessive-inlining")) {
+			print_usage_line(2, "Disables warnings for procedures whose '#force_inline' expansion is large.");
 		}
 
 		if (print_flag("-webkit-switch-workaround")) {
@@ -3906,6 +3988,7 @@ int main(int arg_count, char const **arg_ptr) {
 
 	TIME_SECTION("init args");
 	map_init(&build_context.defined_values);
+	map_init(&build_context.used_defined_values);
 	build_context.extra_packages.allocator = heap_allocator();
 	
 	init_build_context_error_pos_style();
@@ -4388,6 +4471,7 @@ int main(int arg_count, char const **arg_ptr) {
 	Parser * parser  = permanent_alloc_item<Parser>();
 	Checker *checker = permanent_alloc_item<Checker>();
 	bool failed_to_cache_parsing = false;
+	CodeGenGlobalPlan codegen_plan = {};
 
 	TIME_SECTION("init asm tables");
 	init_asm_tables(build_context.metrics.ptr_size);
@@ -4431,10 +4515,6 @@ int main(int arg_count, char const **arg_ptr) {
 		print_all_errors();
 		return 1;
 	}
-	if (any_warnings()) {
-		print_all_errors();
-	}
-
 	if (build_context.show_defineables || build_context.export_defineables_file != "") {
 		TEMPORARY_ALLOCATOR_GUARD();
 		temp_alloc_defineable_strings(checker);
@@ -4496,6 +4576,8 @@ int main(int arg_count, char const **arg_ptr) {
 		failed_to_cache_parsing = true;
 	}
 
+	codegen_build_global_plan(&codegen_plan, &checker->info, permanent_allocator());
+
 	{
 		lbGenerator *gen = permanent_alloc_item<lbGenerator>();
 		if (!lb_init_generator(gen, checker)) {
@@ -4507,7 +4589,7 @@ int main(int arg_count, char const **arg_ptr) {
 			label_code_gen = gb_string_append_fmt(label_code_gen, " ( %4td modules )", gen->modules.count);
 		}
 		MAIN_TIME_SECTION_WITH_LEN(label_code_gen, gb_string_length(label_code_gen));
-		if (lb_generate_code(gen)) {
+		if (lb_generate_code(gen, codegen_plan)) {
 			switch (build_context.build_mode) {
 			case BuildMode_Executable:
 			case BuildMode_StaticLibrary:

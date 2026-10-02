@@ -1,9 +1,10 @@
 // Multi-threading operations to spawn threads and thread pools.
 package thread
 
-import "base:runtime"
 import "core:mem"
+
 import "base:intrinsics"
+import "base:runtime"
 
 @(private)
 unall :: intrinsics.unaligned_load
@@ -37,33 +38,20 @@ Thread_State :: enum u8 {
 	Self_Cleanup,
 }
 
-/*
-Type representing a thread handle and the associated with that thread data.
-*/
-Thread :: struct {
-	using specific: Thread_Os_Specific,
-	flags: bit_set[Thread_State; u8],
-	// Thread ID. Depending on the platform, may start out as 0 (zero) until the thread
-	// has had a chance to run.
-	id: int,
-	// The thread procedure.
-	procedure: Thread_Proc,
-	// User-supplied pointer, that will be available to the thread once it is
-	// started. Should be set after the thread has been created, but before
-	// it is started.
-	data: rawptr,
+Invocation :: struct {
+	fn:   rawptr,
+	args: [MAX_USER_ARGUMENTS]rawptr,
+}
+
+Launch_State :: struct {
+	procedure:  Thread_Proc,
+	data: 		rawptr,
+	invocation: Invocation,
+	user_index: int,
 	// Thread's Name/Description that will get set during thread creation
 	// it will be set using init_context's allocator to allocate and free a cstring buffer
 	// for thread's creation only : do not refer to it, use thread.get_name instead
 	name: Maybe(string),
-	// User-supplied integer, that will be available to the thread once it is
-	// started. Should be set after the thread has been created, but before
-	// it is started.
-	user_index: int,
-	// User-supplied array of arguments, that will be available to the thread,
-	// once it is started. Should be set after the thread has been created,
-	// but before it is started.
-	user_args: [MAX_USER_ARGUMENTS]rawptr,
 	// The thread context.
 	// This field can be assigned to directly, after the thread has been
 	// created, but __before__ the thread has been started. This field must
@@ -83,12 +71,36 @@ Thread :: struct {
 	// procedure needs to be called from the thread procedure, in order to prevent
 	// any memory leaks.
 	init_context: Maybe(runtime.Context),
+}
+
+Lifecycle_State :: struct {
+	flags: bit_set[Thread_State; u8],
+	// Thread ID. Depending on the platform, may start out as 0 (zero) until the thread
+	// has had a chance to run.
+	id: int,
+}
+
+Ownership_State :: struct {
 	// The allocator used to allocate data for the thread.
 	creation_allocator: mem.Allocator,
 }
 
+Runtime_State :: struct {
+	using launch:    Launch_State,
+	using lifecycle: Lifecycle_State,
+	using ownership: Ownership_State,
+}
+
+/*
+Type representing a thread handle and the associated with that thread data.
+*/
+Thread :: struct {
+	using specific: Thread_Os_Specific,
+	using state:    Runtime_State,
+}
+
 when IS_SUPPORTED {
-	#assert(size_of(Thread{}.user_index) == size_of(uintptr))
+	#assert(size_of(Thread{}.data) == size_of(rawptr))
 }
 
 /*
@@ -179,6 +191,37 @@ allocates memory for the returned string using provided allocator.
 */
 get_name :: proc(thread: ^Thread = nil, allocator := context.temp_allocator, loc := #caller_location) -> (string, runtime.Allocator_Error) {
 	return _get_name(thread, allocator, loc)
+}
+
+@(private="package")
+_start_invocation :: proc(
+	procedure: Thread_Proc,
+	invocation: Invocation,
+	init_context: Maybe(runtime.Context),
+	priority: Thread_Priority,
+	self_cleanup: bool,
+	name: Maybe(string),
+) -> ^Thread {
+	t := create(procedure, priority, name)
+	if t == nil {
+		return nil
+	}
+
+	t.invocation = invocation
+	t.data = rawptr(&t.invocation)
+	if self_cleanup {
+		intrinsics.atomic_or(&t.lifecycle.flags, {.Self_Cleanup})
+	}
+	t.init_context = init_context
+	start(t)
+	return t
+}
+
+@(private="package")
+_thread_invocation :: proc(thread: ^Thread) -> ^Invocation {
+	invocation := cast(^Invocation)thread.data
+	assert(invocation == &thread.invocation)
+	return invocation
 }
 
 /*
@@ -316,18 +359,13 @@ in order to free the resources associated with the temporary allocations.
 */
 create_and_start :: proc(fn: proc(), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread) {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc())t.data
+		invocation := _thread_invocation(t)
+		fn := cast(proc())invocation.fn
 		fn()
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
-	}
-	t.init_context = init_context
-	start(t)
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
 	return t
 }
 
@@ -354,22 +392,15 @@ in order to free the resources associated with the temporary allocations.
 */
 create_and_start_with_data :: proc(data: rawptr, fn: proc(data: rawptr), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread) {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc(rawptr))t.data
-		assert(t.user_index >= 1)
-		data := t.user_args[0]
+		invocation := _thread_invocation(t)
+		fn := cast(proc(rawptr))invocation.fn
+		data := invocation.args[0]
 		fn(data)
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	t.user_index = 1
-	t.user_args[0] = data
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
-	}
-	t.init_context = init_context
-	start(t)
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
+	invocation.args[0] = data
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
 	return t
 }
 
@@ -397,27 +428,17 @@ in order to free the resources associated with the temporary allocations.
 create_and_start_with_poly_data :: proc(data: $T, fn: proc(data: T), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread)
 	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc(T))t.data
-		assert(t.user_index >= 1)
+		invocation := _thread_invocation(t)
+		fn := cast(proc(T))invocation.fn
 
-		data := unall((^T)(&t.user_args))
+		data := unall((^T)(&invocation.args))
 
 		fn(data)
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	t.user_index = 1
-
-	unals((^T)(&t.user_args), data)
-
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
-	}
-
-	t.init_context = init_context
-	start(t)
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
+	unals((^T)(&invocation.args), data)
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
 	return t
 }
 
@@ -445,33 +466,25 @@ in order to free the resources associated with the temporary allocations.
 create_and_start_with_poly_data2 :: proc(arg1: $T1, arg2: $T2, fn: proc(T1, T2), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread)
 	where size_of(T1) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc(T1, T2))t.data
-		assert(t.user_index >= 2)
-		
-		ptr := uintptr(&t.user_args)
+		invocation := _thread_invocation(t)
+		fn := cast(proc(T1, T2))invocation.fn
+
+		ptr := uintptr(&invocation.args)
 
 		arg1 := unall((^T1)(rawptr(ptr)))
 		arg2 := unall((^T2)(rawptr(ptr + size_of(T1))))
 
 		fn(arg1, arg2)
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	t.user_index = 2
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
 
-	ptr := uintptr(&t.user_args)
+	ptr := uintptr(&invocation.args)
 
 	unals((^T1)(rawptr(ptr)), arg1)
 	unals((^T2)(rawptr(ptr + size_of(T1))), arg2)
 
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
-	}
-
-	t.init_context = init_context
-	start(t)
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
 	return t
 }
 
@@ -499,10 +512,10 @@ in order to free the resources associated with the temporary allocations.
 create_and_start_with_poly_data3 :: proc(arg1: $T1, arg2: $T2, arg3: $T3, fn: proc(arg1: T1, arg2: T2, arg3: T3), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread)
 	where size_of(T1) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc(T1, T2, T3))t.data
-		assert(t.user_index >= 3)
+		invocation := _thread_invocation(t)
+		fn := cast(proc(T1, T2, T3))invocation.fn
 
-		ptr := uintptr(&t.user_args)
+		ptr := uintptr(&invocation.args)
 
 		arg1 := unall((^T1)(rawptr(ptr)))
 		arg2 := unall((^T2)(rawptr(ptr + size_of(T1))))
@@ -510,24 +523,16 @@ create_and_start_with_poly_data3 :: proc(arg1: $T1, arg2: $T2, arg3: $T3, fn: pr
 
 		fn(arg1, arg2, arg3)
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	t.user_index = 3
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
 
-	ptr := uintptr(&t.user_args)
+	ptr := uintptr(&invocation.args)
 
 	unals((^T1)(rawptr(ptr)), arg1)
 	unals((^T2)(rawptr(ptr + size_of(T1))), arg2)
 	unals((^T3)(rawptr(ptr + size_of(T1) + size_of(T2))), arg3)
 
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
-	}
-
-	t.init_context = init_context
-	start(t)
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
 	return t
 }
 
@@ -555,10 +560,10 @@ in order to free the resources associated with the temporary allocations.
 create_and_start_with_poly_data4 :: proc(arg1: $T1, arg2: $T2, arg3: $T3, arg4: $T4, fn: proc(arg1: T1, arg2: T2, arg3: T3, arg4: T4), init_context: Maybe(runtime.Context) = nil, priority := Thread_Priority.Normal, self_cleanup := false, name: Maybe(string) = nil) -> (t: ^Thread)
 	where size_of(T1) + size_of(T2) + size_of(T3) + size_of(T4) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	thread_proc :: proc(t: ^Thread) {
-		fn := cast(proc(T1, T2, T3, T4))t.data
-		assert(t.user_index >= 4)
+		invocation := _thread_invocation(t)
+		fn := cast(proc(T1, T2, T3, T4))invocation.fn
 
-		user_args := mem.slice_to_bytes(t.user_args[:])
+		user_args := mem.slice_to_bytes(invocation.args[:])
 		arg1 := (^T1)(raw_data(user_args))^
 		arg2 := (^T2)(raw_data(user_args[size_of(T1):]))^
 		arg3 := (^T3)(raw_data(user_args[size_of(T1) + size_of(T2):]))^
@@ -566,27 +571,65 @@ create_and_start_with_poly_data4 :: proc(arg1: $T1, arg2: $T2, arg3: $T3, arg4: 
 
 		fn(arg1, arg2, arg3, arg4)
 	}
-	if t = create(thread_proc, priority, name); t == nil {
-		return
-	}
-	t.data = rawptr(fn)
-	t.user_index = 4
+	invocation := Invocation{}
+	invocation.fn = rawptr(fn)
 
 	arg1, arg2, arg3, arg4 := arg1, arg2, arg3, arg4
-	user_args := mem.slice_to_bytes(t.user_args[:])
+	user_args := mem.slice_to_bytes(invocation.args[:])
 
 	n := copy(user_args,     mem.ptr_to_bytes(&arg1))
 	n += copy(user_args[n:], mem.ptr_to_bytes(&arg2))
 	n += copy(user_args[n:], mem.ptr_to_bytes(&arg3))
 	_  = copy(user_args[n:], mem.ptr_to_bytes(&arg4))
 
-	if self_cleanup {
-		intrinsics.atomic_or(&t.flags, {.Self_Cleanup})
+	t = _start_invocation(thread_proc, invocation, init_context, priority, self_cleanup, name)
+	return t
+}
+
+@(private="package")
+_new_thread :: proc(procedure: Thread_Proc, name: Maybe(string)) -> ^Thread {
+	thread := new(Thread)
+	if thread == nil {
+		return nil
 	}
 
-	t.init_context = init_context
-	start(t)
-	return t
+	thread.ownership.creation_allocator = context.allocator
+	thread.procedure = procedure
+	thread.name = name
+	return thread
+}
+
+@(private="package")
+_thread_exit_context :: proc(init_context: Maybe(runtime.Context)) {
+	_maybe_destroy_default_temp_allocator(init_context)
+	runtime.run_thread_local_cleaners()
+}
+
+@(private="package")
+_thread_execute :: proc "contextless" (thread: ^Thread) {
+	init_context := thread.init_context
+	context = _select_context_for_thread(init_context)
+	defer _thread_exit_context(init_context)
+
+	_set_name(thread)
+	thread.procedure(thread)
+}
+
+@(private="package")
+_thread_mark_done :: proc "contextless" (thread: ^Thread) {
+	intrinsics.atomic_or(&thread.lifecycle.flags, {.Done})
+}
+
+@(private="package")
+_thread_release_memory :: proc "contextless" (thread: ^Thread) {
+	allocator := thread.ownership.creation_allocator
+	context = {}
+	free(thread, allocator)
+}
+
+@(private="package")
+_thread_free :: proc(thread: ^Thread) {
+	free(thread, thread.ownership.creation_allocator)
 }
 
 _select_context_for_thread :: proc(init_context: Maybe(runtime.Context)) -> runtime.Context {

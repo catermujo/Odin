@@ -4,6 +4,7 @@ if not exist "build\" mkdir build
 pushd build
 
 set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused-defineables
+set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-defineables
 
 @echo on
 
@@ -38,10 +39,17 @@ set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused
 ..\..\..\odin test ..\test_issue_6419.odin %COMMON%  || exit /b
 ..\..\..\odin test ..\test_pr_6470.odin %COMMON%  || exit /b
 ..\..\..\odin test ..\test_pr_6470.odin -define:TEST_EXPECT_FAILURE=true %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=false || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_pkg_order -no-entry-point %COMMON_NO_FILE% || exit /b
+..\..\..\odin check ..\test_issue_build_tag_define_pkg_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
+..\..\..\odin check ..\test_issue_deferred_when_import -no-entry-point %COMMON_NO_FILE% || exit /b
+..\..\..\odin test ..\test_pr_6476.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6484.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin test ..\test_issue_6753.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6874.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin test ..\test_issue_6951_5214.odin %COMMON%  || exit /b
+..\..\..\odin check ..\test_type_switch_alias.odin %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin check ..\test_issue_6979.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin test ..\test_issue_7008.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_7012.odin -no-entry-point %COMMON% || exit /b
@@ -73,6 +81,8 @@ clang -c ..\test_issue_sysv_abi.c -o test_issue_sysv_abi_c.o || exit /b
 ..\..\..\odin run ..\test_issue_7562.odin %COMMON% -no-crt -no-thread-local -o:speed || exit /b
 ..\..\..\odin test ..\test_issue_7587.odin %COMMON%  || exit /b
 ..\..\..\odin run ..\test_issue_7596.odin %COMMON% || exit /b
+..\..\..\odin check ..\test_recursive_type_field_query.odin -no-entry-point %COMMON% 2>&1 | find /c "Error:" | findstr /x "2" || exit /b
+..\..\..\odin check ..\test_inferred_array_literal_len_cycle.odin -no-entry-point %COMMON% || exit /b
 
 @echo off
 

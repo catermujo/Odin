@@ -89,6 +89,7 @@ TOKEN_KIND(Token__KeywordBegin, ""), \
 	TOKEN_KIND(Token_package,     "package"),     \
 	TOKEN_KIND(Token_typeid,      "typeid"),      \
 	TOKEN_KIND(Token_when,        "when"),        \
+	TOKEN_KIND(Token_with,        "with"),        \
 	TOKEN_KIND(Token_where,       "where"),       \
 	TOKEN_KIND(Token_if,          "if"),          \
 	TOKEN_KIND(Token_else,        "else"),        \
@@ -104,6 +105,7 @@ TOKEN_KIND(Token__KeywordBegin, ""), \
 	TOKEN_KIND(Token_defer,       "defer"),       \
 	TOKEN_KIND(Token_return,      "return"),      \
 	TOKEN_KIND(Token_proc,        "proc"),        \
+	TOKEN_KIND(Token_lambda,      "lambda"),      \
 	TOKEN_KIND(Token_struct,      "struct"),      \
 	TOKEN_KIND(Token_union,       "union"),       \
 	TOKEN_KIND(Token_enum,        "enum"),        \
@@ -280,7 +282,11 @@ gb_internal gb_inline bool token_is_shift(TokenKind t) {
 
 gb_internal gb_inline void print_token(Token t) { gb_printf("%.*s\n", LIT(t.string)); }
 
+#ifndef CLANGD_TU_error
+
 #include "error.cpp"
+
+#endif
 
 
 enum TokenizerInitError {

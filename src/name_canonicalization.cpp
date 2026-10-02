@@ -149,7 +149,9 @@ gb_internal bool type_set_update(TypeSet *s, TypeInfoPair pair) { // returns tru
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -191,7 +193,9 @@ gb_internal bool type_set_update_with_mutex(TypeSet *s, TypeInfoPair pair, RWSpi
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -458,6 +462,9 @@ gb_internal void write_canonical_params(TypeWriter *w, Type *params) {
 
 		switch (v->kind) {
 		case Entity_Variable:
+			if (v->flags&EntityFlag_ByPtr) {
+				type_writer_appendc(w, CANONICAL_PARAM_BY_PTR);
+			}
 			if (v->flags&EntityFlag_CVarArg) {
 				type_writer_appendc(w, CANONICAL_PARAM_C_VARARG);
 			}
@@ -527,6 +534,17 @@ gb_internal u64 type_hash_canonical_type(Type *type) {
 	if (type == nullptr) {
 		return 0;
 	}
+
+	// Hash aliases identically to their base types.
+	while (type->kind == Type_Named &&
+	       type->Named.type_name != nullptr &&
+	       type->Named.type_name->TypeName.is_type_alias) {
+		type = type->Named.base;
+		if (type == nullptr) {
+			return 0;
+		}
+	}
+
 	u64 prev_hash = type->canonical_hash.load(std::memory_order_relaxed);
 	if (prev_hash != 0) {
 		return prev_hash;
@@ -941,10 +959,11 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 			write_canonical_params(w, type->Struct.polymorphic_params);
 		}
 
-		if (type->Struct.is_packed)      type_writer_appendc(w, "#packed");
-		if (type->Struct.is_raw_union)   type_writer_appendc(w, "#raw_union");
-		if (type->Struct.is_all_or_none) type_writer_appendc(w, "#all_or_none");
-		if (type->Struct.custom_min_field_align != 0) type_writer_append_fmt(w, "#min_field_align(%lld)", cast(long long)type->Struct.custom_min_field_align);
+			if (type->Struct.is_packed)      type_writer_appendc(w, "#packed");
+			if (type->Struct.is_raw_union)   type_writer_appendc(w, "#raw_union");
+			if (type->Struct.is_no_copy)     type_writer_appendc(w, "#no_copy");
+			if (type->Struct.is_all_or_none) type_writer_appendc(w, "#all_or_none");
+			if (type->Struct.custom_min_field_align != 0) type_writer_append_fmt(w, "#min_field_align(%lld)", cast(long long)type->Struct.custom_min_field_align);
 		if (type->Struct.custom_max_field_align != 0) type_writer_append_fmt(w, "#max_field_align(%lld)", cast(long long)type->Struct.custom_max_field_align);
 		if (type->Struct.custom_align != 0)           type_writer_append_fmt(w, "#align(%lld)",           cast(long long)type->Struct.custom_align);
 		type_writer_appendb(w, '{');
@@ -997,7 +1016,9 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		return;
 
 	case Type_Proc:
-		type_writer_appendc(w, "proc");
+		// a closure ('lambda') is a distinct type from a same-signature proc (2-word value, captures an
+		// environment). It must hash and compare differently, otherwise the two collide in type-keyed caches.
+		type_writer_appendc(w, type->Proc.is_closure ? "lambda" : "proc");
 		if (default_calling_convention() != type->Proc.calling_convention) {
 			type_writer_appendc(w, "\"");
 			type_writer_appendc(w, proc_calling_convention_strings[type->Proc.calling_convention]);
@@ -1048,7 +1069,7 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		write_canonical_params(w, type);
 		return;
 	default:
-		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_strings[type->kind]));
+		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_kind_strings[type->kind]));
 		break;
 	}
 

@@ -831,14 +831,16 @@ gb_internal void lb_setup_type_info_data_giant_array(lbModule *m, i64 global_typ
 
 			LLVMValueRef vals[11] = {};
 
-			{
-				u8 flags = 0;
-				if (t->Struct.is_packed)      flags |= 1<<0;
-				if (t->Struct.is_raw_union)   flags |= 1<<1;
-				if (t->Struct.is_all_or_none) flags |= 1<<2;
-				if (t->Struct.custom_align)   flags |= 1<<3;
+				{
+					u8 flags = 0;
+					if (t->Struct.is_packed)      flags |= 1<<0;
+					if (t->Struct.is_raw_union)   flags |= 1<<1;
+					if (t->Struct.is_all_or_none) flags |= 1<<2;
+					if (t->Struct.custom_align)   flags |= 1<<3;
+					if (t->Struct.is_simple)      flags |= 1<<4;
+					if (t->Struct.is_no_copy)     flags |= 1<<5;
 
-				vals[6] = lb_const_int(m, t_u8, flags).value;
+					vals[6] = lb_const_int(m, t_u8, flags).value;
 				if (is_type_comparable(t) && !is_type_simple_compare(t)) {
 					vals[10] = lb_equal_proc_for_type(m, t).value;
 				}

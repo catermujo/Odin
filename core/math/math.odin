@@ -1,3 +1,4 @@
+#+no-instrumentation
 // Typical trignometric and other basic math routines.
 package math
 
@@ -388,7 +389,10 @@ tan :: proc{
 	tan_f64, tan_f64le, tan_f64be,
 }
 
-@(require_results) lerp :: proc "contextless" (a, b: $T, t: $E) -> (x: T) { return a*(1-t) + b*t }
+@(require_results) lerp :: proc "contextless" (a, b: $T, t: $E) -> (x: T) {
+	tt := T(t)
+	return a*(1-tt) + b*tt
+}
 @(require_results) saturate :: proc "contextless" (a: $T) -> (x: T) { return clamp(a, 0, 1) }
 
 @(require_results)
@@ -2452,7 +2456,7 @@ hypot :: proc{
 
 @(require_results)
 count_digits_of_base :: proc "contextless" (value: $T, $base: int) -> (digits: int) where intrinsics.type_is_integer(T) {
-	#assert(base >= 2, "base must be 2 or greater.")
+	#assert(base >= 2, "base must be 2 or greater.", #trigger_location)
 
 	value := value
 	when !intrinsics.type_is_unsigned(T) {

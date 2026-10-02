@@ -48,6 +48,9 @@ enum EntityFlag : u64 {
 
 	EntityFlag_NoCapture = 1ull<<13, // #no_capture
 
+	EntityFlag_Captured     = 1ull<<14, // shadow var captured by an enclosing 'lambda' closure environment
+	EntityFlag_CaptureByRef = 1ull<<35, // capture is by reference: the env slot holds a pointer to the original
+
 	EntityFlag_PolyConst     = 1ull<<15,
 	EntityFlag_NotExported   = 1ull<<16,
 	EntityFlag_ConstInput    = 1ull<<17,
@@ -296,6 +299,7 @@ struct Entity {
 			String  objc_selector_name;
 			Entity *objc_class;
 			DeferredProcedure deferred_procedure;
+			ScopeExitContract scope_exit_contract;
 
 			struct GenProcsData *gen_procs;
 			BlockingMutex gen_procs_mutex;
@@ -314,6 +318,7 @@ struct Entity {
 			bool    no_sanitize_address        : 1;
 			bool    no_sanitize_memory         : 1;
 			bool    no_sanitize_thread         : 1;
+			bool    no_warn_excessive_inlining : 1;
 			bool    is_objc_impl_or_import     : 1;
 			bool    is_objc_class_method       : 1;
 		} Procedure;
@@ -438,6 +443,11 @@ gb_internal bool entity_has_deferred_procedure(Entity *e) {
 		return e->Procedure.deferred_procedure.entity != nullptr;
 	}
 	return false;
+}
+
+gb_internal bool entity_has_scope_exit_contract(Entity *e) {
+	GB_ASSERT(e != nullptr);
+	return e->kind == Entity_Procedure && e->Procedure.scope_exit_contract.cleanup != nullptr;
 }
 
 
@@ -595,6 +605,11 @@ gb_internal Entity *entity_from_expr(Ast *expr);
 gb_internal Entity *strip_entity_wrapping(Entity *e) {
 	if (e == nullptr) {
 		return nullptr;
+	}
+	if ((e->flags & EntityFlag_Overridden) != 0 &&
+	    e->aliased_of != nullptr &&
+	    (e->kind == Entity_Procedure || e->kind == Entity_ProcGroup)) {
+		return strip_entity_wrapping(e->aliased_of);
 	}
 	if (e->kind != Entity_Constant) {
 		return e;

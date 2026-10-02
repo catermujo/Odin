@@ -40,6 +40,9 @@ enum BuiltinProcId {
 
 	BuiltinProc_raw_data,
 
+	BuiltinProc_closure_clone, // copy a closure's environment to an allocator so it can escape its scope
+	BuiltinProc_closure_free,  // free a cloned closure's environment
+
 	BuiltinProc_DIRECTIVE, // NOTE(bill): This is used for specialized hash-prefixed procedures
 
 	// "Intrinsics"
@@ -293,6 +296,7 @@ BuiltinProc__type_simple_boolean_begin,
 	BuiltinProc_type_is_simple_compare, // easily compared using memcmp
 	BuiltinProc_type_is_nearly_simple_compare, // easily compared using memcmp (including floats)
 	BuiltinProc_type_is_dereferenceable,
+	BuiltinProc_type_is_trivially_copyable, // contains no managed pointers
 	BuiltinProc_type_is_valid_map_key,
 	BuiltinProc_type_is_valid_matrix_elements,
 
@@ -448,6 +452,9 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("unreachable"),      0, false, Expr_Expr, BuiltinProcPkg_builtin, /*diverging*/true},
 
 	{STR_LIT("raw_data"),         1, false, Expr_Expr, BuiltinProcPkg_builtin},
+
+	{STR_LIT("closure_clone"),    2, false, Expr_Expr, BuiltinProcPkg_builtin},
+	{STR_LIT("closure_free"),     2, false, Expr_Stmt, BuiltinProcPkg_builtin},
 
 	{STR_LIT(""),                 0, true,  Expr_Expr, BuiltinProcPkg_builtin}, // DIRECTIVE
 
@@ -699,6 +706,7 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("type_is_simple_compare"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_nearly_simple_compare"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_dereferenceable"),   1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("type_is_trivially_copyable"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_valid_map_key"),     1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_valid_matrix_elements"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 
