@@ -14,6 +14,8 @@ freestanding)
 	odin check examples/all -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -target:freestanding_arm64
 	echo Checking freestanding_arm32
 	odin check examples/all -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -target:freestanding_arm32
+	echo Checking freestanding_thumbv6m smoke target
+	odin check tests/targets/thumbv6m/smoke -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -no-entry-point -target:freestanding_thumbv6m
 	echo Checking freestanding_riscv64
 	odin check examples/all -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -target:freestanding_riscv64
 	;;

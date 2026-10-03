@@ -15,12 +15,12 @@ when ODIN_USE_SEPARATE_MODULES {
 }
 
 @(private="package", no_instrumentation)
-instrumentation_enter :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
+_custom_instrumentation_enter :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
 	_instrumentation_enter(a, b, loc)
 }
 
 @(private="package", no_instrumentation)
-instrumentation_exit :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
+_custom_instrumentation_exit :: #force_inline proc "contextless" (a, b: rawptr, loc: runtime.Source_Code_Location) {
 	_instrumentation_exit(a, b, loc)
 }
 

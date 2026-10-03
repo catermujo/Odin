@@ -152,10 +152,10 @@ struct TypeStruct {
 	Wait_Signal     polymorphic_wait_signal;
 
 	Type *          soa_elem;
+	Type *          soa_index;
 	i32             soa_count;
 	StructSoaKind   soa_kind;
 	Wait_Signal     fields_wait_signal;
-	Futex           checking_thread; // 1 + the index of the thread in `check_struct_type` for it, else 0
 	BlockingMutex   soa_mutex;
 	BlockingMutex   offset_mutex; // for settings offsets
 
@@ -163,6 +163,7 @@ struct TypeStruct {
 	bool            are_offsets_set             : 1;
 	bool            is_packed                   : 1;
 	bool            is_raw_union                : 1;
+	bool            is_no_copy                  : 1;
 	bool            is_all_or_none              : 1;
 	bool            is_simple                   : 1;
 	bool            is_poly_specialized         : 1;
@@ -182,7 +183,6 @@ struct TypeUnion {
 	Type *           polymorphic_parent;
 	Wait_Signal      polymorphic_wait_signal;
 	Wait_Signal      variants_wait_signal; // signalled once `variants` is populated (mirrors TypeStruct.fields_wait_signal)
-	Futex            checking_thread;      // 1 + the index of the thread in `check_union_type` for it, else 0
 
 	std::atomic<i16> tag_size;
 	bool             is_polymorphic;
@@ -212,6 +212,13 @@ struct TypeProc {
 	bool     diverging; // no return
 	bool     return_by_pointer;
 	bool     optional_ok;
+	// closures (the 'lambda' keyword). A closure value is a 2-word {fn_ptr, env_ptr} fat
+	// pointer instead of a bare function pointer. `captures` holds the body-local shadow entities
+	// (one per capture, in env-field order); each shadow's aliased_of points at the captured outer
+	// variable and Variable.field_index is its env slot.
+	bool     is_closure;
+	Slice<Entity *> captures;
+	Type *   env_type; // anonymous struct laying out the captured environment (one field per capture)
 };
 
 struct TypeNamed {
@@ -326,7 +333,7 @@ enum TypeKind {
 	Type_Count,
 };
 
-gb_global String const type_strings[] = {
+gb_global String const type_kind_strings[] = {
 	{cast(u8 *)"Invalid", gb_size_of("Invalid")},
 #define TYPE_KIND(k, ...) {cast(u8 *)#k, gb_size_of(#k)-1},
 	TYPE_KINDS
@@ -340,6 +347,7 @@ gb_global String const type_strings[] = {
 enum TypeFlag : u32 {
 	TypeFlag_Polymorphic     = 1<<1,
 	TypeFlag_PolySpecialized = 1<<2,
+	TypeFlag_InProcessOfCheckingPolymorphic = 1<<3,
 };
 
 struct Type {
@@ -355,7 +363,7 @@ struct Type {
 	std::atomic<i64> cached_align;
 	std::atomic<u64> canonical_hash;
 	std::atomic<u32> flags; // TypeFlag
-	std::atomic<bool> failure;
+	bool failure;
 };
 
 // IMPORTANT NOTE(bill): This must match the same as the in core.odin
@@ -412,10 +420,10 @@ enum : int {
 
 gb_internal bool is_type_comparable(Type *t);
 gb_internal bool is_type_simple_compare(Type *t);
+gb_internal bool is_type_trivially_copyable(Type *t);
 gb_internal Type *type_deref(Type *t, bool allow_multi_pointer=false);
 gb_internal Type *base_type(Type *t);
 gb_internal Type *alloc_type_multi_pointer(Type *elem);
-gb_internal void wait_for_record_signal(Wait_Signal *signal, Futex *checking_thread);
 
 gb_internal u32 type_info_flags_of_type(Type *type) {
 	if (type == nullptr) {
@@ -810,18 +818,6 @@ gb_global Type *t_atomic_memory_order = nullptr;
 
 
 
-
-enum OdinFastMathFlag : u8 {
-	OdinFastMath_Allow_Reassoc    = 0,
-	OdinFastMath_No_NaNs          = 1,
-	OdinFastMath_No_Infs          = 2,
-	OdinFastMath_No_Signed_Zeros  = 3,
-	OdinFastMath_Allow_Reciprocal = 4,
-	OdinFastMath_Allow_Contract   = 5,
-	OdinFastMath_Approx_Func      = 6,
-
-	OdinFastMath_COUNT,
-};
 
 char const *OdinFastMathFlag_strings[OdinFastMath_COUNT] = {
 	"Allow_Reassoc",
@@ -1754,6 +1750,12 @@ gb_internal bool is_type_proc(Type *t) {
 	if (t == nullptr) { return false; }
 	return t->kind == Type_Proc;
 }
+// a closure is a 'lambda' value: a 2-word {fn, env} fat pointer rather than a bare function pointer.
+gb_internal bool is_type_closure(Type *t) {
+	t = base_type(t);
+	if (t == nullptr) { return false; }
+	return t->kind == Type_Proc && t->Proc.is_closure;
+}
 gb_internal bool is_type_asm_proc(Type *t) {
 	t = base_type(t);
 	if (t == nullptr) { return false; }
@@ -2041,6 +2043,11 @@ gb_internal bool is_type_raw_union(Type *t) {
 	t = base_type(t);
 	if (t == nullptr) { return false; }
 	return (t->kind == Type_Struct && t->Struct.is_raw_union);
+}
+gb_internal bool is_type_no_copy(Type *t) {
+	t = base_type(t);
+	if (t == nullptr) { return false; }
+	return (t->kind == Type_Struct && t->Struct.is_no_copy);
 }
 gb_internal bool is_type_enum(Type *t) {
 	t = base_type(t);
@@ -2497,13 +2504,13 @@ gb_internal TypeTuple *get_record_polymorphic_params(Type *t) {
 	t = base_type(t);
 	switch (t->kind) {
 	case Type_Struct:
-		wait_for_record_signal(&t->Struct.polymorphic_wait_signal, &t->Struct.checking_thread);
+		wait_signal_until_available(&t->Struct.polymorphic_wait_signal);
 		if (t->Struct.polymorphic_params) {
 			return &t->Struct.polymorphic_params->Tuple;
 		}
 		break;
 	case Type_Union:
-		wait_for_record_signal(&t->Union.polymorphic_wait_signal, &t->Union.checking_thread);
+		wait_signal_until_available(&t->Union.polymorphic_wait_signal);
 		if (t->Union.polymorphic_params) {
 			return &t->Union.polymorphic_params->Tuple;
 		}
@@ -2513,22 +2520,11 @@ gb_internal TypeTuple *get_record_polymorphic_params(Type *t) {
 }
 
 
-gb_internal TypeNameObjCMetadata *entity_objc_metadata(Entity *e) {
-	GB_ASSERT(e->kind == Entity_TypeName);
-	mutex_lock(&global_type_name_objc_metadata_mutex);
-	TypeNameObjCMetadata *md = e->TypeName.objc_metadata;
-	Type *original = e->TypeName.original_type_for_parapoly;
-	if (md == nullptr && original != nullptr && original->kind == Type_Named && original->Named.type_name != nullptr) {
-		md = original->Named.type_name->TypeName.objc_metadata;
-	}
-	mutex_unlock(&global_type_name_objc_metadata_mutex);
-	return md;
-}
-
-gb_internal gb_thread_local Array<Type *> is_type_polymorphic_named_stack;
-
 gb_internal bool is_type_polymorphic(Type *t, bool or_specialized=false) {
 	if (t == nullptr) {
+		return false;
+	}
+	if (t->flags & TypeFlag_InProcessOfCheckingPolymorphic) {
 		return false;
 	}
 
@@ -2538,18 +2534,10 @@ gb_internal bool is_type_polymorphic(Type *t, bool or_specialized=false) {
 
 	case Type_Named:
 		{
-			Array<Type *> &stack = is_type_polymorphic_named_stack;
-			for (Type *named : stack) {
-				if (named == t) {
-					return false;
-				}
-			}
-			if (stack.allocator.proc == nullptr) {
-				array_init(&stack, heap_allocator());
-			}
-			array_add(&stack, t);
+			u32 flags = t->flags;
+			t->flags |= TypeFlag_InProcessOfCheckingPolymorphic;
 			bool ok = is_type_polymorphic(t->Named.base, or_specialized);
-			array_pop(&stack);
+			t->flags = flags;
 			return ok;
 		}
 
@@ -2609,9 +2597,6 @@ gb_internal bool is_type_polymorphic(Type *t, bool or_specialized=false) {
 		break;
 
 	case Type_Proc:
-		if (t->Proc.is_poly_specialized) {
-			return or_specialized;
-		}
 		if (t->Proc.is_polymorphic) {
 			return true;
 		}
@@ -2681,14 +2666,6 @@ gb_internal bool is_type_polymorphic(Type *t, bool or_specialized=false) {
 		return is_type_polymorphic(t->BitField.backing_type, or_specialized);
 	}
 	return false;
-}
-
-// e.g. to name a procedure after its specialization
-gb_internal bool is_type_polymorphic_or_specialized_proc(Type *t) {
-	if (t != nullptr && t->kind == Type_Proc && t->Proc.is_poly_specialized) {
-		return true;
-	}
-	return is_type_polymorphic(t);
 }
 
 
@@ -2814,6 +2791,10 @@ gb_internal bool elem_type_can_be_constant(Type *t) {
 	if (is_type_any(t)) {
 		return false;
 	}
+	if (is_type_closure(t)) {
+		// a closure carries a runtime environment pointer, so it can never be a compile-time constant.
+		return false;
+	}
 	if (is_type_raw_union(t)) {
 		return is_type_raw_union_constantable(t);
 	}
@@ -2849,83 +2830,121 @@ gb_internal bool is_type_lock_free(Type *t) {
 
 
 
-gb_internal bool is_type_comparable(Type *t) {
+gb_internal bool is_type_comparable_internal(Type *t, PtrSet<Type *> *visiting) {
 	t = base_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	// Recursive value types are invalid, but must not recurse until the checker stack overflows
+	// before check_for_type_cycles can report the declaration error.
+	if (ptr_set_update(visiting, t)) {
+		return false;
+	}
+
+	bool result = false;
 	switch (t->kind) {
 	case Type_Basic:
 		switch (t->Basic.kind) {
 		case Basic_UntypedNil:
 		case Basic_any:
-			return false;
+			result = false;
+			break;
 		case Basic_rune:
-			return true;
 		case Basic_string:
 		case Basic_cstring:
 		case Basic_string16:
 		case Basic_cstring16:
-			return true;
 		case Basic_typeid:
-			return true;
+			result = true;
+			break;
+		default:
+			result = true;
+			break;
 		}
-		return true;
+		break;
 	case Type_Pointer:
-		return true;
 	case Type_SoaPointer:
-		return true;
 	case Type_MultiPointer:
-		return true;
+		result = true;
+		break;
 	case Type_Enum:
-		return is_type_comparable(core_type(t));
+		result = is_type_comparable_internal(core_type(t), visiting);
+		break;
 	case Type_EnumeratedArray:
-		return is_type_comparable(t->EnumeratedArray.elem);
+		result = is_type_comparable_internal(t->EnumeratedArray.elem, visiting);
+		break;
 	case Type_Array:
-		return is_type_comparable(t->Array.elem);
+		result = is_type_comparable_internal(t->Array.elem, visiting);
+		break;
 	case Type_Proc:
-		return true;
+		// bare procs compare as function pointers; a closure is a 2-word {fn,env} aggregate and is
+		// not comparable (matching slices/maps), which also keeps the scalar-compare codegen path unreached.
+		result = !t->Proc.is_closure;
+		break;
 	case Type_Matrix:
-		return is_type_comparable(t->Matrix.elem);
+		result = is_type_comparable_internal(t->Matrix.elem, visiting);
+		break;
 
 	case Type_FixedCapacityDynamicArray:
-		return false;
+		result = false;
+		break;
 
 	case Type_BitSet:
-		return true;
+		result = true;
+		break;
 
 	case Type_Struct:
 		if (t->Struct.soa_kind != StructSoa_None) {
-			return false;
+			break;
 		}
 		// an unspecialized polymorphic record has no values to compare
 		if (is_type_polymorphic_record_unspecialized(t)) {
-			return false;
+			break;
 		}
 		if (t->Struct.is_raw_union) {
-			return is_type_simple_compare(t);
+			result = is_type_simple_compare(t);
+			break;
 		}
+		result = true;
 		for_array(i, t->Struct.fields) {
 			Entity *f = t->Struct.fields[i];
-			if (!is_type_comparable(f->type)) {
-				return false;
+			if (!is_type_comparable_internal(f->type, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_Union:
+		result = true;
 		for_array(i, t->Union.variants) {
 			Type *v = t->Union.variants[i];
-			if (!is_type_comparable(v)) {
-				return false;
+			if (!is_type_comparable_internal(v, visiting)) {
+				result = false;
+				break;
 			}
 		}
-		return true;
+		break;
 
 	case Type_SimdVector:
-		return true;
+		result = true;
+		break;
 
 	case Type_BitField:
-		return is_type_comparable(t->BitField.backing_type);
+		result = is_type_comparable_internal(t->BitField.backing_type, visiting);
+		break;
 	}
-	return false;
+
+	ptr_set_remove(visiting, t);
+	return result;
+}
+
+gb_internal bool is_type_comparable(Type *t) {
+	PtrSet<Type *> visiting = {};
+	ptr_set_init(&visiting);
+	bool result = is_type_comparable_internal(t, &visiting);
+	ptr_set_destroy(&visiting);
+	return result;
 }
 
 // NOTE(bill): type can be easily compared using memcmp
@@ -2954,10 +2973,12 @@ gb_internal bool is_type_simple_compare(Type *t) {
 	case Type_Pointer:
 	case Type_MultiPointer:
 	case Type_SoaPointer:
-	case Type_Proc:
 	case Type_BitSet:
 	case Type_BitField:
 		return true;
+	case Type_Proc:
+		// closures are 2-word aggregates and not (simply) comparable; bare procs are pointers.
+		return !t->Proc.is_closure;
 
 	case Type_Matrix:
 		return is_type_simple_compare(t->Matrix.elem);
@@ -3072,6 +3093,135 @@ gb_internal bool is_type_nearly_simple_compare(Type *t) {
 	case Type_Map:
 		return false;
 
+	}
+
+	return false;
+}
+
+// A pointer-shaped primitive: a type whose value is (or holds) a raw address.
+// Pointers themselves are trivially copyable, but a struct/union/array that
+// *contains* a pointer-typed field is not — the user rule is "a struct
+// containing pointers is not [POD]", and we extend that to any aggregate.
+gb_internal bool is_pointer_typed_primitive(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+	case Type_Proc:           // function pointer (bare proc)
+		return true;
+	case Type_Basic:
+		return (t->Basic.flags & BasicFlag_Pointer) != 0; // rawptr, uintptr
+	}
+	return false;
+}
+
+// NOTE: A type is "trivially copyable" if memcpy() of a value of this type
+// yields a fully usable copy. Pointers themselves qualify — ^T, rawptr,
+// uintptr, bare procs are all just addresses, fine to copy. But an aggregate
+// that contains a pointer field is NOT trivially copyable: the copy's pointer
+// still aliases the original's pointee, so the copy is lifetime-tied to
+// something else (string data, slice data, dynarray data, map internals,
+// closure env, ...). Bare pointer values are explicit about this; aggregate
+// pointer fields are easy to miss.
+//
+// Trivially copyable: numerics, bool, rune, rawptr, uintptr, typeid, ^T,
+// [^]T, ^#soa[N]T, bare procs, enums, bit sets, bit fields, arrays /
+// enumerated arrays / simd vectors / matrices / fixed-capacity dynamic arrays
+// of trivially copyable element, structs (incl. soa structs and raw unions)
+// where every field is trivially copyable AND no field is a pointer-typed
+// primitive, unions where every variant is trivially copyable AND no variant
+// is a pointer-typed primitive, generic T.
+//
+// NOT trivially copyable: string/cstring/string16/cstring16, []T, [dynamic]T,
+// map[K]V, any, closures (they're an aggregate with the env pointer field).
+gb_internal bool is_type_trivially_copyable(Type *t) {
+	t = core_type(t);
+	if (t == nullptr) {
+		return false;
+	}
+	switch (t->kind) {
+	case Type_Basic:
+		// numerics, bool, rune, rawptr, uintptr, typeid
+		if (t->Basic.flags & (BasicFlag_Numeric | BasicFlag_Boolean | BasicFlag_Rune | BasicFlag_Pointer)) {
+			return true;
+		}
+		return t->Basic.kind == Basic_typeid;
+
+	case Type_Pointer:        // ^T
+	case Type_MultiPointer:   // [^]T
+	case Type_SoaPointer:     // ^#soa[N]T
+		return true;
+
+	case Type_Array:
+	case Type_EnumeratedArray: {
+		Type *e = t->Array.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_FixedCapacityDynamicArray: {
+		Type *e = t->FixedCapacityDynamicArray.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_SimdVector: {
+		Type *e = t->SimdVector.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_Matrix: {
+		Type *e = t->Matrix.elem;
+		if (!is_type_trivially_copyable(e)) return false;
+		if (is_pointer_typed_primitive(e))  return false;
+		return true;
+	}
+
+	case Type_BitSet:
+	case Type_Enum:
+	case Type_BitField:
+		return true;
+
+	case Type_Proc:
+		// Bare procs are just code addresses.
+		// Closures are {fn, env} — env is a pointer field → not POD.
+		return !t->Proc.is_closure;
+
+	case Type_Struct:
+		for_array(i, t->Struct.fields) {
+			Entity *f = t->Struct.fields[i];
+			if (!is_type_trivially_copyable(f->type)) return false;
+			if (is_pointer_typed_primitive(f->type))  return false;
+		}
+		return true;
+
+	case Type_Union:
+		for_array(i, t->Union.variants) {
+			Type *v = t->Union.variants[i];
+			if (!is_type_trivially_copyable(v)) return false;
+			if (is_pointer_typed_primitive(v))  return false;
+		}
+		return true;
+
+	case Type_Generic:
+		// Unbound type parameter — assume trivially copyable.
+		return true;
+
+	case Type_Tuple:
+		for_array(i, t->Tuple.variables) {
+			Type *vt = t->Tuple.variables[i]->type;
+			if (!is_type_trivially_copyable(vt)) return false;
+			if (is_pointer_typed_primitive(vt))  return false;
+		}
+		return true;
 	}
 
 	return false;
@@ -3264,7 +3414,8 @@ gb_internal bool are_proc_properties_identical(Type *x, Type *y) {
 	       x->Proc.c_vararg    == y->Proc.c_vararg    &&
 	       x->Proc.variadic    == y->Proc.variadic    &&
 	       x->Proc.diverging   == y->Proc.diverging   &&
-	       x->Proc.optional_ok == y->Proc.optional_ok;
+	       x->Proc.optional_ok == y->Proc.optional_ok &&
+	       x->Proc.is_closure  == y->Proc.is_closure; // a closure type is never identical to a bare proc
 }
 
 gb_internal bool are_types_identical_internal(Type *x, Type *y, bool check_tuple_names) {
@@ -3396,6 +3547,7 @@ gb_internal bool are_types_identical_internal(Type *x, Type *y, bool check_tuple
 
 	case Type_Struct:
 		if (x->Struct.is_raw_union   == y->Struct.is_raw_union &&
+		    x->Struct.is_no_copy     == y->Struct.is_no_copy &&
 		    x->Struct.fields.count   == y->Struct.fields.count &&
 		    x->Struct.is_packed      == y->Struct.is_packed &&
 		    x->Struct.is_all_or_none == y->Struct.is_all_or_none &&
@@ -3591,7 +3743,7 @@ gb_internal bool union_variant_index_types_equal(Type *v, Type *vt) {
 gb_internal i64 union_variant_index_checked(Type *u, Type *v) {
 	u = base_type(u);
 	GB_ASSERT(u->kind == Type_Union);
-	wait_for_record_signal(&u->Union.variants_wait_signal, &u->Union.checking_thread);
+	wait_signal_until_available(&u->Union.variants_wait_signal);
 
 	for_array(i, u->Union.variants) {
 		Type *vt = u->Union.variants[i];
@@ -3610,7 +3762,7 @@ gb_internal i64 union_variant_index_checked(Type *u, Type *v) {
 gb_internal bool union_is_variant_of(Type *u, Type *v) {
 	u = base_type(u);
 	GB_ASSERT(u->kind == Type_Union);
-	wait_for_record_signal(&u->Union.variants_wait_signal, &u->Union.checking_thread);
+	wait_signal_until_available(&u->Union.variants_wait_signal);
 
 	for_array(i, u->Union.variants) {
 		Type *vt = u->Union.variants[i];
@@ -3675,19 +3827,13 @@ gb_internal Type *union_tag_type(Type *u) {
 	return t_uint;
 }
 
-gb_internal bool type_conversion_is_variant(Type *dst, Type *src) {
+gb_internal bool type_conversion_is_variant(Type *src, Type *dst) {
 	dst = base_type(core_broadcastable_elem_type(dst));
 	if (dst == nullptr) { return false; }
 
 	switch (dst->kind) {
 	case Type_Union:
-		if (union_is_variant_of(dst, src)) {
-			return true;
-		}
-		if (dst->Union.variants.count == 1) {
-			return type_conversion_is_variant(dst->Union.variants[0], src);
-		}
-		return false;
+		return union_is_variant_of(dst, src);
 	}
 	return false;
 }
@@ -3801,7 +3947,7 @@ gb_internal Selection lookup_field_from_index(Type *type, i64 index) {
 	isize max_count = 0;
 	switch (type->kind) {
 	case Type_Struct:
-		wait_for_record_signal(&type->Struct.fields_wait_signal, &type->Struct.checking_thread);
+		wait_signal_until_available(&type->Struct.fields_wait_signal);
 		max_count = type->Struct.fields.count;
 		break;
 	case Type_Tuple:    max_count = type->Tuple.variables.count; break;
@@ -3813,7 +3959,7 @@ gb_internal Selection lookup_field_from_index(Type *type, i64 index) {
 
 	switch (type->kind) {
 	case Type_Struct: {
-		wait_for_record_signal(&type->Struct.fields_wait_signal, &type->Struct.checking_thread);
+		wait_signal_until_available(&type->Struct.fields_wait_signal);
 		for (isize i = 0; i < max_count; i++) {
 			Entity *f = type->Struct.fields[i];
 			if (f->kind == Entity_Variable) {
@@ -3864,7 +4010,8 @@ gb_internal Selection lookup_field_with_selection(Type *type_, InternedString fi
 		if (has_type_got_objc_class_attribute(original_type) && original_type->kind == Type_Named) {
 			Entity *e = original_type->Named.type_name;
 			GB_ASSERT(e->kind == Entity_TypeName);
-			if (auto *md = entity_objc_metadata(e)) {
+			if (e->TypeName.objc_metadata) {
+				auto *md = e->TypeName.objc_metadata;
 				mutex_lock(md->mutex);
 				defer (mutex_unlock(md->mutex));
 				for (TypeNameObjCMetadataEntry const &entry : md->type_entries) {
@@ -3955,7 +4102,8 @@ gb_internal Selection lookup_field_with_selection(Type *type_, InternedString fi
 		if (has_type_got_objc_class_attribute(original_type) && original_type->kind == Type_Named) {
 			Entity *e = original_type->Named.type_name;
 			GB_ASSERT(e->kind == Entity_TypeName);
-			if (auto *md = entity_objc_metadata(e)) {
+			if (e->TypeName.objc_metadata) {
+				auto *md = e->TypeName.objc_metadata;
 				mutex_lock(md->mutex);
 				defer (mutex_unlock(md->mutex));
 				for (TypeNameObjCMetadataEntry const &entry : md->value_entries) {
@@ -3982,7 +4130,7 @@ gb_internal Selection lookup_field_with_selection(Type *type_, InternedString fi
 			// NOTE(bill): A polymorphic struct has no fields, this only hits in the case of an error
 			return sel;
 		}
-		wait_for_record_signal(&type->Struct.fields_wait_signal, &type->Struct.checking_thread);
+		wait_signal_until_available(&type->Struct.fields_wait_signal);
 		isize field_count = type->Struct.fields.count;
 		if (field_count != 0) for_array(i, type->Struct.fields) {
 			Entity *f = type->Struct.fields[i];
@@ -4452,18 +4600,6 @@ gb_internal i64 type_target_max_align(void) {
 	return max_align;
 }
 
-gb_internal void wait_for_record_signal(Wait_Signal *signal, Futex *checking_thread) {
-	if (signal->futex.load() == 0) {
-		thread_wait_for_owner(&signal->futex, 0, checking_thread->load());
-	}
-}
-
-gb_internal void wait_for_struct_fields(Type *t) {
-	if (t->Struct.polymorphic_parent != nullptr) {
-		wait_for_record_signal(&t->Struct.fields_wait_signal, &t->Struct.checking_thread);
-	}
-}
-
 gb_internal i64 type_align_of_internal(Type *t, TypePath *path) {
 	GB_ASSERT(path != nullptr);
 	if (t->failure) {
@@ -4588,7 +4724,6 @@ gb_internal i64 type_align_of_internal(Type *t, TypePath *path) {
 	} break;
 
 	case Type_Struct: {
-		wait_for_struct_fields(t);
 		if (t->Struct.custom_align > 0) {
 			return gb_max(t->Struct.custom_align, 1);
 		}
@@ -4646,6 +4781,10 @@ gb_internal i64 type_align_of_internal(Type *t, TypePath *path) {
 
 	case Type_SoaPointer:
 		return build_context.int_size;
+
+	case Type_Proc:
+		// closures and bare procs are both pointer-aligned; only the size differs.
+		return build_context.ptr_size;
 	}
 
 	// NOTE(bill): Things that are bigger than build_context.ptr_size, are actually comprised of smaller types
@@ -4703,7 +4842,6 @@ gb_internal i64 *type_set_offsets_of(Slice<Entity *> const &fields, bool is_pack
 gb_internal bool type_set_offsets(Type *t) {
 	t = base_type(t);
 	if (t->kind == Type_Struct) {
-		wait_for_struct_fields(t);
 		// if (t->Struct.are_offsets_being_processed.load()) {
 		// 	return true;
 		// }
@@ -4908,7 +5046,6 @@ gb_internal i64 type_size_of_internal(Type *t, TypePath *path) {
 
 
 	case Type_Struct: {
-		wait_for_struct_fields(t);
 		if (t->Struct.is_raw_union) {
 			i64 count = t->Struct.fields.count;
 			i64 align = type_align_of_internal(t, path);
@@ -4983,6 +5120,10 @@ gb_internal i64 type_size_of_internal(Type *t, TypePath *path) {
 			return FAILURE_SIZE;
 		}
 		return type_size_of_internal(t->BitField.backing_type, path);
+
+	case Type_Proc:
+		// a closure is a fat pointer {fn_ptr, env_ptr}; a bare proc is a single function pointer.
+		return t->Proc.is_closure ? 2*build_context.ptr_size : build_context.ptr_size;
 	}
 
 	// Catch all
@@ -5637,11 +5778,12 @@ gb_internal gbString write_type_to_string(gbString str, Type *type, bool shortha
 			str = gb_string_appendc(str, ")");
 		}
 
-		if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
-		if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
-		if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
-		if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
-		if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
+			if (type->Struct.is_packed)         str = gb_string_appendc(str, " #packed");
+			if (type->Struct.is_raw_union)      str = gb_string_appendc(str, " #raw_union");
+			if (type->Struct.is_no_copy)        str = gb_string_appendc(str, " #no_copy");
+			if (type->Struct.custom_align != 0) str = gb_string_append_fmt(str, " #align %d", cast(int)type->Struct.custom_align);
+			if (type->Struct.is_all_or_none)    str = gb_string_appendc(str, " #all_or_none");
+			if (type->Struct.is_simple)         str = gb_string_appendc(str, " #simple");
 
 		str = gb_string_appendc(str, " {");
 

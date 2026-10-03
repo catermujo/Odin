@@ -28,99 +28,9 @@ to_degrees :: proc "contextless" (radians: $T) -> (out: T) where IS_NUMERIC(ELEM
 	return
 }
 
-@(require_results)
-min_double :: proc "contextless" (a, b: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		#no_bounds_check for i in 0..<len(T) {
-			out[i] = builtin.min(a[i], b[i])
-		}
-	} else {
-		out = builtin.min(a, b)
-	}
-	return
-}
-
-@(require_results)
-min_single :: proc "contextless" (a: $T) -> (out: ELEM_TYPE(T)) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		N :: len(T)
-
-		when N == 1 {
-			out = a[0]
-		} else when N == 2 {
-			out = builtin.min(a[0], a[1])
-		} else {
-			out = builtin.min(a[0], a[1])
-			#no_bounds_check for i in 2..<N {
-				out = builtin.min(out, a[i])
-			}
-		}
-	} else {
-		out = a
-	}
-	return
-}
-
-@(require_results)
-min_triple :: proc "contextless" (a, b, c: $T) -> T where IS_NUMERIC(ELEM_TYPE(T)) {
-	return min_double(a, min_double(b, c))
-}
-
-min :: proc{min_single, min_double, min_triple}
-
-@(require_results)
-max_double :: proc "contextless" (a, b: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		#no_bounds_check for i in 0..<len(T) {
-			out[i] = builtin.max(a[i], b[i])
-		}
-	} else {
-		out = builtin.max(a, b)
-	}
-	return
-}
-
-@(require_results)
-max_single :: proc "contextless" (a: $T) -> (out: ELEM_TYPE(T)) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		N :: len(T)
-
-		when N == 1 {
-			out = a[0]
-		} else when N == 2 {
-			out = builtin.max(a[0], a[1])
-		} else when N == 3 {
-			out = builtin.max(a[0], a[1], a[2])
-		}else {
-			out = builtin.max(a[0], a[1])
-			#no_bounds_check for i in 2..<N {
-				out = builtin.max(out, a[i])
-			}
-		}
-	} else {
-		out = a
-	}
-	return
-}
-
-@(require_results)
-max_triple :: proc "contextless" (a, b, c: $T) -> T where IS_NUMERIC(ELEM_TYPE(T)) {
-	return max_double(a, max_double(b, c))
-}
-
-max :: proc{max_single, max_double, max_triple}
-
-@(require_results)
-abs :: proc "contextless" (a: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		#no_bounds_check for i in 0..<len(T) {
-			out[i] = auto_cast builtin.abs(a[i])
-		}
-	} else {
-		out = auto_cast builtin.abs(a)
-	}
-	return
-}
+min :: builtin.min
+max :: builtin.max
+abs :: builtin.abs
 
 @(require_results)
 sign :: proc "contextless" (a: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
@@ -134,17 +44,7 @@ sign :: proc "contextless" (a: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
 	return
 }
 
-@(require_results)
-clamp :: proc "contextless" (x, a, b: $T) -> (out: T) where IS_NUMERIC(ELEM_TYPE(T)) {
-	when IS_ARRAY(T) {
-		#no_bounds_check for i in 0..<len(T) {
-			out[i] = builtin.clamp(x[i], a[i], b[i])
-		}
-	} else {
-		out = builtin.clamp(x, a, b)
-	}
-	return
-}
+clamp :: builtin.clamp
 
 
 @(require_results)

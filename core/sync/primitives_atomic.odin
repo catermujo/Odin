@@ -13,7 +13,7 @@ Atomic_Mutex_State :: enum Futex {
 // The zero value for a Atomic_Mutex is an unlocked mutex
 //
 // An Atomic_Mutex must not be copied after first use
-Atomic_Mutex :: struct {
+Atomic_Mutex :: struct #no_copy {
 	state: Atomic_Mutex_State,
 }
 
@@ -87,8 +87,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_mutex_unlock)
-atomic_mutex_guard :: proc "contextless" (m: ^Atomic_Mutex) -> bool {
+atomic_mutex_guard :: proc "contextless" (m: ^Atomic_Mutex) -> bool #scope_exit(.implicit, atomic_mutex_unlock(m)) {
 	atomic_mutex_lock(m)
 	return true
 }
@@ -105,7 +104,7 @@ Atomic_RW_Mutex_State_Reader_Mask :: ~Atomic_RW_Mutex_State_Is_Writing
 // The zero value for an Atomic_RW_Mutex is an unlocked mutex.
 //
 // An Atomic_RW_Mutex must not be copied after first use.
-Atomic_RW_Mutex :: struct {
+Atomic_RW_Mutex :: struct #no_copy {
 	state: Atomic_RW_Mutex_State,
 	mutex: Atomic_Mutex,
 	sema:  Atomic_Sema,
@@ -221,8 +220,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_rw_mutex_unlock)
-atomic_rw_mutex_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool {
+atomic_rw_mutex_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool #scope_exit(.implicit, atomic_rw_mutex_unlock(m)) {
 	atomic_rw_mutex_lock(m)
 	return true
 }
@@ -233,8 +231,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_rw_mutex_shared_unlock)
-atomic_rw_mutex_shared_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool {
+atomic_rw_mutex_shared_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool #scope_exit(.implicit, atomic_rw_mutex_shared_unlock(m)) {
 	atomic_rw_mutex_shared_lock(m)
 	return true
 }
@@ -246,7 +243,7 @@ atomic_rw_mutex_shared_guard :: proc "contextless" (m: ^Atomic_RW_Mutex) -> bool
 // The zero value for a Recursive_Mutex is an unlocked mutex
 //
 // An Atomic_Recursive_Mutex must not be copied after first use
-Atomic_Recursive_Mutex :: struct {
+Atomic_Recursive_Mutex :: struct #no_copy {
 	owner:     int,
 	recursion: int,
 	mutex: Mutex,
@@ -297,8 +294,7 @@ Example:
 		...
 	}
 */
-@(deferred_in=atomic_recursive_mutex_unlock)
-atomic_recursive_mutex_guard :: proc "contextless" (m: ^Atomic_Recursive_Mutex) -> bool {
+atomic_recursive_mutex_guard :: proc "contextless" (m: ^Atomic_Recursive_Mutex) -> bool #scope_exit(.implicit, atomic_recursive_mutex_unlock(m)) {
 	atomic_recursive_mutex_lock(m)
 	return true
 }
@@ -309,7 +305,7 @@ atomic_recursive_mutex_guard :: proc "contextless" (m: ^Atomic_Recursive_Mutex) 
 // waiting for signalling the occurence of an event
 //
 // An Atomic_Cond must not be copied after first use
-Atomic_Cond :: struct {
+Atomic_Cond :: struct #no_copy {
 	state: Futex,
 }
 
@@ -344,7 +340,7 @@ atomic_cond_broadcast :: proc "contextless" (c: ^Atomic_Cond) {
 // Posting to the semaphore increases the count by one, or the provided amount.
 //
 // An Atomic_Sema must not be copied after first use
-Atomic_Sema :: struct {
+Atomic_Sema :: struct #no_copy {
 	count: Futex,
 }
 

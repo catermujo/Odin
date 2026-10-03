@@ -36,7 +36,7 @@ holding another lock, that will cause a trivial case of deadlock. Do not use
 `Mutex` in recursive functions. In case multiple locks by the same thread are
 desired, use `Recursive_Mutex`.
 */
-Mutex :: struct {
+Mutex :: struct #no_copy {
 	impl: _Mutex,
 }
 
@@ -108,8 +108,7 @@ section by putting the function inside the `if` statement.
 		...
 	}
 */
-@(deferred_in=mutex_unlock)
-mutex_guard :: proc "contextless" (m: ^Mutex) -> bool {
+mutex_guard :: proc "contextless" (m: ^Mutex) -> bool #scope_exit(.implicit, mutex_unlock(m)) {
 	mutex_lock(m)
 	return true
 }
@@ -147,7 +146,7 @@ result in broken and unsafe behavior. For this reason, mutexes are marked as
 exclusive lock more than once from the same thread, or an exclusive and shared
 lock on the same thread. Taking a shared lock multiple times is acceptable.
 */
-RW_Mutex :: struct {
+RW_Mutex :: struct #no_copy {
 	impl: _RW_Mutex,
 }
 
@@ -257,8 +256,7 @@ section by running this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=rw_mutex_unlock)
-rw_mutex_guard :: proc "contextless" (m: ^RW_Mutex) -> bool {
+rw_mutex_guard :: proc "contextless" (m: ^RW_Mutex) -> bool #scope_exit(.implicit, rw_mutex_unlock(m)) {
 	rw_mutex_lock(m)
 	return true
 }
@@ -284,8 +282,7 @@ section by running this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=rw_mutex_shared_unlock)
-rw_mutex_shared_guard :: proc "contextless" (m: ^RW_Mutex) -> bool {
+rw_mutex_shared_guard :: proc "contextless" (m: ^RW_Mutex) -> bool #scope_exit(.implicit, rw_mutex_shared_unlock(m)) {
 	rw_mutex_shared_lock(m)
 	return true
 }
@@ -313,7 +310,7 @@ released. Trying to use a copy of the lock at a different memory address will
 result in broken and unsafe behavior. For this reason, mutexes are marked as
 `#no_copy`.
 */
-Recursive_Mutex :: struct {
+Recursive_Mutex :: struct #no_copy {
 	impl: _Recursive_Mutex,
 }
 
@@ -379,8 +376,7 @@ section by calling this procedure inside an `if` statement.
 		...
 	}
 */
-@(deferred_in=recursive_mutex_unlock)
-recursive_mutex_guard :: proc "contextless" (m: ^Recursive_Mutex) -> bool {
+recursive_mutex_guard :: proc "contextless" (m: ^Recursive_Mutex) -> bool #scope_exit(.implicit, recursive_mutex_unlock(m)) {
 	recursive_mutex_lock(m)
 	return true
 }
@@ -414,7 +410,7 @@ lock has been released. Trying to use a copy of the lock at a different memory
 address will result in broken and unsafe behavior. For this reason, condition
 variables are marked as `#no_copy`.
 */
-Cond :: struct {
+Cond :: struct #no_copy {
 	impl: _Cond,
 }
 
@@ -494,7 +490,7 @@ must watch the same memory address to know when the lock has been released.
 Trying to use a copy of the lock at a different memory address will result in
 broken and unsafe behavior. For this reason, semaphores are marked as `#no_copy`.
 */
-Sema :: struct {
+Sema :: struct #no_copy {
 	impl: _Sema,
 }
 

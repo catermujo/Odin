@@ -2,7 +2,7 @@ package libc
 
 import "core:c"
 
-#assert(!ODIN_NO_CRT, `"core:c/libc" cannot be imported when '-no-crt' is used`)
+#assert(!ODIN_NO_CRT, `"core:c/libc" cannot be imported when '-no-crt' is used`, #trigger_location)
 
 char           :: c.char // assuming -funsigned-char
 

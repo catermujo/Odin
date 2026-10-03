@@ -11,7 +11,7 @@ Path_Separator_String :: _Path_Separator_String // OS-Specific
 Path_Separator_Chars  :: `/\`
 Path_List_Separator   :: _Path_List_Separator   // OS-Specific
 
-#assert(_Path_Separator <= rune(0x7F), "The system-specific path separator rune is expected to be within the 7-bit ASCII character set.")
+#assert(_Path_Separator <= rune(0x7F), "The system-specific path separator rune is expected to be within the 7-bit ASCII character set.", #trigger_location)
 
 /*
 Return true if `c` is a character used to separate paths into directory and

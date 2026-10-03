@@ -109,11 +109,43 @@ struct DeferredProcedure {
 	Entity *entity;
 };
 
+enum ScopeExitPolicy {
+	ScopeExitPolicy_Invalid,
+	ScopeExitPolicy_Explicit,
+	ScopeExitPolicy_Implicit,
+};
+
+enum ScopeExitBindingSource {
+	ScopeExitBinding_Input,
+	ScopeExitBinding_Result,
+};
+
+struct ScopeExitBinding {
+	ScopeExitBindingSource source;
+	i32 index;
+	bool by_pointer;
+};
+
+struct ScopeExitContract {
+	ScopeExitPolicy policy;
+	Entity *cleanup;
+	Slice<ScopeExitBinding> bindings;
+	TokenPos pos;
+};
+
 
 enum InstrumentationFlag : i32 {
 	Instrumentation_Enabled  = -1,
 	Instrumentation_Default  = 0,
 	Instrumentation_Disabled = +1,
+};
+
+enum OperatorOverloadKind : u8 {
+	OperatorOverloadKind_Invalid,
+	OperatorOverloadKind_Binary,
+	OperatorOverloadKind_IndexGet,
+	OperatorOverloadKind_IndexSet,
+	OperatorOverloadKind_Iterator,
 };
 
 struct AttributeContext {
@@ -127,12 +159,15 @@ struct AttributeContext {
 	String  deprecated_message;
 	String  warning_message;
 	DeferredProcedure deferred_procedure;
+	TokenKind operator_overload_binary_kind;
+	OperatorOverloadKind operator_overload_kind;
 	bool    is_export             : 1;
 	bool    is_static             : 1;
 	bool    require_results       : 1;
 	bool    require_declaration   : 1;
 	bool    has_disabled_proc     : 1;
 	bool    disabled_proc         : 1;
+	bool    has_operator_overload : 1;
 	bool    test                  : 1;
 	bool    init                  : 1;
 	bool    fini                  : 1;
@@ -149,6 +184,7 @@ struct AttributeContext {
 	i64 foreign_import_priority_index;
 	String extra_linker_flags;
 	InstrumentationFlag no_instrumentation;
+	bool    no_warn_excessive_inlining : 1;
 
 	String  objc_class;
 	String  objc_name;
@@ -203,15 +239,27 @@ struct VariadicReuseData {
 	i64 max_count;
 };
 
+enum TriggerTraceKind : u8 {
+	TriggerTrace_Invalid,
+	TriggerTrace_Import,
+	TriggerTrace_Use,
+};
+
+struct TriggerTraceFrame {
+	TriggerTraceKind kind;
+	TokenPos         pos;
+	String           name;
+};
+
+enum { MAX_TRIGGER_TRACE_FRAMES = 32 };
+
 // DeclInfo is used to store information of certain declarations to allow for "any order" usage
 struct DeclInfo {
 	DeclInfo *    parent; // NOTE(bill): only used for procedure literals at the moment
 
-	BlockingMutex next_mutex; // also used for `nested_to_check`
+	BlockingMutex next_mutex;
 	DeclInfo *    next_child;
 	DeclInfo *    next_sibling;
-
-	Array<struct ProcInfo *> nested_to_check; // nested procedures to check once this body is checked
 
 	Scope *       scope;
 
@@ -253,6 +301,8 @@ struct DeclInfo {
 	Array<VariadicReuseData> variadic_reuses;
 	i64 variadic_reuse_max_bytes;
 	i64 variadic_reuse_max_align;
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	// NOTE(bill): this is to prevent a race condition since these procedure literals can be created anywhere at any time
 	std::atomic<struct lbModule *> code_gen_module;
@@ -268,20 +318,8 @@ struct ProcInfo {
 	u64       tags;
 	bool      generated_from_polymorphic;
 	Ast *     poly_def_node;
-};
-
-
-enum LinkNameUseKind : u8 {
-	LinkNameUse_ForeignProcedure,
-	LinkNameUse_Procedure, // exported or with a link name
-	LinkNameUse_Variable,  // foreign or exported
-};
-
-struct LinkNameUse {
-	String          name;
-	Entity *        entity;
-	DeclInfo *      decl;
-	LinkNameUseKind kind;
+	i32       trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 
@@ -477,19 +515,6 @@ gb_internal Entity *scope_map_get(ScopeMap *m, InternedString key, u32 hash) {
 	}
 }
 
-// NOTE: the key must be present; never grows, so lookups that do not lock see either value
-gb_internal void scope_map_replace(ScopeMap *m, InternedString key, u32 hash, Entity *value) {
-	u32 mask = m->cap-1;
-	for (u32 pos = hash & mask;; pos = (pos + 1) & mask) {
-		ScopeMapSlot *s = &m->slots[pos];
-		GB_ASSERT(s->hash != 0);
-		if (s->hash == hash && m->keys[pos] == key) {
-			s->value = value;
-			return;
-		}
-	}
-}
-
 gb_internal void scope_map_clear(ScopeMap *m) {
 	gb_memset(m->slots, 0, gb_size_of(*m->slots) * m->cap);
 	m->count = 0;
@@ -577,7 +602,6 @@ enum ScopeFlag : i32 {
 	ScopeFlag_Type    = 1<<7,
 
 	ScopeFlag_HasBeenImported = 1<<10, // This is only applicable to file scopes
-	ScopeFlag_ReadOnly        = 1<<11, // file, package and universe scopes once every global is declared: read without locking
 
 	ScopeFlag_ContextDefined = 1<<16,
 };
@@ -594,7 +618,8 @@ struct Scope {
 	RwMutex mutex;
 	ScopeMap elements;
 	PtrSet<Scope *> imported;
-	PtrMap<u64, struct GlobalDeclSource *> *placeholders; // multi-map; names a global 'when' or 'foreign' block may declare, until all are resolved
+	i32 trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 
 	DeclInfo *decl_info;
 
@@ -695,8 +720,6 @@ enum LoadFileTier {
 struct LoadFileCache {
 	LoadFileTier   tier;
 	bool           exists;
-
-	BlockingMutex  mutex; // for everything below
 	String         path;
 	gbFileError    file_error;
 	String         data;
@@ -710,19 +733,32 @@ struct LoadDirectoryFile {
 };
 
 struct LoadDirectoryCache {
-	bool                   loaded;
-
-	BlockingMutex          mutex; // for everything below
 	String                 path;
 	gbFileError            file_error;
 	Array<LoadFileCache *> files;
 };
 
 
+struct GeneratedProcCacheEntry {
+	Entity *       entity;
+	Slice<Operand> operands;
+};
+
+struct ProcGroupCallCacheEntry {
+	Entity *       proc_group;
+	Entity *       entity;
+	Slice<Operand> positional_operands;
+	Slice<Operand> named_operands;
+	Slice<String>  named_argument_names;
+	isize          candidate_count;
+	bool           variadic_expand;
+};
+
 struct GenProcsData {
-	Array<Entity *> procs;
-	Array<u64>      hashes; // `proc_type_identity_hash` of each of `procs`
-	RwMutex         mutex;
+	Array<Entity *>                        procs;
+	PtrMap<u64, GeneratedProcCacheEntry *> procs_by_operands;
+	PtrMap<u64, GeneratedProcCacheEntry *> failed_procs_by_operands;
+	RwMutex                                mutex;
 };
 
 struct GenTypesData {
@@ -788,7 +824,7 @@ struct CheckerInfo {
 
 	BlockingMutex type_and_value_mutex;
 
-	RecursiveMutex lazy_mutex; // for adding checked lazy entities to `entities`
+	RecursiveMutex lazy_mutex; // Mutex required for lazy type checking of specific files
 
 
 	// BlockingMutex type_info_mutex; // NOT recursive
@@ -797,13 +833,10 @@ struct CheckerInfo {
 	// TypeSet type_info_set;
 
 	BlockingMutex foreign_mutex; // NOT recursive
-	Array<struct LinkNameUse> link_names; // checked for clashes once everything is checked, see `check_link_name_uses`
+	StringMap<Entity *> foreigns;
 
-	BlockingMutex entry_point_mutex;
-
-	PerThreadArray<Entity *> definition_queue;
-	PerThreadArray<Entity *> entity_queue;
-	std::atomic<u64>         entities_without_file; // for their `order_in_src`
+	MPSCQueue<Entity *> definition_queue;
+	MPSCQueue<Entity *> entity_queue;
 	MPSCQueue<Entity *> required_global_variable_queue;
 	MPSCQueue<Entity *> required_foreign_imports_through_force_queue;
 	MPSCQueue<Entity *> foreign_imports_to_check_fullpaths;
@@ -834,6 +867,21 @@ struct CheckerInfo {
 	BlockingMutex instrumentation_mutex;
 	Entity *instrumentation_enter_entity;
 	Entity *instrumentation_exit_entity;
+
+	BlockingMutex operator_overload_mutex;
+	Array<Entity *> operator_overloads[Token_Count];
+	Array<Entity *> index_operator_get_overloads;
+	Array<Entity *> index_operator_set_overloads;
+	Array<Entity *> iterator_operator_overloads;
+	BlockingMutex overloaded_operator_call_mutex;
+	PtrMap<Ast *, Ast *> overloaded_operator_calls;
+	BlockingMutex assignment_operation_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_operation_expr_map;
+	BlockingMutex assignment_overloaded_call_expr_mutex;
+	PtrMap<Ast *, Ast *> assignment_overloaded_call_expr_map;
+	BlockingMutex range_stmt_iterator_overload_state_mutex;
+	PtrMap<Ast *, Entity *> range_stmt_iterator_overload_state_map;
+	PtrMap<u64, ProcGroupCallCacheEntry *> proc_group_call_cache;
 
 
 	BlockingMutex                       load_directory_mutex;
@@ -878,26 +926,39 @@ struct CheckerContext {
 	u32        stmt_flags;
 	bool       in_enum_type;
 	bool       in_proc_group;
-	bool       in_procedure_of;
+	bool       collect_delayed_decls;
 	bool       allow_polymorphic_types;
 	bool       disallow_polymorphic_return_types; // NOTE(zen3ger): no poly type decl in return types
 	bool       no_polymorphic_errors;
 	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	bool       allow_arrow_right_selector_expr;
+	bool       allow_scope_exit_opener;
 	bool       allow_c_vararg_param;
 	bool       allow_in_progress_type_operand; // a bare type name may still be being checked (polymorphic record arguments)
 	u8         bit_field_bit_size;
 	Scope *    polymorphic_scope;
 
-	Array<Entity *> *trial_entities; // global declarations are collected here only, for a global 'when' trial
-
 	Ast *assignment_lhs_hint;
 	Ast *asm_template_hint;
+	i32  trigger_trace_count;
+	TriggerTraceFrame trigger_trace[MAX_TRIGGER_TRACE_FRAMES];
 };
 
 gb_internal u64 check_vet_flags(CheckerContext *c);
 gb_internal u64 check_vet_flags(Ast *node);
+
+gb_internal void checker_context_clear_trigger_trace(CheckerContext *ctx);
+gb_internal void checker_context_copy_trigger_trace(CheckerContext *dst, CheckerContext const *src);
+gb_internal void checker_context_set_trigger_trace_from_proc_info(CheckerContext *ctx, ProcInfo const *pi);
+gb_internal void checker_context_set_trigger_trace_from_scope(CheckerContext *ctx, Scope const *scope);
+gb_internal void checker_context_build_import_trigger_trace(CheckerContext *ctx, AstPackage *pkg);
+gb_internal void checker_context_prepend_trigger_trace(CheckerContext *ctx, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void decl_info_copy_trigger_trace(DeclInfo *decl, CheckerContext const *ctx);
+gb_internal void proc_info_copy_trigger_trace(ProcInfo *pi, CheckerContext const *ctx);
+gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind kind, TokenPos pos, String name);
+gb_internal void checker_context_print_trigger_trace_from(CheckerContext *ctx, i32 start_index);
+gb_internal void checker_context_print_trigger_trace(CheckerContext *ctx);
 
 
 struct Checker {
@@ -908,14 +969,13 @@ struct Checker {
 
 	MPSCQueue<Entity *> procs_with_deferred_to_check;
 	MPSCQueue<Entity *> procs_with_objc_context_provider_to_check;
-	BlockingMutex     procs_to_check_mutex;
 	Array<ProcInfo *> procs_to_check;
 
 	BlockingMutex nested_proc_lits_mutex;
 	Array<DeclInfo *> nested_proc_lits;
 
 
-	PerThreadArray<UntypedExprInfo> global_untyped_queue;
+	MPSCQueue<UntypedExprInfo> global_untyped_queue;
 	MPSCQueue<Type *> soa_types_to_complete;
 };
 
@@ -960,27 +1020,7 @@ gb_internal void check_add_foreign_import_decl(CheckerContext *c, Ast *decl);
 
 
 gb_internal void check_entity_decl(CheckerContext *c, Entity *e, DeclInfo *d, Type *named_type);
-gb_internal void global_group_check_edge(CheckerContext *ctx, Entity *e);
-
-// While a group of global entities is checked: its incomplete '#soa' types, completed by the same thread
-gb_thread_local Array<Type *> *global_group_soa_types;
-
-struct GlobalWhenTrialEntityScope {
-	struct GlobalWhenTrial *trial;
-	i32 mute_depth;
-};
-gb_internal bool global_when_trial_begin_entity(Entity *e, GlobalWhenTrialEntityScope *scope);
-gb_internal void global_when_trial_end_entity(GlobalWhenTrialEntityScope *scope);
-
-// -internal-global-entity-graph
-struct GlobalEntityTimingFrame {
-	u64  start;
-	u64  saved_child_ticks;
-	bool active;
-};
-gb_internal GlobalEntityTimingFrame global_entity_timing_begin(Entity *e);
-gb_internal void global_entity_timing_end(GlobalEntityTimingFrame const &f, Entity *e);
-gb_internal void wait_for_entity(Entity *e);
+gb_internal void wait_for_lazy_entity(CheckerContext *c, Entity *e);
 gb_internal Ast *remove_type_alias_clutter(Ast *node);
 gb_internal void check_const_decl(CheckerContext *c, Entity *e, Ast *type_expr, Ast *init_expr, Type *named_type);
 gb_internal void check_type_decl(CheckerContext *c, Entity *e, Ast *type_expr, Type *def);

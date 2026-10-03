@@ -1,7 +1,16 @@
+#+build !orca
 #+build wasm32, wasm64p32
 package runtime
 
 import "base:intrinsics"
+
+when ODIN_OS == .JS {
+	foreign import emscripten "env"
+
+	foreign emscripten {
+		emscripten_notify_memory_growth :: proc "contextless" (memory_index: u32) ---
+	}
+}
 
 /*
 Port of emmalloc, modified for use in Odin.
@@ -43,7 +52,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-WASM_Allocator :: struct {
+WASM_Allocator :: struct #no_copy {
 	// The minimum alignment of allocations.
 	alignment: uint,
 	// A region that contains as payload a single forward linked list of pointers to
@@ -103,6 +112,11 @@ wasm_allocator :: proc(a: ^WASM_Allocator) -> Allocator {
 }
 
 wasm_allocator_proc :: proc(a: rawptr, mode: Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, Allocator_Error) {
+	if mode == .Alloc || mode == .Alloc_Non_Zeroed || mode == .Resize || mode == .Resize_Non_Zeroed {
+		if size < 0 || !is_power_of_two_int(alignment) {
+			return nil, .Invalid_Argument
+		}
+	}
 	a := (^WASM_Allocator)(a)
 	if a == nil {
 		a = &global_default_wasm_allocator_data
@@ -368,7 +382,7 @@ SMALLEST_ALLOCATION_SIZE :: 2*size_of(rawptr)
 // Subdivide regions of free space into distinct circular doubly linked lists, where each linked list
 // represents a range of free space blocks. The following function compute_free_list_bucket() converts
 // an allocation size to the bucket index that should be looked at.
-#assert(NUM_FREE_BUCKETS == 64, "Following function is tailored specifically for the NUM_FREE_BUCKETS == 64 case")
+#assert(NUM_FREE_BUCKETS == 64, "Following function is tailored specifically for the NUM_FREE_BUCKETS == 64 case", #trigger_location)
 @(private="file")
 compute_free_list_bucket :: proc(size: uint) -> uint {
 	if size < 128 { return (size >> 3) - 1 }
@@ -478,6 +492,9 @@ claim_more_memory :: proc(a: ^WASM_Allocator, num_bytes: uint) -> bool {
 	page_alloc :: proc(page_count: int) -> []byte {
 		prev_page_count := intrinsics.wasm_memory_grow(0, uintptr(page_count))
 		if prev_page_count < 0 { return nil }
+		when ODIN_OS == .JS {
+			emscripten_notify_memory_growth(0)
+		}
 
 		ptr := ([^]byte)(uintptr(prev_page_count) * PAGE_SIZE)
 		return ptr[:page_count * PAGE_SIZE]
@@ -870,4 +887,23 @@ aligned_realloc :: proc(a: ^WASM_Allocator, ptr: rawptr, alignment, size: uint, 
 	}
 
 	return newptr
+}
+
+heap_allocator :: default_wasm_allocator
+heap_allocator_proc :: wasm_allocator_proc
+
+@(require_results)
+heap_alloc :: proc(size: int, zero_memory: bool = true) -> (ptr: rawptr) {
+	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Alloc if zero_memory else .Alloc_Non_Zeroed, size, align_of(rawptr), nil, 0)
+	return raw_data(bytes)
+}
+
+@(require_results)
+heap_resize :: proc(old_ptr: rawptr, old_size: int, new_size: int, zero_memory: bool = true) -> (new_ptr: rawptr) {
+	bytes, _ := wasm_allocator_proc(&global_default_wasm_allocator_data, .Resize if zero_memory else .Resize_Non_Zeroed, new_size, align_of(rawptr), old_ptr, old_size)
+	return raw_data(bytes)
+}
+
+heap_free :: proc(ptr: rawptr) {
+	wasm_allocator_proc(&global_default_wasm_allocator_data, .Free, 0, 0, ptr, 0)
 }

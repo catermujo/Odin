@@ -6,6 +6,7 @@ pushd build
 ODIN=../../../odin
 COMMON="-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused-defineables -microarch:native"
 COMMON_CHECK="-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused-defineables"
+COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-defineables"
 
 set -x
 
@@ -78,6 +79,7 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+$ODIN check ../test_recursive_maybe_comparison.odin $COMMON_CHECK 2>&1 | grep -F "Illegal type declaration cycle"
 $ODIN test ../test_issue_6419.odin $COMMON
 $ODIN test ../test_pr_6470.odin $COMMON
 if [[ $($ODIN test ../test_pr_6470.odin -define:TEST_EXPECT_FAILURE=true $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
@@ -86,8 +88,23 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+$ODIN check ../test_issue_build_tag_define_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE=false
+if [[ $($ODIN check ../test_issue_build_tag_define_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE=true 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 $ODIN check ../test_issue_6484.odin -no-entry-point $COMMON_CHECK
 $ODIN test ../test_issue_6753.odin $COMMON
+$ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
+if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+$ODIN check ../test_issue_deferred_when_import -no-entry-point $COMMON_NO_FILE
 if [[ $($ODIN check ../test_issue_6874.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
@@ -95,6 +112,18 @@ else
 	exit 1
 fi
 $ODIN test ../test_issue_6951_5214.odin $COMMON
+if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_type_switch_alias.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 $ODIN check ../test_issue_6979.odin -no-entry-point $COMMON_CHECK
 $ODIN test ../test_issue_7008.odin $COMMON
 $ODIN test ../test_issue_global_address_of_literal.odin $COMMON
@@ -165,6 +194,29 @@ else
 	exit 1
 fi
 
+# A package can have no active files for a target. Debug object generation must handle that case.
+$ODIN build ../test_issue_debug_empty_package.odin -file -no-entry-point -target:js_wasm32 -build-mode:obj -debug -out:debug_empty_package.wasm.o
+
+# Linked builds must not share their intermediate object when concurrent invocations use the same
+# output path. One build can otherwise remove the object while another invocation is linking it.
+RACE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/odin-output-race.XXXXXX")
+trap 'rm -rf "$RACE_DIR"' EXIT
+RACE_PIDS=()
+for i in $(seq 1 8); do
+	$ODIN build ../test_issue_large_aggregate_ternary.odin $COMMON -out:"$RACE_DIR/shared.bin" >"$RACE_DIR/$i.log" 2>&1 &
+	RACE_PIDS+=("$!")
+done
+RACE_STATUS=0
+for pid in "${RACE_PIDS[@]}"; do
+	if ! wait "$pid"; then
+		RACE_STATUS=1
+	fi
+done
+if [[ "$RACE_STATUS" -ne 0 ]]; then
+	cat "$RACE_DIR"/*.log
+	exit 1
+fi
+
 $ODIN check ../test_issue_foreign_redeclaration.odin -no-entry-point $COMMON_CHECK
 $ODIN check ../test_issue_foreign_import_attributes.odin -no-entry-point $COMMON_CHECK
 if [[ $($ODIN check ../test_issue_foreign_redeclaration_mismatch.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
@@ -175,6 +227,13 @@ else
 fi
 
 if [[ $($ODIN check ../test_issue_ellipsis_type_call.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 10 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+$ODIN check ../test_issue_soa_pointer_return.odin $COMMON_CHECK
+if [[ $($ODIN check ../test_issue_soa_pointer_return_reject.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
@@ -198,12 +257,67 @@ if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
 	fi
 fi
 
+set +e
+DOC_OUTPUT=$($ODIN doc core:time Benchmark_Options 2>&1)
+DOC_STATUS=$?
+set -e
+if [[ $DOC_STATUS -eq 1 && $(grep -F -c "Expected either a directory or a .odin file" <<< "$DOC_OUTPUT") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+
 if [[ $($ODIN build ../test_issue_7108.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+$ODIN check ../test_trigger_location_accept.odin $COMMON_CHECK -internal-ignore-panic
+if [[ $($ODIN check ../test_trigger_location_import_direct.odin $COMMON_CHECK -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import 'core:os'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_import_chain -no-entry-point $COMMON_NO_FILE -target:js_wasm32 2>&1 >/dev/null | grep -F -c "Triggered by import '../b'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_use_site.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "Triggered by use of 'trigger'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_arg_count.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#panic' expects 1 or 2 arguments") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_assert_third.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "'#assert' expected a constant string as its second argument when a third argument is provided") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_trigger_location_reject_outside.odin $COMMON_CHECK 2>&1 >/dev/null | grep -F -c "#trigger_location may only be used as an argument to '#assert' or '#panic'") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+if [[ $($ODIN check ../test_recursive_type_field_query.odin -no-entry-point $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
+$ODIN check ../test_inferred_array_literal_len_cycle.odin -no-entry-point $COMMON_CHECK
 
 if [[ $($ODIN build ../test_issue_7073-1.odin $COMMON 2>&1 >/dev/null | grep -c "Error:") -eq 2 ]]; then
 	echo "SUCCESSFUL 1/1"

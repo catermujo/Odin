@@ -27,7 +27,6 @@ AutoreleasePool_showPools :: proc "c" (self: ^AutoreleasePool, obj: ^Object) {
 }
 
 
-@(deferred_out=AutoreleasePool_drain)
-scoped_autoreleasepool :: proc "c" () -> ^AutoreleasePool {
+scoped_autoreleasepool :: proc "c" () -> (pool: ^AutoreleasePool) #scope_exit(.implicit, AutoreleasePool_drain(pool)) {
 	return AutoreleasePool.alloc()->init()
 }

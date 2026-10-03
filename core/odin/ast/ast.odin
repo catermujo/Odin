@@ -6,6 +6,10 @@ import "core:odin/tokenizer"
 Proc_Tag :: enum {
 	Bounds_Check,
 	No_Bounds_Check,
+	Type_Assert,
+	No_Type_Assert,
+	Downcast_Assert,
+	No_Downcast_Assert,
 	Optional_Ok,
 	Optional_Allocator_Error,
 }
@@ -35,6 +39,8 @@ Node_State_Flag :: enum {
 	No_Bounds_Check,
 	Type_Assert,
 	No_Type_Assert,
+	Downcast_Assert,
+	No_Downcast_Assert,
 }
 Node_State_Flags :: distinct bit_set[Node_State_Flag]
 
@@ -155,6 +161,16 @@ Proc_Lit :: struct {
 	tailing:       Proc_Tailing,
 	where_token:   tokenizer.Token,
 	where_clauses: []^Expr,
+	scope_exit_contract: ^Scope_Exit,
+}
+
+Scope_Exit :: struct {
+	using node: Node,
+	tok:     tokenizer.Token,
+	policy:  ^Expr,
+	cleanup: ^Expr,
+	open:    tokenizer.Pos,
+	close:   tokenizer.Pos,
 }
 
 Comp_Lit :: struct {
@@ -395,6 +411,15 @@ Return_Stmt :: struct {
 Defer_Stmt :: struct {
 	using node: Stmt,
 	stmt: ^Stmt,
+}
+
+With_Stmt :: struct {
+	using node: Stmt,
+	tok:    tokenizer.Token,
+	label:  ^Expr, // possibly nil
+	init:   ^Stmt, // possibly nil
+	opener: ^Stmt,
+	body:   ^Stmt,
 }
 
 For_Stmt :: struct {
@@ -729,6 +754,8 @@ Proc_Type :: struct {
 	tags:      Proc_Tags,
 	generic:   bool,
 	diverging: bool,
+	is_lambda: bool,
+	captures:  []^Expr,
 }
 
 Pointer_Type :: struct {
@@ -973,6 +1000,7 @@ Any_Node :: union {
 	^Basic_Directive,
 	^Ellipsis,
 	^Proc_Lit,
+	^Scope_Exit,
 	^Comp_Lit,
 	^Tag_Expr,
 	^Unary_Expr,
@@ -1027,6 +1055,7 @@ Any_Node :: union {
 	^When_Stmt,
 	^Return_Stmt,
 	^Defer_Stmt,
+	^With_Stmt,
 	^For_Stmt,
 	^Range_Stmt,
 	^Inline_Range_Stmt,
@@ -1133,6 +1162,7 @@ Any_Stmt :: union {
 	^When_Stmt,
 	^Return_Stmt,
 	^Defer_Stmt,
+	^With_Stmt,
 	^For_Stmt,
 	^Range_Stmt,
 	^Inline_Range_Stmt,

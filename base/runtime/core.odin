@@ -148,6 +148,7 @@ Type_Info_Struct_Flag :: enum u8 {
 	all_or_none = 2,
 	align       = 3,
 	simple      = 4,
+	no_copy     = 5,
 }
 
 Type_Info_Struct :: struct {
@@ -379,6 +380,7 @@ Source_Code_Location :: struct {
 	file_path:    string,
 	line, column: i32,
 	procedure:    string,
+	package_name: string,
 }
 
 /*

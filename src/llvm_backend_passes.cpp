@@ -123,7 +123,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-unroll<O2>,
-	transform-warning,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-mssa(
 		licm<allowspeculation>
@@ -251,7 +250,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
@@ -382,7 +380,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
@@ -519,7 +516,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
@@ -653,7 +649,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-unroll<O2>,
-	transform-warning,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-mssa(
 		licm<allowspeculation>
@@ -782,7 +777,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<modify-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
@@ -915,7 +909,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
@@ -1042,6 +1035,8 @@ function<eager-inv>(
 		loop-deletion
 	),
 	loop-distribute,
+	loop-fusion,
+	loop-versioning,
 	inject-tli-mappings,
 	loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>,
 	drop-unnecessary-assumes,
@@ -1053,7 +1048,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O2>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
@@ -1190,7 +1184,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-unroll<O3>,
-	transform-warning,
 	instcombine<max-iterations=1000;no-use-loop-info>,
 	loop-mssa(
 		licm<allowspeculation>
@@ -1319,7 +1312,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
 	loop-unroll<O3>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-use-loop-info;no-verify-fixpoint>,
@@ -1453,7 +1445,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O3>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
@@ -1584,6 +1575,8 @@ function<eager-inv>(
 		loop-deletion
 	),
 	loop-distribute,
+	loop-fusion,
+	loop-versioning,
 	inject-tli-mappings,
 	loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>,
 	drop-unnecessary-assumes,
@@ -1595,7 +1588,6 @@ function<eager-inv>(
 	vector-combine,
 	instcombine<max-iterations=1;no-verify-fixpoint>,
 	loop-unroll<O3>,
-	transform-warning,
 	sroa<preserve-cfg>,
 	infer-alignment,
 	instcombine<max-iterations=1;no-verify-fixpoint>,

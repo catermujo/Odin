@@ -407,6 +407,22 @@ gb_internal void lb_make_global_private_const(lbAddr const &addr) {
 	lb_make_global_private_const(addr.addr.value);
 }
 
+gb_internal LLVMValueRef lb_emit_byte_gep(lbProcedure *p, LLVMValueRef base, LLVMValueRef byte_offset) {
+	if (LLVMIsAConstantInt(byte_offset) &&
+	    LLVMGetValueKind(base) == LLVMInstructionValueKind &&
+	    LLVMGetInstructionOpcode(base) == LLVMGetElementPtr &&
+	    !LLVMIsInBounds(base) &&
+	    LLVMGetNumOperands(base) == 2 &&
+	    LLVMGetGEPSourceElementType(base) == lb_type(p->module, t_u8) &&
+	    LLVMIsAConstantInt(LLVMGetOperand(base, 1))) {
+		LLVMValueRef old_byte_offset = LLVMGetOperand(base, 1);
+		base = LLVMGetOperand(base, 0);
+		byte_offset = LLVMConstInt(lb_type(p->module, t_int),
+		                              LLVMConstIntGetZExtValue(old_byte_offset) + LLVMConstIntGetZExtValue(byte_offset), false);
+	}
+	return LLVMBuildGEP2(p->builder, lb_type(p->module, t_u8), base, &byte_offset, 1, "");
+}
+
 
 
 // This emits a GEP at 0, index
@@ -424,6 +440,12 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 	res.type = alloc_type_pointer(ptr);
 	if (LLVMIsConstant(value.value)) {
 		res.value = LLVMConstGEP2(llvm_type, value.value, indices, gb_count_of(indices));
+	} else if (build_context.optimization_level < 0 &&
+	           (is_type_array(type) || is_type_enumerated_array(type) || is_type_matrix(type))) {
+		u64 byte_offset_value = cast(u64)index * cast(u64)lb_sizeof(lb_type(p->module, ptr));
+		LLVMValueRef byte_offset = LLVMConstInt(lb_type(p->module, t_int), byte_offset_value, false);
+		res.value = lb_emit_byte_gep(p, value.value, byte_offset);
+		res.value = LLVMBuildPointerCast(p->builder, res.value, lb_type(p->module, res.type), "");
 	} else {
 		res.value = LLVMBuildGEP2(p->builder, llvm_type, value.value, indices, gb_count_of(indices), "");
 	}
@@ -645,10 +667,12 @@ gb_internal lbAddr lb_addr_map(lbValue addr, lbValue map_key, Type *map_type, Ty
 }
 
 
-gb_internal lbAddr lb_addr_soa_variable(lbValue addr, lbValue index, Ast *index_expr) {
+gb_internal lbAddr lb_addr_soa_variable(lbValue addr, lbValue index, Ast *index_expr, Type *result_type, lbSoaVariableMode mode) {
 	lbAddr v = {lbAddr_SoaVariable, addr};
 	v.soa.index = index;
 	v.soa.index_expr = index_expr;
+	v.soa.result_type = result_type;
+	v.soa.mode = mode;
 	return v;
 }
 
@@ -659,7 +683,7 @@ gb_internal lbAddr lb_addr_soa_variable(lbValue addr, lbValue index, Ast *index_
 // the index was already bounds checked when the pointer was formed (e.g. p := &soa[i])
 gb_internal lbAddr lb_addr_soa_variable_from_soa_ptr(lbProcedure *p, lbValue soa_ptr) {
 	GB_ASSERT_MSG(is_type_soa_pointer(soa_ptr.type), "%s", type_to_string(soa_ptr.type));
-	return lb_addr_soa_variable(lb_emit_struct_ev(p, soa_ptr, 0), lb_emit_struct_ev(p, soa_ptr, 1), nullptr);
+	return lb_addr_soa_variable(lb_emit_struct_ev(p, soa_ptr, 0), lb_emit_struct_ev(p, soa_ptr, 1), nullptr, nullptr, lbSoaVariable_OuterIndex);
 }
 
 // pointer to the index element of the field_index component
@@ -795,17 +819,20 @@ gb_internal Type *lb_addr_type(lbAddr const &addr) {
 			GB_ASSERT(is_type_map(t));
 			return t->Map.value;
 		}
+	case lbAddr_SoaVariable:
+		// deliberately the container type (#soa[N]T), not the element type the addr denotes;
+		// lb_soa_variable_make_pointer and lb_build_assign_stmt depend on this,
+		// if this gets changed to Struct.soa_elem, these must be fixed with it.
+		if (addr.soa.mode == lbSoaVariable_InnerSliceRowIndex && addr.soa.result_type != nullptr) {
+			return addr.soa.result_type;
+		}
+		return type_deref(addr.addr.type);
 	case lbAddr_Swizzle:
 		return addr.swizzle.type;
 	case lbAddr_SwizzleLarge:
 		return addr.swizzle_large.type;
 	case lbAddr_SwizzleSoa:
 		return addr.swizzle_soa.type;
-	case lbAddr_SoaVariable:
-		// deliberately the container type (#soa[N]T), not the element type the addr denotes;
-		// lb_soa_variable_make_pointer and lb_build_assign_stmt depend on this,
-		// if this gets changed to Struct.soa_elem, these must be fixed with it.
-		return type_deref(addr.addr.type);
 	case lbAddr_Context:
 		if (addr.ctx.sel.index.count > 0) {
 			Type *t = t_context;
@@ -854,8 +881,18 @@ gb_internal lbValue lb_addr_get_ptr(lbProcedure *p, lbAddr const &addr) {
 	case lbAddr_SoaVariable:
 		// use lb_addr_load/lb_addr_store or lb_soa_field_elem_ptr for a single component;
 		// callers that need the soa pointer get it via lb_soa_variable_make_pointer
-		GB_PANIC("lbAddr_SoaVariable should be handled elsewhere");
-		break;
+		// GB_PANIC("lbAddr_SoaVariable should be handled elsewhere");
+		// break;
+		{
+			if (addr.soa.mode == lbSoaVariable_InnerSliceRowIndex) {
+				lbValue value = lb_addr_load(p, addr);
+				return lb_address_from_load_or_generate_local(p, value);
+			}
+			Type *soa_ptr_type = alloc_type_soa_pointer(lb_addr_type(addr));
+			return lb_address_from_load_or_generate_local(p, lb_make_soa_pointer(p, soa_ptr_type, addr.addr, addr.soa.index));
+			// TODO(bill): FIX THIS HACK
+			// return lb_address_from_load(p, lb_addr_load(p, addr));
+		}
 
 	case lbAddr_Context:
 		GB_PANIC("lbAddr_Context should be handled elsewhere");
@@ -1268,6 +1305,120 @@ gb_internal void lb_copy_bits(lbProcedure *p,
 	}
 }
 
+gb_internal bool lb_try_get_bit_field_word_fast_path_info(lbAddr const &addr, Type **backing_type_, Type **backing_unsigned_type_, i64 *backing_bit_size_) {
+	if (addr.kind != lbAddr_BitField || addr.addr.value == nullptr) {
+		return false;
+	}
+
+	Type *bit_field_type = base_type(type_deref(addr.addr.type));
+	if (bit_field_type == nullptr || !is_type_bit_field(bit_field_type)) {
+		return false;
+	}
+
+	Type *backing_type = base_type(bit_field_type->BitField.backing_type);
+	if (backing_type == nullptr || !is_type_integer(backing_type)) {
+		return false;
+	}
+	if (is_type_different_to_arch_endianness(backing_type) || is_type_different_to_arch_endianness(addr.bitfield.type)) {
+		return false;
+	}
+
+	i64 backing_bit_size = 8*type_size_of(backing_type);
+	if (backing_bit_size <= 0 || backing_bit_size > 64) {
+		return false;
+	}
+	if (addr.bitfield.bit_offset < 0 || addr.bitfield.bit_size <= 0) {
+		return false;
+	}
+	if (addr.bitfield.bit_offset + addr.bitfield.bit_size > backing_bit_size) {
+		return false;
+	}
+
+	Type *backing_unsigned_type = type_unsigned_equivalent(backing_type);
+	if (backing_unsigned_type == nullptr) {
+		return false;
+	}
+
+	if (backing_type_) *backing_type_ = backing_type;
+	if (backing_unsigned_type_) *backing_unsigned_type_ = backing_unsigned_type;
+	if (backing_bit_size_) *backing_bit_size_ = backing_bit_size;
+	return true;
+}
+
+gb_internal bool lb_try_store_addr_bit_field_word_fast(lbProcedure *p, lbAddr const &addr, lbValue value) {
+	Type *backing_type = nullptr;
+	Type *backing_unsigned_type = nullptr;
+	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, nullptr)) {
+		return false;
+	}
+
+	i64 bit_size = addr.bitfield.bit_size;
+	i64 bit_offset = addr.bitfield.bit_offset;
+
+	u64 value_mask_u64 = bit_size == 64 ? ~0ull : ((1ull<<cast(u64)bit_size)-1ull);
+	u64 clear_mask_u64 = ~(value_mask_u64 << cast(u64)bit_offset);
+
+	lbValue backing_ptr = lb_emit_conv(p, addr.addr, alloc_type_pointer(backing_type));
+	lbValue raw = lb_emit_load(p, backing_ptr);
+	lbValue raw_u = lb_emit_conv(p, raw, backing_unsigned_type);
+	lbValue value_u = lb_emit_conv(p, value, backing_unsigned_type);
+
+	lbValue value_mask = lb_const_int(p->module, backing_unsigned_type, value_mask_u64);
+	value_u = lb_emit_arith(p, Token_And, value_u, value_mask, backing_unsigned_type);
+	if (bit_offset > 0) {
+		lbValue shift = lb_const_int(p->module, backing_unsigned_type, bit_offset);
+		value_u = lb_emit_arith(p, Token_Shl, value_u, shift, backing_unsigned_type);
+	}
+
+	lbValue clear_mask = lb_const_int(p->module, backing_unsigned_type, clear_mask_u64);
+	lbValue cleared = lb_emit_arith(p, Token_And, raw_u, clear_mask, backing_unsigned_type);
+	lbValue merged = lb_emit_arith(p, Token_Or, cleared, value_u, backing_unsigned_type);
+	lbValue result = lb_emit_conv(p, merged, backing_type);
+	lb_emit_store(p, backing_ptr, result);
+	return true;
+}
+
+gb_internal bool lb_try_load_addr_bit_field_word_fast(lbProcedure *p, lbAddr const &addr, lbValue *result_) {
+	Type *backing_type = nullptr;
+	Type *backing_unsigned_type = nullptr;
+	i64 backing_bit_size = 0;
+	if (!lb_try_get_bit_field_word_fast_path_info(addr, &backing_type, &backing_unsigned_type, &backing_bit_size)) {
+		return false;
+	}
+
+	i64 bit_size = addr.bitfield.bit_size;
+	i64 bit_offset = addr.bitfield.bit_offset;
+
+	u64 value_mask_u64 = bit_size == 64 ? ~0ull : ((1ull<<cast(u64)bit_size)-1ull);
+
+	lbValue backing_ptr = lb_emit_conv(p, addr.addr, alloc_type_pointer(backing_type));
+	lbValue raw = lb_emit_load(p, backing_ptr);
+	lbValue raw_u = lb_emit_conv(p, raw, backing_unsigned_type);
+
+	if (bit_offset > 0) {
+		lbValue shift = lb_const_int(p->module, backing_unsigned_type, bit_offset);
+		raw_u = lb_emit_arith(p, Token_Shr, raw_u, shift, backing_unsigned_type);
+	}
+	if (bit_size < backing_bit_size) {
+		lbValue value_mask = lb_const_int(p->module, backing_unsigned_type, value_mask_u64);
+		raw_u = lb_emit_arith(p, Token_And, raw_u, value_mask, backing_unsigned_type);
+	}
+
+	lbValue r = lb_emit_conv(p, raw_u, addr.bitfield.type);
+	Type *ct = core_type(addr.bitfield.type);
+	if (!is_type_unsigned(ct) && !is_type_boolean(ct)) {
+		// Sign extension:
+		// m := 1<<(bit_size-1)
+		// r = (r XOR m) - m
+		lbValue m = lb_const_int(p->module, addr.bitfield.type, 1ull<<(bit_size-1));
+		r = lb_emit_arith(p, Token_Xor, r, m, addr.bitfield.type);
+		r = lb_emit_arith(p, Token_Sub, r, m, addr.bitfield.type);
+	}
+
+	if (result_) *result_ = r;
+	return true;
+}
+
 gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 	if (addr.addr.value == nullptr) {
 		return;
@@ -1286,6 +1437,15 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 	if (addr.kind == lbAddr_BitField) {
 		lbValue dst = addr.addr;
 		lbValue src = {};
+		value = lb_emit_conv(p, value, addr.bitfield.type);
+		TokenPos pos = {};
+		if (p->curr_stmt != nullptr) {
+			pos = ast_token(p->curr_stmt).pos;
+		}
+		lb_emit_bit_field_downcast_assert(p, value, addr.bitfield.type, cast(u64)addr.bitfield.bit_size, pos);
+		if (lb_try_store_addr_bit_field_word_fast(p, addr, value)) {
+			return;
+		}
 		if (is_type_endian_big(addr.bitfield.type)) {
 			i64 shift_amount = 8*type_size_of(value.type) - addr.bitfield.bit_size;
 			lbValue shifted_value = value;
@@ -1356,6 +1516,39 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 		Type *t = type_deref(addr.addr.type);
 		t = base_type(t);
 		GB_ASSERT(t->kind == Type_Struct && t->Struct.soa_kind != StructSoa_None);
+
+		if (addr.soa.mode == lbSoaVariable_InnerSliceRowIndex) {
+			GB_ASSERT(t->Struct.soa_kind == StructSoa_Fixed);
+			Type *elem_type = base_type(t->Struct.soa_elem);
+			GB_ASSERT(elem_type->kind == Type_Slice);
+			GB_ASSERT(addr.soa.result_type != nullptr && is_type_enumerated_array(addr.soa.result_type));
+
+			Type *row_type = addr.soa.result_type;
+			value = lb_emit_conv(p, value, row_type);
+			lbValue row_value_addr = lb_address_from_load_or_generate_local(p, value);
+			lbValue inner_index = lb_emit_conv(p, addr.soa.index, t_int);
+
+			lbValue data_fields = lb_emit_struct_ep(p, addr.addr, 0);
+			lbValue len_fields  = lb_emit_struct_ep(p, addr.addr, 1);
+
+			for (i64 i = 0; i < t->Struct.soa_count; i++) {
+				lbValue len_ptr = lb_emit_array_epi(p, len_fields, i);
+				lbValue len = lb_emit_load(p, len_ptr);
+				if (addr.soa.index_expr != nullptr) {
+					lb_emit_bounds_check(p, ast_token(addr.soa.index_expr), inner_index, len);
+				}
+
+				lbValue data_ptr_ptr = lb_emit_array_epi(p, data_fields, i);
+				lbValue data_ptr = lb_emit_load(p, data_ptr_ptr);
+				lbValue dst = lb_emit_ptr_offset(p, data_ptr, inner_index);
+
+				lbValue src_ptr = lb_emit_array_epi(p, row_value_addr, i);
+				lbValue src = lb_emit_load(p, src_ptr);
+				lb_emit_store(p, dst, src);
+			}
+			return;
+		}
+
 		Type *elem_type = t->Struct.soa_elem;
 		value = lb_emit_conv(p, value, elem_type);
 		elem_type = base_type(elem_type);
@@ -1372,13 +1565,24 @@ gb_internal void lb_addr_store(lbProcedure *p, lbAddr addr, lbValue value) {
 
 		isize field_count = 0;
 
-		switch (elem_type->kind) {
-		case Type_Struct:
-			field_count = elem_type->Struct.fields.count;
-			break;
-		case Type_Array:
-			field_count = cast(isize)elem_type->Array.count;
-			break;
+			switch (elem_type->kind) {
+			case Type_Struct:
+				field_count = elem_type->Struct.fields.count;
+				break;
+			case Type_Array:
+				field_count = cast(isize)elem_type->Array.count;
+				break;
+			case Type_EnumeratedArray:
+				field_count = cast(isize)elem_type->EnumeratedArray.count;
+				break;
+			case Type_Slice:
+				field_count = 2;
+				break;
+			default:
+				if (is_type_quaternion(elem_type)) {
+					field_count = 4;
+				}
+				break;
 		}
 		for (isize i = 0; i < field_count; i++) {
 			lbValue dst = lb_emit_struct_ep(p, addr.addr, cast(i32)i);
@@ -1496,7 +1700,7 @@ gb_internal void lb_emit_store(lbProcedure *p, lbValue ptr, lbValue value) {
 		// used to be llvm_addr_type: for a multi-pointer typed ptr the latter is `ptr`,
 		// and ConstNull of it would store 8 bytes over an element of any size
 		LLVMTypeRef src_t = lb_type(p->module, a);
-		if (is_type_proc(a)) {
+		if (is_type_proc(a) && !is_type_closure(a)) {
 			LLVMTypeRef rawptr_type = lb_type(p->module, t_rawptr);
 			LLVMTypeRef rawptr_ptr_type = LLVMPointerType(rawptr_type, 0);
 			LLVMBuildStore(p->builder, LLVMConstNull(rawptr_type), LLVMBuildBitCast(p->builder, ptr.value, rawptr_ptr_type, ""));
@@ -1548,7 +1752,9 @@ gb_internal void lb_emit_store(lbProcedure *p, lbValue ptr, lbValue value) {
 	}
 
 	LLVMValueRef instr = nullptr;
-	if (lb_is_type_proc_recursive(a)) {
+	if (lb_is_type_proc_recursive(a) && !is_type_closure(a)) {
+		// closures are 2-word {fn, env} aggregates, not bare pointers, so fall through to a normal
+		// aggregate store below. (A pointer to a closure is still a plain pointer and stays on this path.)
 		// NOTE(bill, 2020-11-11): Because of certain LLVM rules, a procedure value may be
 		// stored as regular pointer with no procedure information
 
@@ -1597,6 +1803,11 @@ gb_internal lbValue lb_addr_load(lbProcedure *p, lbAddr const &addr) {
 	GB_ASSERT(addr.addr.value != nullptr);
 
 	if (addr.kind == lbAddr_BitField) {
+		lbValue fast_value = {};
+		if (lb_try_load_addr_bit_field_word_fast(p, addr, &fast_value)) {
+			return fast_value;
+		}
+
 		Type *ct = core_type(addr.bitfield.type);
 		bool do_mask = false;
 		if (is_type_unsigned(ct) || is_type_boolean(ct)) {
@@ -1699,6 +1910,39 @@ gb_internal lbValue lb_addr_load(lbProcedure *p, lbAddr const &addr) {
 		Type *t = type_deref(addr.addr.type);
 		t = base_type(t);
 		GB_ASSERT(t->kind == Type_Struct && t->Struct.soa_kind != StructSoa_None);
+
+		if (addr.soa.mode == lbSoaVariable_InnerSliceRowIndex) {
+			GB_ASSERT(t->Struct.soa_kind == StructSoa_Fixed);
+			Type *elem_type = base_type(t->Struct.soa_elem);
+			GB_ASSERT(elem_type->kind == Type_Slice);
+			GB_ASSERT(addr.soa.result_type != nullptr && is_type_enumerated_array(addr.soa.result_type));
+
+			Type *row_type = addr.soa.result_type;
+			lbAddr res = lb_add_local_generated(p, row_type, true);
+			lbValue inner_index = lb_emit_conv(p, addr.soa.index, t_int);
+
+			lbValue data_fields = lb_emit_struct_ep(p, addr.addr, 0);
+			lbValue len_fields  = lb_emit_struct_ep(p, addr.addr, 1);
+
+			for (i64 i = 0; i < t->Struct.soa_count; i++) {
+				lbValue len_ptr = lb_emit_array_epi(p, len_fields, i);
+				lbValue len = lb_emit_load(p, len_ptr);
+				if (addr.soa.index_expr != nullptr) {
+					lb_emit_bounds_check(p, ast_token(addr.soa.index_expr), inner_index, len);
+				}
+
+				lbValue data_ptr_ptr = lb_emit_array_epi(p, data_fields, i);
+				lbValue data_ptr = lb_emit_load(p, data_ptr_ptr);
+				lbValue src_ptr = lb_emit_ptr_offset(p, data_ptr, inner_index);
+				lbValue src = lb_emit_load(p, src_ptr);
+
+				lbValue dst = lb_emit_array_epi(p, res.addr, i);
+				lb_emit_store(p, dst, src);
+			}
+
+			return lb_addr_load(p, res);
+		}
+
 		Type *elem = t->Struct.soa_elem;
 
 		lbValue len = {};
@@ -1850,7 +2094,7 @@ gb_internal lbValue lb_addr_load(lbProcedure *p, lbAddr const &addr) {
 		return lb_addr_load(p, res);
 	}
 
-	if (is_type_proc(addr.addr.type)) {
+	if (is_type_proc(addr.addr.type) && !is_type_closure(addr.addr.type)) {
 		return addr.addr;
 	}
 	return lb_emit_load(p, addr.addr);
@@ -1992,18 +2236,20 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 	type = base_type(original_type);
 	GB_ASSERT(type->kind == Type_Proc);
 
-	mutex_lock(&m->func_raw_types_mutex);
+	{
+		mutex_lock(&m->func_raw_types_mutex);
 
-	// NOTE: `map_get` returns an interior pointer into the map's storage, which another codegen thread's
-	// `map_set` (below) can free by growing/rehashing the map. Read the value out *while still holding the
-	// lock*; dereferencing `found` after unlocking is a data race that can return a freed/garbage type.
-	LLVMTypeRef *found = map_get(&m->func_raw_types, type);
-	LLVMTypeRef found_type = found ? *found : nullptr;
+		// NOTE: `map_get` returns an interior pointer into the map's storage, which another codegen thread's
+		// `map_set` (below) can free by growing/rehashing the map. Read the value out *while still holding the
+		// lock*; dereferencing `found` after unlocking is a data race that can return a freed/garbage type.
+		LLVMTypeRef *found = map_get(&m->func_raw_types, type);
+		LLVMTypeRef found_type = found ? *found : nullptr;
 
-	mutex_unlock(&m->func_raw_types_mutex);
+		mutex_unlock(&m->func_raw_types_mutex);
 
-	if (found_type != nullptr) {
-		return found_type;
+		if (found_type != nullptr) {
+			return found_type;
+		}
 	}
 
 	unsigned param_count = 0;
@@ -2030,7 +2276,8 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 	bool *params_by_ptr = gb_alloc_array(permanent_allocator(), bool, param_count);
 	if (type->Proc.result_count != 0) {
 		Type *single_ret = reduce_tuple_to_single_type(type->Proc.results);
-		if (is_type_proc(single_ret)) {
+		if (is_type_proc(single_ret) && !is_type_closure(single_ret)) {
+			// bare procs collapse to a raw function pointer; closures keep their {fn, env} struct.
 			single_ret = t_rawptr;
 		}
 		ret = lb_type(m, single_ret);
@@ -2067,7 +2314,8 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 			    type_size_of(e_type) <= 1) {
 				param_type = LLVMInt1TypeInContext(m->ctx);
 			} else {
-				if (is_type_proc(e_type)) {
+				if (is_type_proc(e_type) && !is_type_closure(e_type)) {
+					// closures pass as their {fn, env} struct; bare procs as a raw pointer.
 					param_type = lb_type(m, t_rawptr);
 				} else {
 					param_type = lb_type(m, e_type);
@@ -2107,7 +2355,6 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 		}
 	}
 
-	map_set(&m->function_type_map, type, ft);
 	LLVMTypeRef new_abi_fn_type = lb_function_type_to_llvm_raw(ft, type->Proc.c_vararg);
 
 	GB_ASSERT_MSG(LLVMGetTypeContext(new_abi_fn_type) == m->ctx,
@@ -2115,6 +2362,13 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 	              LLVMGetTypeContext(new_abi_fn_type), m->ctx);
 
 	mutex_lock(&m->func_raw_types_mutex);
+	LLVMTypeRef *found = map_get(&m->func_raw_types, type);
+	if (found) {
+		LLVMTypeRef result = *found;
+		mutex_unlock(&m->func_raw_types_mutex);
+		return result;
+	}
+	map_set(&m->function_type_map, type, ft);
 	map_set(&m->func_raw_types, type, new_abi_fn_type);
 	mutex_unlock(&m->func_raw_types_mutex);
 
@@ -2701,9 +2955,11 @@ gb_internal LLVMTypeRef lb_type_internal(lbModule *m, Type *type) {
 				field_remapping[field_index] = cast(i32)fields.count;
 
 				Type *field_type = field->type;
-				if (is_type_proc(field_type)) {
+				if (is_type_proc(field_type) && !is_type_closure(field_type)) {
 					// NOTE(bill, 2022-11-23): Prevent type cycle declaration (e.g. vtable) of procedures
 					// because LLVM is dumb with procedure types
+					// a closure field is a 2-word {fn,env} aggregate, not a single pointer; collapsing it
+					// to rawptr would size the field at 8 bytes and corrupt the struct layout.
 					field_type = t_rawptr;
 				}
 
@@ -2824,9 +3080,17 @@ gb_internal LLVMTypeRef lb_type_internal(lbModule *m, Type *type) {
 
 	case Type_Proc:
 		{
+			LLVMTypeRef ptr = LLVMPointerType(LLVMIntTypeInContext(m->ctx, 8), 0);
+			// populate the raw/function-type caches in both cases. lb_get_function_type spins on
+			// lb_type() until function_type_map is set, so closures must populate it here too even though the
+			// closure *value* is a {fn, env} fat pointer rather than a bare function pointer.
 			LLVMTypeRef proc_raw_type = lb_type_internal_for_procedures_raw(m, type);
 			gb_unused(proc_raw_type);
-			return LLVMPointerType(LLVMIntTypeInContext(m->ctx, 8), 0);
+			if (type->Proc.is_closure) {
+				LLVMTypeRef elems[2] = {ptr, ptr};
+				return LLVMStructTypeInContext(m->ctx, elems, 2, /*packed*/false);
+			}
+			return ptr;
 		}
 		break;
 	case Type_BitSet:
@@ -2918,30 +3182,26 @@ gb_internal LLVMTypeRef lb_type(lbModule *m, Type *type) {
 }
 
 gb_internal lbFunctionType *lb_get_function_type(lbModule *m, Type *pt) {
-	lbFunctionType **ft_found = nullptr;
-	ft_found = map_get(&m->function_type_map, pt);
-	if (!ft_found) {
+	for (;;) {
+		mutex_lock(&m->func_raw_types_mutex);
+		lbFunctionType **ft_found = map_get(&m->function_type_map, pt);
+		lbFunctionType *ft = ft_found ? *ft_found : nullptr;
+		mutex_unlock(&m->func_raw_types_mutex);
+
+		if (ft != nullptr) {
+			return ft;
+		}
+
 		LLVMTypeRef llvm_proc_type = lb_type(m, pt);
 		gb_unused(llvm_proc_type);
-		ft_found = map_get(&m->function_type_map, pt);
 	}
-	GB_ASSERT(ft_found != nullptr);
-
-	return *ft_found;
 }
 
 gb_internal void lb_ensure_abi_function_type(lbModule *m, lbProcedure *p) {
 	if (p->abi_function_type != nullptr) {
 		return;
 	}
-	lbFunctionType **ft_found = map_get(&m->function_type_map, p->type);
-	if (ft_found == nullptr) {
-		LLVMTypeRef llvm_proc_type = lb_type(p->module, p->type);
-		gb_unused(llvm_proc_type);
-		ft_found = map_get(&m->function_type_map, p->type);
-	}
-	GB_ASSERT(ft_found != nullptr);
-	p->abi_function_type = *ft_found;
+	p->abi_function_type = lb_get_function_type(m, p->type);
 	GB_ASSERT(p->abi_function_type != nullptr);
 }
 
@@ -3167,6 +3427,45 @@ gb_internal LLVMValueRef OdinLLVMBuildTransmute(lbProcedure *p, LLVMValueRef val
 
 	LLVMTypeKind src_kind = LLVMGetTypeKind(src_type);
 	LLVMTypeKind dst_kind = LLVMGetTypeKind(dst_type);
+
+	LLVMTypeRef llvm_i64 = LLVMInt64TypeInContext(ctx);
+	if (src_type == lb_type(p->module, t_string) &&
+	    LLVMIsConstant(val) &&
+	    build_context.metrics.ptr_size == 8 &&
+	    build_context.metrics.int_size == 8 &&
+	    dst_kind == LLVMArrayTypeKind &&
+	    LLVMGetArrayLength(dst_type) == 2 &&
+	    OdinLLVMGetArrayElementType(dst_type) == llvm_i64) {
+		if (LLVMIsNull(val)) {
+			return LLVMConstNull(dst_type);
+		}
+
+		LLVMValueRef data = LLVMGetAggregateElement(val, 0);
+		LLVMValueRef len = LLVMGetAggregateElement(val, 1);
+		if (data != nullptr && len != nullptr) {
+			LLVMValueRef values[2] = {
+				LLVMConstPtrToInt(data, llvm_i64),
+				len,
+			};
+			return LLVMConstArray(llvm_i64, values, gb_count_of(values));
+		}
+	}
+
+	if ((src_kind == LLVMStructTypeKind || src_kind == LLVMArrayTypeKind) &&
+	    (dst_kind == LLVMStructTypeKind || dst_kind == LLVMArrayTypeKind) &&
+	    src_size == dst_size &&
+	    LLVMIsALoadInst(val) &&
+	    !LLVMGetVolatile(val) &&
+	    LLVMGetOrdering(val) == LLVMAtomicOrderingNotAtomic &&
+	    LLVMGetFirstUse(val) == nullptr) {
+		LLVMBuilderRef temp_builder = LLVMCreateBuilderInContext(p->module->ctx);
+		LLVMPositionBuilderBefore(temp_builder, val);
+		LLVMValueRef new_val = LLVMBuildLoad2(temp_builder, dst_type, LLVMGetOperand(val, 0), "");
+		LLVMSetAlignment(new_val, LLVMGetAlignment(val));
+		LLVMInstructionSetDebugLoc(new_val, LLVMInstructionGetDebugLoc(val));
+		LLVMDisposeBuilder(temp_builder);
+		return new_val;
+	}
 
 	if (dst_type == LLVMInt1TypeInContext(ctx)) {
 		GB_ASSERT(lb_is_type_kind(src_type, LLVMIntegerTypeKind));
@@ -3509,6 +3808,10 @@ gb_internal lbValue lb_find_or_add_entity_string16_slice_with_type(lbModule *m, 
 
 
 gb_internal lbValue lb_find_ident(lbProcedure *p, lbModule *m, Entity *e, Ast *expr) {
+	if (e->flags & EntityFlag_Captured) {
+		// a captured variable lives in the closure environment, not on this frame's stack.
+		return lb_addr_load(p, lb_closure_capture_addr(p, e));
+	}
 	if (e->flags & EntityFlag_Param) {
 		// NOTE(bill): Bypass the stack copied variable for
 		// direct parameters as there is no need for the direct load
@@ -3527,7 +3830,9 @@ gb_internal lbValue lb_find_ident(lbProcedure *p, lbModule *m, Entity *e, Ast *e
 
 		auto v = *found;
 		// NOTE(bill): This is because pointers are already pointers in LLVM
-		if (is_type_proc(v.type)) {
+		// a closure entity holds the address of a 2-word {fn,env} value, so it must be loaded;
+		// only a bare proc value is itself a function pointer that needs no load.
+		if (is_type_proc(v.type) && !is_type_closure(v.type)) {
 			return v;
 		}
 		return lb_emit_load(p, v);

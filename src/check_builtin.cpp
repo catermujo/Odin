@@ -39,6 +39,7 @@ gb_global BuiltinTypeIsProc *builtin_type_is_procs[BuiltinProc__type_simple_bool
 	is_type_simple_compare, // easily compared using memcmp
 	is_type_nearly_simple_compare, // easily compared using memcmp (including floats)
 	is_type_dereferenceable,
+	is_type_trivially_copyable,
 	is_type_valid_for_keys,
 	is_type_valid_for_matrix_elems,
 
@@ -67,6 +68,34 @@ gb_global BuiltinTypeIsProc *builtin_type_is_procs[BuiltinProc__type_simple_bool
 
 	type_has_nil,
 };
+
+gb_internal bool is_min_max_clamp_ordered_operand_type(Type *type) {
+	type = base_type(type);
+	if (type == nullptr) {
+		return false;
+	}
+	if (is_type_ordered(type) && (is_type_numeric(type) || is_type_string(type))) {
+		return true;
+	}
+	if (!is_type_array_like(type)) {
+		return false;
+	}
+	Type *elem = core_array_type(type);
+	return is_type_ordered(elem) && (is_type_numeric(elem) || is_type_string(elem));
+}
+
+gb_internal bool is_abs_operand_type(Type *type) {
+	type = base_type(type);
+	if (type == nullptr) {
+		return false;
+	}
+	if (!is_type_array_like(type)) {
+		return is_type_numeric(type);
+	}
+
+	Type *elem = base_array_type(type);
+	return is_type_numeric(elem) && !is_type_complex_or_quaternion(elem);
+}
 
 
 gb_internal void check_or_else_right_type(CheckerContext *c, Ast *expr, String const &name, Type *right_type) {
@@ -603,7 +632,12 @@ gb_internal bool check_builtin_objc_procedure(CheckerContext *c, Operand *operan
 					gbString e   = expr_to_string(op.expr);
 					gbString src = type_to_string(op.type);
 					gbString dst = type_to_string(handler_capture_param_types[i]->type);
-					error(op.expr, "'%.*s' captured value '%s' of type '%s' is not assignable to type '%s'", LIT(builtin_name), e, src, dst);
+					TypeDiagnosticString type_strings[] = {
+						{&src, op.type},
+						{&dst, handler_capture_param_types[i]->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(op.expr, "'%.*s' captured value '%s' of type '%s' is not assignable to type '%s'", LIT(builtin_name), e, *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(e);
 					gb_string_free(src);
 					gb_string_free(dst);
@@ -759,7 +793,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -792,7 +831,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -813,7 +857,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(dst.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(dst.type);
-			error(dst.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, dst.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(dst.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -827,7 +876,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(src.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(src.type);
-			error(src.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, src.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(src.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -848,7 +902,12 @@ gb_internal bool check_builtin_c_procedure(CheckerContext *c, Operand *operand, 
 		if (!are_types_identical(list.type, t_c_va_list_ptr)) {
 			gbString lpt = type_to_string(t_c_va_list_ptr);
 			gbString t = type_to_string(list.type);
-			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), lpt, t);
+			TypeDiagnosticString type_strings[] = {
+				{&lpt, t_c_va_list_ptr},
+				{&t, list.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(list.expr, "'%.*s' expected a value of type %s, got type %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(lpt);
 			return false;
@@ -929,7 +988,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -988,7 +1052,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1148,7 +1217,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString tx = type_to_string(x.type);
 				gbString ty = type_to_string(y.type);
-				error(call, "Mismatched types to '%.*s', '%s' vs '%s'", LIT(builtin_name), tx, ty);
+				TypeDiagnosticString type_strings[] = {
+					{&tx, x.type},
+					{&ty, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(call, "Mismatched types to '%.*s', '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ty);
 				gb_string_free(tx);
 			}
@@ -1333,7 +1407,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(y.type, elem)) {
 				gbString et = type_to_string(elem);
 				gbString yt = type_to_string(y.type);
-				error(y.expr, "'%.*s' expected a type of '%s' to insert, got '%s'", LIT(builtin_name), et, yt);
+				TypeDiagnosticString type_strings[] = {
+					{&et, elem},
+					{&yt, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(y.expr, "'%.*s' expected a type of '%s' to insert, got '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yt);
 				gb_string_free(et);
 				return false;
@@ -1480,7 +1559,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1561,7 +1645,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1605,7 +1694,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 results of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 results of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1666,7 +1760,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(src.type, indices.type)) {
 				gbString src_str = type_to_string(src.type);
 				gbString indices_str = type_to_string(indices.type);
-				error(indices.expr, "'%.*s' expected both arguments to have the same type, got '%s' vs '%s'", LIT(builtin_name), src_str, indices_str);
+				TypeDiagnosticString type_strings[] = {
+					{&src_str, src.type},
+					{&indices_str, indices.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(indices.expr, "'%.*s' expected both arguments to have the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(indices_str);
 				gb_string_free(src_str);
 				return false;
@@ -1831,7 +1930,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString ys = type_to_string(y.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, ys);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&ys, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(ys);
 				gb_string_free(xs);
 				return false;
@@ -1839,7 +1943,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 			if (!are_types_identical(x.type, z.type)) {
 				gbString xs = type_to_string(x.type);
 				gbString zs = type_to_string(z.type);
-				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), xs, zs);
+				TypeDiagnosticString type_strings[] = {
+					{&xs, x.type},
+					{&zs, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "'%.*s' expected 2 arguments of the same type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(zs);
 				gb_string_free(xs);
 				return false;
@@ -1913,7 +2022,12 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 				if (!are_types_identical(x.type, y.type)) {
 					gbString a = type_to_string(x.type);
 					gbString b = type_to_string(y.type);
-					error(y.expr, "'%.*s' all argument types must match, expected %s, got %s", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, x.type},
+						{&b, y.type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(y.expr, "'%.*s' all argument types must match, expected %s, got %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -2029,61 +2143,7 @@ gb_internal bool check_builtin_simd_operation(CheckerContext *c, Operand *operan
 	return false;
 }
 
-// NOTE(bill, 2026-10-02) The cache entry of `path` loaded to at least `tier`.
-// The map is only locked to find or add the entry, and the file is loaded under the entry's own mutex, so different files load at once.
-gb_internal LoadFileCache *load_file_cache_entry(CheckerInfo *info, String const &path, LoadFileTier tier) {
-	LoadFileCache *cache = nullptr;
-	mutex_lock(&info->load_file_mutex);
-	LoadFileCache **cache_ptr = string_map_get(&info->load_file_cache, path);
-	if (cache_ptr != nullptr) {
-		cache = *cache_ptr;
-	} else {
-		cache = permanent_alloc_item<LoadFileCache>();
-		cache->path = path;
-		string_map_init(&cache->hashes, 32);
-		string_map_set(&info->load_file_cache, path, cache);
-	}
-	mutex_unlock(&info->load_file_mutex);
-
-	MUTEX_GUARD(&cache->mutex);
-	if (tier > cache->tier) {
-		cache->tier = tier;
-
-		TEMPORARY_ALLOCATOR_GUARD();
-		char *c_str = alloc_cstring(temporary_allocator(), path);
-
-		gbFile f = {};
-		cache->file_error = gb_file_open(&f, c_str);
-		defer (gb_file_close(&f));
-
-		if (cache->file_error == gbFileError_None) {
-			cache->exists = true;
-
-			switch(tier) {
-			case LoadFileTier_Exists:
-				// Nothing to do.
-				break;
-			case LoadFileTier_Contents: {
-				isize file_size = cast(isize)gb_file_size(&f);
-				if (file_size > 0) {
-					u8 *ptr = permanent_alloc_array<u8>(file_size+1);
-					gb_file_read_at(&f, ptr, file_size, 0);
-					ptr[file_size] = '\0';
-					cache->data.text = ptr;
-					cache->data.len = file_size;
-				}
-				break;
-			}
-			default:
-				GB_PANIC("Unhandled LoadFileTier");
-				break;
-			};
-		}
-	}
-	return cache;
-}
-
-gb_internal bool cache_load_file_directive(CheckerContext *c, Ast *call, String const &original_string, bool err_on_not_found, LoadFileCache **cache_, LoadFileTier tier) {
+gb_internal bool cache_load_file_directive(CheckerContext *c, Ast *call, String const &original_string, bool err_on_not_found, LoadFileCache **cache_, LoadFileTier tier, bool use_mutex=true) {
 	ast_node(ce, CallExpr, call);
 	ast_node(bd, BasicDirective, ce->proc);
 	String builtin_name = bd->name.string;
@@ -2105,12 +2165,75 @@ gb_internal bool cache_load_file_directive(CheckerContext *c, Ast *call, String 
 		}
 	}
 
-	LoadFileCache *cache = load_file_cache_entry(c->info, path, tier);
-	if (cache_) *cache_ = cache;
+	if (use_mutex) mutex_lock(&c->info->load_file_mutex);
+	defer (if (use_mutex) mutex_unlock(&c->info->load_file_mutex));
 
-	mutex_lock(&cache->mutex);
-	gbFileError file_error = cache->file_error;
-	mutex_unlock(&cache->mutex);
+	gbFileError file_error = gbFileError_None;
+	String data = {};
+	bool exists = false;
+	LoadFileTier cache_tier = LoadFileTier_Invalid;
+
+	LoadFileCache **cache_ptr = string_map_get(&c->info->load_file_cache, path);
+	LoadFileCache *cache = cache_ptr ? *cache_ptr : nullptr;
+	if (cache) {
+		file_error = cache->file_error;
+		data = cache->data;
+		exists = cache->exists;
+		cache_tier = cache->tier;
+	}
+	defer ({
+		if (cache == nullptr) {
+			LoadFileCache *new_cache = permanent_alloc_item<LoadFileCache>();
+			new_cache->path = path;
+			new_cache->data = data;
+			new_cache->file_error = file_error;
+			new_cache->exists = exists;
+			new_cache->tier = cache_tier;
+			string_map_init(&new_cache->hashes, 32);
+			string_map_set(&c->info->load_file_cache, path, new_cache);
+			if (cache_) *cache_ = new_cache;
+		} else {
+			cache->data = data;
+			cache->file_error = file_error;
+			cache->exists = exists;
+			cache->tier = cache_tier;
+			if (cache_) *cache_ = cache;
+		}
+	});
+
+	if (tier > cache_tier) {
+		cache_tier = tier;
+
+		TEMPORARY_ALLOCATOR_GUARD();
+		char *c_str = alloc_cstring(temporary_allocator(), path);
+
+		gbFile f = {};
+		file_error = gb_file_open(&f, c_str);
+		defer (gb_file_close(&f));
+
+		if (file_error == gbFileError_None) {
+			exists = true;
+
+			switch(tier) {
+			case LoadFileTier_Exists:
+				// Nothing to do.
+				break;
+			case LoadFileTier_Contents: {
+				isize file_size = cast(isize)gb_file_size(&f);
+				if (file_size > 0) {
+					u8 *ptr = permanent_alloc_array<u8>(file_size+1);
+					gb_file_read_at(&f, ptr, file_size, 0);
+					ptr[file_size] = '\0';
+					data.text = ptr;
+					data.len = file_size;
+				}
+				break;
+			}
+			default:
+				GB_PANIC("Unhandled LoadFileTier");
+			};
+		}
+	}
 
 	switch (file_error) {
 	default:
@@ -2244,62 +2367,6 @@ gb_internal int file_cache_sort_cmp(void const *x, void const *y) {
 	return string_compare(a->path, b->path);
 }
 
-// NOTE(bill): a directory may hold thousands of files, which are read one at a time otherwise.
-// This thread and a few helper tasks take them in turn and this thread only waits for the ones a running helper has taken,
-// and the job is freed by whichever of them finishes with it last.
-struct LoadDirectoryPrefetch {
-	CheckerInfo *      info;
-	Array<String>      paths;
-	std::atomic<isize> next;
-	std::atomic<isize> done;
-	std::atomic<i32>   refs;
-};
-
-gb_internal void load_directory_prefetch_run(LoadDirectoryPrefetch *job) {
-	for (isize i = job->next.fetch_add(1); i < job->paths.count; i = job->next.fetch_add(1)) {
-		load_file_cache_entry(job->info, job->paths[i], LoadFileTier_Contents);
-		job->done.fetch_add(1);
-	}
-	if (job->refs.fetch_sub(1) == 1) {
-		array_free(&job->paths);
-		gb_free(heap_allocator(), job);
-	}
-}
-
-gb_internal WORKER_TASK_PROC(load_directory_prefetch_worker) {
-	load_directory_prefetch_run(cast(LoadDirectoryPrefetch *)data);
-	return 0;
-}
-
-gb_internal void load_directory_prefetch(CheckerInfo *info, Array<FileInfo> const &list) {
-	isize const FILES_PER_HELPER = 64;
-
-	LoadDirectoryPrefetch *job = gb_alloc_item(heap_allocator(), LoadDirectoryPrefetch);
-	job->info = info;
-	array_init(&job->paths, heap_allocator(), 0, list.count);
-	for (FileInfo const &fi : list) {
-		if (!fi.is_dir) {
-			array_add(&job->paths, fi.fullpath);
-		}
-	}
-	isize count = job->paths.count;
-	isize helpers = gb_min(global_thread_pool.threads.count - 1, count/FILES_PER_HELPER);
-	job->refs.store(cast(i32)(helpers + 1));
-	for (isize i = 0; i < helpers; i++) {
-		thread_pool_add_task(load_directory_prefetch_worker, job);
-	}
-
-	job->refs.fetch_add(1); // NOTE(bill): kept until every file is done
-	load_directory_prefetch_run(job);
-	while (job->done.load() < count) {
-		yield_thread();
-	}
-	if (job->refs.fetch_sub(1) == 1) {
-		array_free(&job->paths);
-		gb_free(heap_allocator(), job);
-	}
-}
-
 gb_internal LoadDirectiveResult check_load_directory_directive(CheckerContext *c, Operand *operand, Ast *call, Type *type_hint, bool err_on_not_found) {
 	ast_node(ce, CallExpr, call);
 	ast_node(bd, BasicDirective, ce->proc);
@@ -2348,26 +2415,39 @@ gb_internal LoadDirectiveResult check_load_directory_directive(CheckerContext *c
 		bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
 		gb_unused(ok);
 	}
-	// NOTE(bill): the map is only locked to find or add the directory's entry which is loaded under its own mutex
-	LoadDirectoryCache *cache = nullptr;
-	mutex_lock(&c->info->load_directory_mutex);
-	LoadDirectoryCache **cache_ptr = string_map_get(&c->info->load_directory_cache, path);
-	if (cache_ptr != nullptr) {
-		cache = *cache_ptr;
-	} else {
-		cache = permanent_alloc_item<LoadDirectoryCache>();
-		cache->path = path;
-		string_map_set(&c->info->load_directory_cache, path, cache);
-	}
-	map_set(&c->info->load_directory_map, call, cache);
-	mutex_unlock(&c->info->load_directory_mutex);
+	MUTEX_GUARD(&c->info->load_directory_mutex);
 
-	MUTEX_GUARD(&cache->mutex);
+
+	gbFileError file_error = gbFileError_None;
+
+	Array<LoadFileCache *> file_caches = {};
+
+	LoadDirectoryCache **cache_ptr = string_map_get(&c->info->load_directory_cache, path);
+	LoadDirectoryCache *cache = cache_ptr ? *cache_ptr : nullptr;
+	if (cache) {
+		file_error = cache->file_error;
+	}
+	defer ({
+		if (cache == nullptr) {
+			LoadDirectoryCache *new_cache = permanent_alloc_item<LoadDirectoryCache>();
+			new_cache->path = path;
+			new_cache->files = file_caches;
+			new_cache->file_error = file_error;
+			string_map_set(&c->info->load_directory_cache, path, new_cache);
+
+			map_set(&c->info->load_directory_map, call, new_cache);
+		} else {
+			cache->file_error = file_error;
+
+			map_set(&c->info->load_directory_map, call, cache);
+		}
+	});
+
 
 	LoadDirectiveResult result = LoadDirective_Success;
 
-	if (!cache->loaded)  {
-		cache->loaded = true;
+
+	if (cache == nullptr)  {
 		Array<FileInfo> list = {};
 		ReadDirectoryError rd_err = read_directory(path, &list);
 		defer (array_free(&list));
@@ -2398,26 +2478,27 @@ gb_internal LoadDirectiveResult check_load_directory_directive(CheckerContext *c
 			return LoadDirective_Error;
 		}
 
-		load_directory_prefetch(c->info, list);
-
 		isize files_to_reserve = list.count+1; // always reserve 1
 
-		cache->files = array_make<LoadFileCache *>(heap_allocator(), 0, files_to_reserve);
+		file_caches = array_make<LoadFileCache *>(heap_allocator(), 0, files_to_reserve);
+
+		mutex_lock(&c->info->load_file_mutex);
+		defer (mutex_unlock(&c->info->load_file_mutex));
 
 		for (FileInfo fi : list) {
-			LoadFileCache *file_cache = nullptr;
+			LoadFileCache *cache = nullptr;
 			if (fi.is_dir) {
 				continue;
 			}
 
-			if (cache_load_file_directive(c, call, fi.fullpath, err_on_not_found, &file_cache, LoadFileTier_Contents)) {
-				array_add(&cache->files, file_cache);
+			if (cache_load_file_directive(c, call, fi.fullpath, err_on_not_found, &cache, LoadFileTier_Contents, /*use_mutex*/false)) {
+				array_add(&file_caches, cache);
 			} else {
 				result = LoadDirective_Error;
 			}
 		}
 
-		array_sort(cache->files, file_cache_sort_cmp);
+		array_sort(file_caches, file_cache_sort_cmp);
 
 	}
 
@@ -2483,6 +2564,111 @@ gb_internal bool check_hash_kind(CheckerContext *c, Ast *call, String const &has
 	return true;
 }
 
+struct CompileTimeTriggerLocation {
+	bool valid;
+	bool derived_from_trace;
+	TriggerTraceKind trace_kind;
+	TokenPos pos;
+	String name;
+};
+
+gb_internal void print_compile_time_trigger_location_note(CompileTimeTriggerLocation const &loc) {
+	if (!loc.valid) {
+		return;
+	}
+
+	char const *pos = token_pos_to_string(loc.pos);
+	if (loc.derived_from_trace) {
+		switch (loc.trace_kind) {
+		case TriggerTrace_Use:
+			if (loc.name.len > 0) {
+				error_line("\tTriggered by use of '%.*s' at %s\n", LIT(loc.name), pos);
+			} else {
+				error_line("\tTriggered by use at %s\n", pos);
+			}
+			return;
+		case TriggerTrace_Import:
+			if (loc.name.len > 0) {
+				error_line("\tTriggered by import '%.*s' at %s\n", LIT(loc.name), pos);
+			} else {
+				error_line("\tTriggered by import at %s\n", pos);
+			}
+			return;
+		case TriggerTrace_Invalid:
+			break;
+		}
+	}
+
+	error_line("\tTriggered at %s\n", pos);
+}
+
+gb_internal bool check_compile_time_location_argument(CheckerContext *c, Ast *call, Ast *arg, char const *builtin_name, CompileTimeTriggerLocation *out) {
+	GB_ASSERT(out != nullptr);
+	gb_zero_item(out);
+	init_core_source_code_location(c->checker);
+
+	if (arg == nullptr) {
+		error(call, "'#%s' expected a location argument", builtin_name);
+		return false;
+	}
+
+	arg = unparen_expr(arg);
+	if (arg->kind == Ast_BasicDirective && arg->BasicDirective.name.string == "trigger_location") {
+		out->valid = true;
+		if (c->trigger_trace_count > 0) {
+			TriggerTraceFrame const &frame = c->trigger_trace[0];
+			out->derived_from_trace = true;
+			out->trace_kind = frame.kind;
+			out->pos = frame.pos;
+			out->name = frame.name;
+		} else {
+			out->pos = ast_token(call).pos;
+		}
+		return true;
+	}
+
+	if (arg->kind != Ast_CallExpr || arg->CallExpr.proc->kind != Ast_BasicDirective) {
+		gbString str = expr_to_string(arg);
+		error(arg, "'#%s' expected '#trigger_location' or '#location(...)', got %s", builtin_name, str);
+		gb_string_free(str);
+		return false;
+	}
+
+	ast_node(loc_call, CallExpr, arg);
+	if (loc_call->proc->BasicDirective.name.string != "location") {
+		gbString str = expr_to_string(arg);
+		error(arg, "'#%s' expected '#trigger_location' or '#location(...)', got %s", builtin_name, str);
+		gb_string_free(str);
+		return false;
+	}
+
+	if (loc_call->args.count > 1) {
+		error(arg, "'#location' expects either 0 or 1 arguments, got %td", loc_call->args.count);
+		return false;
+	}
+
+	out->valid = true;
+	out->pos = ast_token(loc_call->proc).pos;
+	if (loc_call->args.count == 0) {
+		return true;
+	}
+
+	Ast *target = unparen_expr(loc_call->args[0]);
+	Entity *e = nullptr;
+	Operand o = {};
+	if (target->kind == Ast_Ident) {
+		e = check_ident(c, &o, target, nullptr, nullptr, true);
+	} else if (target->kind == Ast_SelectorExpr) {
+		e = check_selector(c, &o, target, nullptr);
+	}
+	if (e == nullptr) {
+		error(loc_call->args[0], "'#location' expected a valid entity name");
+		return false;
+	}
+
+	out->pos = e->token.pos;
+	return true;
+}
 
 
 gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *operand, Ast *call, Type *type_hint) {
@@ -2607,7 +2793,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 
 		LoadFileCache *cache = nullptr;
 		if (cache_load_file_directive(c, call, original_string, true, &cache, LoadFileTier_Contents)) {
-			MUTEX_GUARD(&cache->mutex);
+			MUTEX_GUARD(&c->info->load_file_mutex);
 			// TODO(bill): make these procedures fast :P
 			u64 hash_value = 0;
 			u64 *hash_value_ptr = string_map_get(&cache->hashes, hash_kind);
@@ -2686,8 +2872,8 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		}
 		return false;
 	} else if (name == "assert") {
-		if (ce->args.count != 1 && ce->args.count != 2) {
-			error(call, "'#assert' expects either 1 or 2 arguments, got %td", ce->args.count);
+		if (ce->args.count < 1 || ce->args.count > 3) {
+			error(call, "'#assert' expects between 1 and 3 arguments, got %td", ce->args.count);
 			return false;
 		}
 
@@ -2699,14 +2885,31 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 			gb_string_free(str);
 			return false;
 		}
-		if (ce->args.count == 2) {
+
+		bool has_message_arg = false;
+		bool has_location_arg = false;
+		CompileTimeTriggerLocation location_arg = {};
+		if (ce->args.count >= 2) {
 			Ast *arg = unparen_expr(ce->args[1]);
-			if (arg == nullptr || arg->kind != Ast_BasicLit || arg->BasicLit.token.kind != Token_String) {
+			if (arg != nullptr && arg->kind == Ast_BasicLit && arg->BasicLit.token.kind == Token_String) {
+				has_message_arg = true;
+			} else if (ce->args.count == 2) {
+				if (!check_compile_time_location_argument(c, call, ce->args[1], "assert", &location_arg)) {
+					return false;
+				}
+				has_location_arg = true;
+			} else {
 				gbString str = expr_to_string(arg);
-				error(call, "'%s' is not a constant string", str);
+				error(call, "'#assert' expected a constant string as its second argument when a third argument is provided, got %s", str);
 				gb_string_free(str);
 				return false;
 			}
+		}
+		if (ce->args.count == 3) {
+			if (!check_compile_time_location_argument(c, call, ce->args[2], "assert", &location_arg)) {
+				return false;
+			}
+			has_location_arg = true;
 		}
 
 		if (!operand->value.value_bool) {
@@ -2714,7 +2917,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 			gbString arg1 = expr_to_string(ce->args[0]);
 			gbString arg2 = {};
 
-			if (ce->args.count == 1) {
+			if (!has_message_arg) {
 				error(call, "Compile time assertion: %s", arg1);
 			} else {
 				arg2 = expr_to_string(ce->args[1]);
@@ -2726,9 +2929,17 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 				error_line("\tCalled within '%.*s' :: %s\n", LIT(c->proc_name), str);
 				gb_string_free(str);
 			}
+			if (has_location_arg) {
+				print_compile_time_trigger_location_note(location_arg);
+				if (location_arg.derived_from_trace) {
+					checker_context_print_trigger_trace_from(c, 1);
+				}
+			} else {
+				checker_context_print_trigger_trace(c);
+			}
 
 			gb_string_free(arg1);
-			if (ce->args.count == 2) {
+			if (has_message_arg) {
 				gb_string_free(arg2);
 			}
 		}
@@ -2737,15 +2948,23 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		operand->mode = Addressing_Constant;
 	} else if (name == "panic") {
 		ERROR_BLOCK();
-		if (ce->args.count != 1) {
-			error(call, "'#panic' expects 1 argument, got %td", ce->args.count);
+		if (ce->args.count != 1 && ce->args.count != 2) {
+			error(call, "'#panic' expects 1 or 2 arguments, got %td", ce->args.count);
 			return false;
 		}
-		if (!is_type_string(operand->type) || operand->mode != Addressing_Constant) {
+		if (operand->mode != Addressing_Constant || !is_type_string(operand->type)) {
 			gbString str = expr_to_string(ce->args[0]);
 			error(call, "'%s' is not a constant string", str);
 			gb_string_free(str);
 			return false;
+		}
+		bool has_location_arg = false;
+		CompileTimeTriggerLocation location_arg = {};
+		if (ce->args.count == 2) {
+			if (!check_compile_time_location_argument(c, call, ce->args[1], "panic", &location_arg)) {
+				return false;
+			}
+			has_location_arg = true;
 		}
 		if (!build_context.ignore_panic) {
 			error(call, "Compile time panic: %.*s", LIT(operand->value.value_string));
@@ -2753,6 +2972,14 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 				gbString str = type_to_string(c->curr_proc_sig);
 				error_line("\tCalled within '%.*s' :: %s\n", LIT(c->proc_name), str);
 				gb_string_free(str);
+			}
+			if (has_location_arg) {
+				print_compile_time_trigger_location_note(location_arg);
+				if (location_arg.derived_from_trace) {
+					checker_context_print_trigger_trace_from(c, 1);
+				}
+			} else {
+				checker_context_print_trigger_trace(c);
 			}
 		}
 		operand->type = t_invalid;
@@ -2846,6 +3073,44 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 	} else {
 		error(call, "Unknown directive call: #%.*s", LIT(name));
 	}
+	return true;
+}
+
+gb_internal bool infer_unresolved_array_literal_length(CheckerContext *c, Ast *expr, i64 *length) {
+	expr = unparen_expr(expr);
+	if (expr == nullptr || expr->kind != Ast_Ident) {
+		return false;
+	}
+
+	ast_node(ident, Ident, expr);
+	Entity *entity = scope_lookup(c->scope, ident->interned, ident->hash);
+	if (entity == nullptr || entity->kind != Entity_Variable || entity->state != EntityState_Unresolved) {
+		return false;
+	}
+
+	DeclInfo *decl = decl_info_of_entity(entity);
+	if (decl == nullptr || decl->init_expr == nullptr) {
+		return false;
+	}
+
+	Ast *init = unparen_expr(decl->init_expr);
+	if (init == nullptr || init->kind != Ast_CompoundLit) {
+		return false;
+	}
+	ast_node(cl, CompoundLit, init);
+	if (cl->type == nullptr || cl->type->kind != Ast_ArrayType) {
+		return false;
+	}
+	ast_node(array_type, ArrayType, cl->type);
+	if (array_type->count == nullptr || array_type->count->kind != Ast_UnaryExpr) {
+		return false;
+	}
+	ast_node(count, UnaryExpr, array_type->count);
+	if (count->op.kind != Token_Question || cl->elems.count == 0 || cl->elems[0]->kind == Ast_FieldValue) {
+		return false;
+	}
+
+	*length = cl->elems.count;
 	return true;
 }
 
@@ -2995,6 +3260,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	{
 		// len :: proc(Type) -> int
 		// cap :: proc(Type) -> int
+		i64 inferred_length = 0;
+		if (infer_unresolved_array_literal_length(c, ce->args[0], &inferred_length)) {
+			operand->mode = Addressing_Constant;
+			operand->value = exact_value_i64(inferred_length);
+			operand->type = t_untyped_integer;
+			break;
+		}
 		check_expr_or_type(c, operand, ce->args[0]);
 		if (operand->mode == Addressing_Invalid) {
 			return false;
@@ -3608,7 +3880,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(x.type, y.type)) {
 			gbString tx = type_to_string(x.type);
 			gbString ty = type_to_string(y.type);
-			error(call, "Mismatched types to 'complex', '%s' vs '%s'", tx, ty);
+			TypeDiagnosticString type_strings[] = {
+				{&tx, x.type},
+				{&ty, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "Mismatched types to 'complex', '%s' vs '%s'", *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(ty);
 			gb_string_free(tx);
 			return false;
@@ -3805,7 +4082,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			gbString ty = type_to_string(xyzw[1].type);
 			gbString tz = type_to_string(xyzw[2].type);
 			gbString tw = type_to_string(xyzw[3].type);
-			error(call, "Mismatched types to 'quaternion', 'w=%s' vs 'x=%s' vs 'y=%s' vs 'z=%s'", tw, tx, ty, tz);
+			TypeDiagnosticString type_strings[] = {
+				{&tx, xyzw[0].type},
+				{&ty, xyzw[1].type},
+				{&tz, xyzw[2].type},
+				{&tw, xyzw[3].type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "Mismatched types to 'quaternion', 'w=%s' vs 'x=%s' vs 'y=%s' vs 'z=%s'", *type_strings[3].value, *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 			gb_string_free(tw);
 			gb_string_free(tz);
 			gb_string_free(ty);
@@ -4259,9 +4543,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 		if (operand->mode == Addressing_Type && is_type_enumerated_array(type)) {
 			// Okay
-		} else if (!is_type_ordered(type) || !(is_type_numeric(type) || is_type_string(type))) {
+		} else if (!is_min_max_clamp_ordered_operand_type(type)) {
 			gbString type_str = type_to_string(original_type);
-			error(call, "Expected an ordered numeric type to 'min', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'min', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4348,10 +4632,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (b.mode == Addressing_Invalid) {
 				return false;
 			}
-			if (!is_type_ordered(b.type) || !(is_type_numeric(b.type) || is_type_string(b.type))) {
+			if (!is_min_max_clamp_ordered_operand_type(b.type)) {
 				gbString type_str = type_to_string(b.type);
 				error(call,
-				      "Expected an ordered numeric type to 'min', got '%s'",
+				      "Expected an ordered numeric, string, or fixed-size array thereof to 'min', got '%s'",
 				      type_str);
 				gb_string_free(type_str);
 				return false;
@@ -4363,7 +4647,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 		}
 
-		if (all_constant) {
+		if (all_constant && !is_type_array_like(operands[0].type)) {
 			ExactValue value = operands[0].value;
 			Type *type = operands[0].type;
 			for (isize i = 1; i < operands.count; i++) {
@@ -4407,9 +4691,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(a->type, b->type)) {
 					gbString type_a = type_to_string(a->type);
 					gbString type_b = type_to_string(b->type);
+					TypeDiagnosticString type_strings[] = {
+						{&type_a, a->type},
+						{&type_b, b->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(a->expr,
 					      "Mismatched types to 'min', '%s' vs '%s'",
-					      type_a, type_b);
+					      *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(type_b);
 					gb_string_free(type_a);
 					return false;
@@ -4436,9 +4725,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 		if (operand->mode == Addressing_Type && is_type_enumerated_array(type)) {
 			// Okay
-		} else if (!is_type_ordered(type) || !(is_type_numeric(type) || is_type_string(type))) {
+		} else if (!is_min_max_clamp_ordered_operand_type(type)) {
 			gbString type_str = type_to_string(original_type);
-			error(call, "Expected an ordered numeric type to 'max', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'max', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4531,10 +4820,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (b.mode == Addressing_Invalid) {
 				return false;
 			}
-			if (!is_type_ordered(b.type) || !(is_type_numeric(b.type) || is_type_string(b.type))) {
+			if (!is_min_max_clamp_ordered_operand_type(b.type)) {
 				gbString type_str = type_to_string(b.type);
 				error(arg,
-				      "Expected an ordered numeric type to 'max', got '%s'",
+				      "Expected an ordered numeric, string, or fixed-size array thereof to 'max', got '%s'",
 				      type_str);
 				gb_string_free(type_str);
 				return false;
@@ -4546,7 +4835,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 		}
 
-		if (all_constant) {
+		if (all_constant && !is_type_array_like(operands[0].type)) {
 			ExactValue value = operands[0].value;
 			Type *type = operands[0].type;
 			for (isize i = 1; i < operands.count; i++) {
@@ -4590,9 +4879,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(a->type, b->type)) {
 					gbString type_a = type_to_string(a->type);
 					gbString type_b = type_to_string(b->type);
+					TypeDiagnosticString type_strings[] = {
+						{&type_a, a->type},
+						{&type_b, b->type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(a->expr,
 					      "Mismatched types to 'max', '%s' vs '%s'",
-					      type_a, type_b);
+					      *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(type_b);
 					gb_string_free(type_a);
 					return false;
@@ -4610,14 +4904,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			return false;
 		}
 
-		if (!(is_type_numeric(operand->type) && !is_type_array(operand->type))) {
+		if (!is_abs_operand_type(operand->type)) {
 			gbString type_str = type_to_string(operand->type);
-			error(call, "Expected a numeric type to 'abs', got '%s'", type_str);
+			error(call, "Expected a numeric type or fixed-size array of non-complex numeric types to 'abs', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
 
-		if (operand->mode == Addressing_Constant) {
+		if (operand->mode == Addressing_Constant && !is_type_array_like(operand->type)) {
 			switch (operand->value.kind) {
 			case ExactValue_Integer:
 				mp_abs(&operand->value.value_integer, &operand->value.value_integer);
@@ -4656,7 +4950,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		} else {
 			operand->mode = Addressing_Value;
 
-			{
+			if (!is_type_array_like(operand->type)) {
 				Type *bt = base_type(operand->type);
 				if (are_types_identical(bt, t_complex64))  add_package_dependency(c, "runtime", "abs_complex64");
 				if (are_types_identical(bt, t_complex128)) add_package_dependency(c, "runtime", "abs_complex128");
@@ -4685,9 +4979,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		}
 
 		Type *type = operand->type;
-		if (!is_type_ordered(type) || !(is_type_numeric(type) || is_type_string(type))) {
+		if (!is_min_max_clamp_ordered_operand_type(type)) {
 			gbString type_str = type_to_string(operand->type);
-			error(call, "Expected an ordered numeric or string type to 'clamp', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'clamp', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4702,9 +4996,9 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (y.mode == Addressing_Invalid) {
 			return false;
 		}
-		if (!is_type_ordered(y.type) || !(is_type_numeric(y.type) || is_type_string(y.type))) {
+		if (!is_min_max_clamp_ordered_operand_type(y.type)) {
 			gbString type_str = type_to_string(y.type);
-			error(call, "Expected an ordered numeric or string type to 'clamp', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'clamp', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
@@ -4713,16 +5007,17 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (z.mode == Addressing_Invalid) {
 			return false;
 		}
-		if (!is_type_ordered(z.type) || !(is_type_numeric(z.type) || is_type_string(z.type))) {
+		if (!is_min_max_clamp_ordered_operand_type(z.type)) {
 			gbString type_str = type_to_string(z.type);
-			error(call, "Expected an ordered numeric or string type to 'clamp', got '%s'", type_str);
+			error(call, "Expected an ordered numeric, string, or fixed-size array thereof to 'clamp', got '%s'", type_str);
 			gb_string_free(type_str);
 			return false;
 		}
 
 		if (x.mode == Addressing_Constant &&
 		    y.mode == Addressing_Constant &&
-		    z.mode == Addressing_Constant) {
+		    z.mode == Addressing_Constant &&
+		    !is_type_array_like(type)) {
 			ExactValue a = x.value;
 			ExactValue b = y.value;
 			ExactValue c = z.value;
@@ -4757,9 +5052,15 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				gbString type_x = type_to_string(x.type);
 				gbString type_y = type_to_string(y.type);
 				gbString type_z = type_to_string(z.type);
+				TypeDiagnosticString type_strings[] = {
+					{&type_x, x.type},
+					{&type_y, y.type},
+					{&type_z, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
 				error(call,
 				      "Mismatched types to 'clamp', '%s', '%s', '%s'",
-				      type_x, type_y, type_z);
+				      *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 				gb_string_free(type_z);
 				gb_string_free(type_y);
 				gb_string_free(type_x);
@@ -5029,7 +5330,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!is_type_array(x.type) || !is_type_array(y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects only arrays, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects only arrays, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5042,7 +5348,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(xt->Array.elem, yt->Array.elem)) {
 			gbString s1 = type_to_string(xt->Array.elem);
 			gbString s2 = type_to_string(yt->Array.elem);
-			error(call, "'%.*s' mismatched element types, got %s vs %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, xt->Array.elem},
+				{&s2, yt->Array.elem},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' mismatched element types, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5059,7 +5370,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (xt->Array.count == 0 || yt->Array.count == 0) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects only arrays of non-zero length, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects only arrays of non-zero length, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5095,7 +5411,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!is_type_matrix(x.type) && !is_type_array(y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' expects matrix or array values, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' expects matrix or array values, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5104,7 +5425,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(x.type, y.type)) {
 			gbString s1 = type_to_string(x.type);
 			gbString s2 = type_to_string(y.type);
-			error(call, "'%.*s' values of the same type, got %s and %s", LIT(builtin_name), s1, s2);
+			TypeDiagnosticString type_strings[] = {
+				{&s1, x.type},
+				{&s2, y.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(call, "'%.*s' values of the same type, got %s and %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(s2);
 			gb_string_free(s1);
 			return false;
@@ -5434,7 +5760,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		if (!are_types_identical(base_type(args.type), slice_hint)) {
 			gbString s = type_to_string(slice_hint);
 			gbString t = type_to_string(args.type);
-			error(array_ptr.expr, "Expected a %s to use as the slice '%.*s', got %s", s, LIT(builtin_name), t);
+			TypeDiagnosticString type_strings[] = {
+				{&s, slice_hint},
+				{&t, args.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(array_ptr.expr, "Expected a %s to use as the slice '%.*s', got %s", *type_strings[0].value, LIT(builtin_name), *type_strings[1].value);
 			gb_string_free(t);
 			gb_string_free(s);
 			return false;
@@ -5502,7 +5833,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(lhs.type, extra.type)) {
 					gbString a = type_to_string(lhs.type);
 					gbString b = type_to_string(extra.type);
-					error(extra.expr, "'%.*s' expects constant values of the same slice type, got '%s' vs '%s'", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, lhs.type},
+						{&b, extra.type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(extra.expr, "'%.*s' expects constant values of the same slice type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -5518,7 +5854,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				if (!are_types_identical(elem_type, extra_elem_type)) {
 					gbString a = type_to_string(elem_type);
 					gbString b = type_to_string(extra_elem_type);
-					error(extra.expr, "'%.*s' expects constant values of the same element-type, got '%s' vs '%s'", LIT(builtin_name), a, b);
+					TypeDiagnosticString type_strings[] = {
+						{&a, elem_type},
+						{&b, extra_elem_type},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
+					error(extra.expr, "'%.*s' expects constant values of the same element-type, got '%s' vs '%s'", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 					gb_string_free(b);
 					gb_string_free(a);
 					return false;
@@ -5551,42 +5892,17 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			ExactValue value = arg->tav.value;
 			GB_ASSERT(value.kind == ExactValue_Compound);
 			ast_node(cl, CompoundLit, value.value_compound);
-			count_needed += is_type_array(arg->tav.type)
-			              ? cast(isize)get_array_type_count(arg->tav.type)
-			              : cl->elems.count;
+			count_needed += cl->elems.count;
 		}
 
 		Array<Ast *> new_elems = {};
 		array_init(&new_elems, permanent_allocator(), 0, count_needed);
-
-		CheckerContext zero_context = *c;
-		zero_context.type_hint_expr = nullptr;
 
 		for (Ast *arg : ce->args) {
 			ExactValue value = arg->tav.value;
 			GB_ASSERT(value.kind == ExactValue_Compound);
 			ast_node(cl, CompoundLit, value.value_compound);
 			array_add_elems(&new_elems, cl->elems.data, cl->elems.count);
-
-			if (is_type_array(arg->tav.type)) {
-				isize count = cast(isize)get_array_type_count(arg->tav.type);
-				GB_ASSERT(cl->elems.count <= count);
-				for (isize i = cl->elems.count; i < count; i++) {
-					Ast *zero = ast_compound_lit(arg->file(), nullptr, {}, cl->open, cl->close);
-					if (is_type_constant_type(elem_type)) {
-						Operand z = {};
-						check_expr_with_type_hint(&zero_context, &z, zero, elem_type);
-						if (z.mode == Addressing_Invalid) {
-							return false;
-						}
-						GB_ASSERT(z.mode == Addressing_Constant);
-						GB_ASSERT(are_types_identical(z.type, elem_type));
-					} else {
-						add_type_and_value(c, zero, Addressing_Constant, elem_type, exact_value_compound(zero));
-					}
-					array_add(&new_elems, zero);
-				}
-			}
 		}
 
 		Ast *new_compound_lit = ast_compound_lit(lhs.expr->file(), nullptr, new_elems, ast_token(lhs.expr), ast_end_token(ce->args[ce->args.count-1]));
@@ -5721,6 +6037,47 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				error(call, "'%.*s' expects a string, slice, dynamic array, or pointer to array type, got %s", LIT(builtin_name), s);
 				gb_string_free(s);
 				return false;
+			}
+		}
+		break;
+
+	case BuiltinProc_closure_clone:
+	case BuiltinProc_closure_free:
+		{
+			// closure_clone(f, allocator) copies a closure's environment to the heap so it can escape
+			// its defining scope; closure_free(f, allocator) releases that environment. Both take a closure
+			// value and an allocator.
+			Operand x = {};
+			check_expr(c, &x, ce->args[0]);
+			if (x.mode == Addressing_Invalid) {
+				return false;
+			}
+			if (!is_type_closure(x.type)) {
+				gbString s = type_to_string(x.type);
+				error(call, "'%.*s' expects a 'lambda' closure value, got %s", LIT(builtin_name), s);
+				gb_string_free(s);
+				return false;
+			}
+
+			init_mem_allocator(c->checker);
+			Operand a = {};
+			check_expr(c, &a, ce->args[1]);
+			if (a.mode == Addressing_Invalid) {
+				return false;
+			}
+			if (!check_is_assignable_to(c, &a, t_allocator)) {
+				gbString s = type_to_string(a.type);
+				error(call, "'%.*s' expects an allocator as its second argument, got %s", LIT(builtin_name), s);
+				gb_string_free(s);
+				return false;
+			}
+
+			if (id == BuiltinProc_closure_clone) {
+				operand->mode = Addressing_Value;
+				operand->type = x.type;
+			} else {
+				operand->mode = Addressing_NoValue;
+				operand->type = nullptr;
 			}
 		}
 		break;
@@ -5963,7 +6320,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6014,7 +6376,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6102,7 +6469,13 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
 				gbString zts = type_to_string(z.type);
-				error(x.expr, "Mismatched types for '%.*s', got %s vs %s vs %s", LIT(builtin_name), xts, yts, zts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+					{&zts, z.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value, *type_strings[2].value);
 				gb_string_free(zts);
 				gb_string_free(yts);
 				gb_string_free(xts);
@@ -6313,7 +6686,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(ptr0.type, ptr1.type)) {
 				gbString xts = type_to_string(ptr0.type);
 				gbString yts = type_to_string(ptr1.type);
-				error(ptr0.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, ptr0.type},
+					{&yts, ptr1.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(ptr0.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6717,7 +7095,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				return false;
@@ -6787,7 +7170,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (!are_types_identical(x.type, y.type)) {
 				gbString xts = type_to_string(x.type);
 				gbString yts = type_to_string(y.type);
-				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), xts, yts);
+				TypeDiagnosticString type_strings[] = {
+					{&xts, x.type},
+					{&yts, y.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(x.expr, "Mismatched types for '%.*s', %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(yts);
 				gb_string_free(xts);
 				*operand = x; // minimize error propagation
@@ -7062,7 +7450,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				variants[i] = alloc_type_pointer(bt->Union.variants[i]);
 			}
 			new_type->Union.variants = variants;
-			wait_signal_set(&new_type->Union.variants_wait_signal); // built directly, not via check_union_type
+			wait_signal_set(&new_type->Union.variants_wait_signal);
 
 			// NOTE(bill): Is this even correct?
 			new_type->Union.node = operand->expr;
@@ -7240,7 +7628,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 			}
 			merged_union->Union.variants = slice_from_array(variants);
-			wait_signal_set(&merged_union->Union.variants_wait_signal); // built directly, not via check_union_type
+			wait_signal_set(&merged_union->Union.variants_wait_signal);
 
 			operand->mode = Addressing_Type;
 			operand->type = merged_union;
@@ -7274,6 +7662,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	case BuiltinProc_type_is_simple_compare: // easily compared using memcmp
 	case BuiltinProc_type_is_nearly_simple_compare: // easily compared using memcmp (including floats)
 	case BuiltinProc_type_is_dereferenceable:
+	case BuiltinProc_type_is_trivially_copyable:
 	case BuiltinProc_type_is_valid_map_key:
 	case BuiltinProc_type_is_valid_matrix_elements:
 	case BuiltinProc_type_is_named:
@@ -7554,7 +7943,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			operand->type = t_untyped_bool;
 			bool is_specialization = false;
 			if (!are_types_identical(s, t)) {
-				is_specialization = subst_check_specialization(c, s, t, /*modify_type*/false);
+				is_specialization = check_type_specialization_to(c, s, t, false, false);
 			}
 			operand->value = exact_value_bool(is_specialization);
 
@@ -8219,7 +8608,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			if (super->kind != sub->kind) {
 				gbString a = type_to_string(op_super.type);
 				gbString b = type_to_string(op_sub.type);
-				error(op_super.expr, "'%.*s' expects types of the same kind, got %s vs %s", LIT(builtin_name), a, b);
+				TypeDiagnosticString type_strings[] = {
+					{&a, op_super.type},
+					{&b, op_sub.type},
+				};
+				add_type_package_provenance(type_strings, gb_count_of(type_strings));
+				error(op_super.expr, "'%.*s' expects types of the same kind, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 				gb_string_free(b);
 				gb_string_free(a);
 				return false;
@@ -8295,7 +8689,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 			gbString a = type_to_string(op_super.type);
 			gbString b = type_to_string(op_sub.type);
-			error(op_super.expr, "'%.*s' expects types of the same kind and either an enum or union, got %s vs %s", LIT(builtin_name), a, b);
+			TypeDiagnosticString type_strings[] = {
+				{&a, op_super.type},
+				{&b, op_sub.type},
+			};
+			add_type_package_provenance(type_strings, gb_count_of(type_strings));
+			error(op_super.expr, "'%.*s' expects types of the same kind and either an enum or union, got %s vs %s", LIT(builtin_name), *type_strings[0].value, *type_strings[1].value);
 			gb_string_free(b);
 			gb_string_free(a);
 			return false;
@@ -8543,12 +8942,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		{
 			Ast *call_expr = unparen_expr(ce->args[0]);
 			Operand op = {};
-			bool prev_in_procedure_of = c->in_procedure_of;
-			c->in_procedure_of = true;
 			check_expr_base(c, &op, ce->args[0], nullptr);
-			c->in_procedure_of = prev_in_procedure_of;
-			bool is_call_mode = op.mode == Addressing_Value || op.mode == Addressing_NoValue || op.mode == Addressing_OptionalOk;
-			if (!is_call_mode || call_expr == nullptr || call_expr->kind != Ast_CallExpr) {
+			if (op.mode != Addressing_Value || call_expr == nullptr || call_expr->kind != Ast_CallExpr) {
 				error(ce->args[0], "Expected a call expression for '%.*s'", LIT(builtin_name));
 				return false;
 			}

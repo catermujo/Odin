@@ -34,6 +34,7 @@
 
 #define CANONICAL_PARAM_C_VARARG  "#c_vararg"
 #define CANONICAL_PARAM_VARARG    ".."
+#define CANONICAL_PARAM_BY_PTR    "#by_ptr"
 
 #define CANONICAL_FIELD_SEPARATOR ","
 

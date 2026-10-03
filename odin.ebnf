@@ -127,6 +127,7 @@ Stmt             = EmptyStmt
                  | ForStmt
                  | SwitchStmt
                  | TypeSwitchStmt
+                 | WithStmt
                  | DeferStmt
                  | ReturnStmt ";"
                  | BranchStmt ";"
@@ -213,6 +214,8 @@ BranchStmt       = "break" [ IDENT ]
                  | "fallthrough" ;
 
 DeferStmt        = "defer" ( Stmt | ( "{" StmtList "}" ) ) ;
+
+WithStmt         = [ Label ] "with" [ SimpleStmt ";" ] SimpleStmt "{" StmtList "}" ;
 
 ReturnStmt       = [ ReturnStmtDirectivePrefix ] "return" [ ExprList ] ;
 ReturnStmtDirectivePrefix = "#force_inline" | "#force_no_inline" | "#must_tail" ;
@@ -435,7 +438,8 @@ BitFieldField    = IDENT ":" Type "|" Expr ;
 ProcType         = "proc" [ CallingConvention ] "(" [ ProcParamList ] ")"
                    [ "->" ProcResults ] ;
 
-ProcLiteral      = ProcType [ WhereClause ] ( ProcBody | "---" ) ; /* --- = no body / foreign  */
+ProcLiteral      = ProcType [ WhereClause ] { ProcTag | ScopeExitContract } ( ProcBody | "---" ) ; /* --- = no body / foreign  */
+ScopeExitContract = "#scope_exit" "(" "." ( "explicit" | "implicit" ) "," CallExpr ")" ;
 ProcGroup        = "proc" "{" ProcGroupList "}" ;                  /* procedure group          */
 
 

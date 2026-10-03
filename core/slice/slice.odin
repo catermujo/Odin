@@ -95,7 +95,7 @@ reinterpret :: proc "contextless" ($T: typeid/[]$U, s: []$V) -> []U {
 }
 
 
-swap :: proc(array: $T/[]$E, a, b: int) {
+swap :: proc "contextless" (array: $T/[]$E, a, b: int) {
 	when size_of(E) > 8 {
 		ptr_swap_non_overlapping(&array[a], &array[b], size_of(E))
 	} else {
@@ -124,6 +124,39 @@ contains :: proc "contextless" (array: $T/[]$E, value: E) -> bool where intrinsi
 	_, found := linear_search(array, value)
 	return found
 }
+
+
+/*
+Maps an index relative to a slice back to the equivalent index in the slice's
+backing array.
+
+Inputs:
+- backing: a slice that covers the region `slice` is a sub-region of. The
+  caller is responsible for ensuring `slice` actually points into `backing`;
+  otherwise the result is undefined. Both slices must have the same element
+  type.
+- slice: a slice whose data pointer is `raw_data(backing) + k * size_of(E)`
+  for some `0 <= k <= len(backing)`.
+- index: an index into `slice`.
+
+Returns:
+- The index into `backing` that corresponds to `slice[index]`, i.e. `k + index`.
+
+Example:
+	package backing_index_example
+	import "base:runtime"
+
+	main :: proc() {
+		b: [10]f32
+		a := b[2:]
+		assert(runtime.backing_index(b[:], a, 3) == 5)
+	}
+*/
+@(require_results)
+backing_index :: #force_inline proc "contextless" (backing, slice: $T/[]$E, index: int) -> int {
+	return int((uintptr(raw_data(slice)) - uintptr(raw_data(backing))) / uintptr(size_of(E))) + index
+}
+
 
 /*
 Searches the given slice for the given element in O(n) time.

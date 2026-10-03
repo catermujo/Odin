@@ -7,6 +7,21 @@ import "core:mem/virtual"
 import "base:runtime"
 
 @test
+marshal_replaces_invalid_utf8_with_valid_json_escape :: proc(t: ^testing.T) {
+	invalid_bytes := []byte{'0', '3', '@', 0xd0, 0xe4}
+	invalid := transmute(string)invalid_bytes
+	encoded, marshal_error := json.marshal(invalid)
+	testing.expect(t, marshal_error == nil)
+	if marshal_error != nil do return
+	defer delete(encoded)
+	testing.expect_value(t, transmute(string)encoded, `"03@\ufffd\ufffd"`)
+
+	value, parse_error := json.parse(encoded)
+	defer json.destroy_value(value)
+	testing.expect(t, parse_error == nil)
+}
+
+@test
 parse_json :: proc(t: ^testing.T) {
    
 	json_data := `
@@ -500,6 +515,47 @@ map_with_integer_keys :: proc(t: ^testing.T) {
 		if key in my_map2 {
 			testing.expectf(t, runtime.string_eq(item, my_map2[key]), "Expected value %s to be present in unmarshaled map", key)
 		}
+	}
+}
+
+@test
+unmarshal_struct_ignores_unknown_array_field :: proc(t: ^testing.T) {
+	Header :: struct {
+		frame_type: string `json:"type"`,
+	}
+
+	input := `{"type":"message","headers":{},"method":"PUT","payloads":["aGVsbG8="],"uri":"hm://x"}`
+	h: Header
+	err := json.unmarshal_string(input, &h)
+	defer delete(h.frame_type)
+
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, h.frame_type, "message")
+}
+
+@test
+unmarshal_nested_struct_ignores_unknown_array_field :: proc(t: ^testing.T) {
+	Track :: struct {
+		name: string `json:"name"`,
+	}
+	Playlist_Page :: struct {
+		items: []Track `json:"items"`,
+	}
+
+	input := `{"items":[{"name":"x","genres":["alt"]}]}`
+	page: Playlist_Page
+	err := json.unmarshal_string(input, &page)
+	defer {
+		for item in page.items {
+			delete(item.name)
+		}
+		delete(page.items)
+	}
+
+	testing.expect_value(t, err, nil)
+	testing.expectf(t, len(page.items) == 1, "Expected 1 item, got %v", len(page.items))
+	if len(page.items) == 1 {
+		testing.expect_value(t, page.items[0].name, "x")
 	}
 }
 

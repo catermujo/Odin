@@ -169,14 +169,13 @@ _should_stop_runner :: proc() -> bool {
 }
 
 @(private="file")
-unlock_stop_test_gate :: proc(_: int, _: Stop_Reason, ok: bool) {
+unlock_stop_test_gate :: proc(index: int, reason: Stop_Reason, ok: bool) {
 	if ok {
 		sync.mutex_unlock(&stop_test_gate)
 	}
 }
 
-@(deferred_out=unlock_stop_test_gate)
-_should_stop_test :: proc() -> (test_index: int, reason: Stop_Reason, ok: bool) {
+_should_stop_test :: proc() -> (test_index: int, reason: Stop_Reason, ok: bool) #scope_exit(.implicit, unlock_stop_test_gate(test_index, reason, ok)) {
 	if intrinsics.atomic_load(&stop_test_alert) == 1 {
 		intrinsics.atomic_store(&stop_test_alert, 0)
 

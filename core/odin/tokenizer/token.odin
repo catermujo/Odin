@@ -121,6 +121,7 @@ Token_Kind :: enum u32 {
 		Package,     // package
 		Typeid,      // typeid
 		When,        // when
+		With,        // with
 		Where,       // where
 		If,          // if
 		Else,        // else
@@ -136,6 +137,7 @@ Token_Kind :: enum u32 {
 		Defer,       // defer
 		Return,      // return
 		Proc,        // proc
+		Lambda,      // lambda
 		Struct,      // struct
 		Union,       // union
 		Enum,        // enum
@@ -256,6 +258,7 @@ tokens := [Token_Kind.COUNT]string {
 	"package",
 	"typeid",
 	"when",
+	"with",
 	"where",
 	"if",
 	"else",
@@ -271,6 +274,7 @@ tokens := [Token_Kind.COUNT]string {
 	"defer",
 	"return",
 	"proc",
+	"lambda",
 	"struct",
 	"union",
 	"enum",

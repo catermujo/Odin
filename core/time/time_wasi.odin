@@ -30,6 +30,7 @@ _sleep :: proc "contextless" (d: Duration) {
 	assert_contextless(err == nil && n == 1 && ev.error == nil && ev.type == .CLOCK)
 }
 
+@(no_instrumentation)
 _tick_now :: proc "contextless" () -> Tick {
 	ts, err := wasi.clock_time_get(wasi.CLOCK_MONOTONIC, 0)
 	assert_contextless(err == nil)

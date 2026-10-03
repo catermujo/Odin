@@ -45,6 +45,11 @@ enum lbAddrKind {
 	lbAddr_BitField,
 };
 
+enum lbSoaVariableMode : u8 {
+	lbSoaVariable_OuterIndex,
+	lbSoaVariable_InnerSliceRowIndex,
+};
+
 struct lbAddr {
 	lbAddrKind kind;
 	lbValue addr;
@@ -60,6 +65,8 @@ struct lbAddr {
 		struct {
 			lbValue index;
 			Ast *index_expr;
+			Type *result_type;
+			lbSoaVariableMode mode;
 		} soa;
 		struct {
 			lbValue index;
@@ -132,6 +139,7 @@ struct lbModule {
 	i32 internal_type_level;
 
 	RwMutex values_mutex;
+	RecursiveMutex procedure_mutex;
 
 	std::atomic<u32> global_array_index;
 
@@ -296,6 +304,7 @@ struct lbTargetList {
 
 struct lbTupleFix {
 	Slice<lbValue> values;
+	Slice<lbValue> indirect_result_ptrs;
 };
 
 enum lbProcedureFlag : u32 {
@@ -306,6 +315,11 @@ enum lbProcedureFlag : u32 {
 struct lbVariadicReuseSlices {
 	Type *slice_type;
 	lbAddr slice_addr;
+};
+
+struct lbScopeDebugInfo {
+	Scope *scope;
+	LLVMMetadataRef metadata;
 };
 
 struct lbGlobalVariable {
@@ -336,6 +350,7 @@ struct lbProcedure {
 	bool         is_export;
 	bool         is_entry_point;
 	bool         is_startup;
+	isize        force_inline_call_count; // Snapshot before module passes for excessive inlining diagnostics.
 
 	lbFunctionType *abi_function_type;
 
@@ -371,7 +386,12 @@ struct lbProcedure {
 	Ast *curr_stmt;
 
 	Array<Scope *>       scope_stack;
+	Array<lbScopeDebugInfo> debug_scope_metadata;
 	Array<lbContextData> context_stack;
+
+	// for closure ('lambda') bodies, the implicit environment pointer parameter, already cast to the
+	// env struct's pointer type. nullptr for ordinary procedures.
+	LLVMValueRef closure_env_ptr;
 
 	LLVMMetadataRef debug_info;
 
@@ -408,6 +428,7 @@ gb_internal LLVMAttributeRef lb_create_enum_attribute(LLVMContextRef ctx, char c
 gb_internal LLVMAttributeRef lb_create_enum_attribute_with_type(LLVMContextRef ctx, char const *name, LLVMTypeRef type);
 gb_internal void lb_add_proc_attribute_at_index(lbProcedure *p, isize index, char const *name, u64 value);
 gb_internal void lb_add_proc_attribute_at_index(lbProcedure *p, isize index, char const *name);
+gb_internal bool lb_force_inline_name_disabled(String name);
 gb_internal void lb_add_nocapture_proc_attribute_at_index(lbProcedure *p, isize index);
 gb_internal lbProcedure *lb_create_procedure(lbModule *module, Entity *entity, bool ignore_body=false);
 
@@ -429,7 +450,8 @@ static lbConstContext const LB_CONST_CONTEXT_DEFAULT_NO_LOCAL = {false, false, {
 
 gb_internal lbValue lb_const_nil(lbModule *m, Type *type);
 gb_internal lbValue lb_const_undef(lbModule *m, Type *type);
-gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lbConstContext cc = LB_CONST_CONTEXT_DEFAULT);
+gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Type *value_type = nullptr, lbConstContext cc = LB_CONST_CONTEXT_DEFAULT, Ast *value_expr = nullptr);
+gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lbConstContext cc);
 gb_internal lbValue lb_const_bool(lbModule *m, Type *type, bool value);
 gb_internal lbValue lb_const_int(lbModule *m, Type *type, u64 value);
 
@@ -452,6 +474,11 @@ gb_internal lbValue lb_emit_epi(lbProcedure *p, lbValue const &value, isize inde
 gb_internal lbValue lb_emit_epi(lbModule *m, lbValue const &value, isize index);
 gb_internal lbValue lb_emit_array_epi(lbModule *m, lbValue s, isize index);
 gb_internal lbValue lb_emit_struct_ep(lbProcedure *p, lbValue s, i32 index);
+gb_internal LLVMValueRef lb_emit_byte_gep(lbProcedure *p, LLVMValueRef base, LLVMValueRef byte_offset);
+// address of a 'lambda' capture inside a closure body, resolved through the environment pointer.
+gb_internal lbAddr lb_closure_capture_addr(lbProcedure *p, Entity *e);
+// build a closure value: emit the function, allocate+fill the environment, return the {fn, env} pair.
+gb_internal lbValue lb_build_closure_lit(lbProcedure *p, Ast *expr);
 gb_internal lbValue lb_emit_struct_ev(lbProcedure *p, lbValue s, i32 index);
 gb_internal lbValue lb_emit_tuple_ev(lbProcedure *p, lbValue value, i32 index);
 gb_internal lbValue lb_emit_array_epi(lbProcedure *p, lbValue value, isize index);
@@ -472,9 +499,11 @@ gb_internal lbValue lb_emit_arith(lbProcedure *p, TokenKind op, lbValue lhs, lbV
 gb_internal lbValue lb_emit_byte_swap(lbProcedure *p, lbValue value, Type *end_type);
 gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block, TokenPos pos);
 gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block, Ast *node);
+gb_internal void lb_emit_downcast_assert(lbProcedure *p, lbValue value, Type *t, TokenPos pos);
+gb_internal void lb_emit_bit_field_downcast_assert(lbProcedure *p, lbValue value, Type *field_type, u64 bit_size, TokenPos pos);
 gb_internal lbValue lb_emit_transmute(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right);
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none, lbValue *sret_dst = nullptr);
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none, lbValue *sret_dst = nullptr, Ast *call_expression = nullptr, bool preserve_indirect_results = false);
 gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp_against_nil(lbProcedure *p, TokenKind op_kind, lbValue x);
 
@@ -484,7 +513,7 @@ gb_internal void lb_emit_jump(lbProcedure *p, lbBlock *target_block);
 gb_internal void lb_emit_if(lbProcedure *p, lbValue cond, lbBlock *true_block, lbBlock *false_block);
 gb_internal void lb_start_block(lbProcedure *p, lbBlock *b);
 
-gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_dst = nullptr);
+gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_dst = nullptr, bool preserve_indirect_results = false);
 gb_internal lbProcedure *lb_create_dummy_procedure(lbModule *m, String link_name, Type *type);
 gb_internal void lb_begin_procedure_body(lbProcedure *p);
 gb_internal void lb_end_procedure_body(lbProcedure *p);
@@ -633,6 +662,8 @@ gb_internal LLVMTypeRef lb_type_internal_for_procedures_raw(lbModule *m, Type *t
 gb_internal lbValue lb_emit_source_code_location_as_global_ptr(lbProcedure *p, String const &procedure, TokenPos const &pos);
 
 gb_internal LLVMMetadataRef lb_debug_location_from_token_pos(lbProcedure *p, TokenPos pos);
+gb_internal LLVMMetadataRef lb_get_procedure_scope_metadata(lbProcedure *p, Scope *s);
+gb_internal void lb_set_procedure_scope_metadata(lbProcedure *p, Scope *s, LLVMMetadataRef md);
 
 gb_internal LLVMTypeRef llvm_array_type(LLVMTypeRef ElementType, uint64_t ElementCount) {
 	return LLVMArrayType2(ElementType, ElementCount);

@@ -1,7 +1,13 @@
 #define DEBUG_CHECK_ALL_PROCEDURES 1
 
+#ifndef CLANGD_TU_entity
+
 #include "entity.cpp"
+
+#endif
+#ifndef CLANGD_TU_types
 #include "types.cpp"
+#endif
 
 
 gb_internal u64 type_hash_canonical_type(Type *type);
@@ -12,6 +18,621 @@ gb_internal void check_expr(CheckerContext *c, Operand *operand, Ast *expression
 gb_internal void check_expr_or_type(CheckerContext *c, Operand *operand, Ast *expression, Type *type_hint=nullptr);
 gb_internal void add_comparison_procedures_for_fields(CheckerContext *c, Type *t);
 gb_internal Type *check_type(CheckerContext *ctx, Ast *e);
+
+enum CheckerGlobalEntityTimingKind {
+	CheckerGlobalEntityTiming_Invalid,
+	CheckerGlobalEntityTiming_Variable,
+	CheckerGlobalEntityTiming_Constant,
+	CheckerGlobalEntityTiming_TypeName,
+	CheckerGlobalEntityTiming_Procedure,
+	CheckerGlobalEntityTiming_ProcGroup,
+
+	CheckerGlobalEntityTiming_COUNT,
+};
+
+gb_global char const *checker_global_entity_timing_labels[CheckerGlobalEntityTiming_COUNT] = {
+	"invalid",
+	"variables",
+	"constants",
+	"type names",
+	"procedure declarations",
+	"procedure groups",
+};
+
+struct CheckerGlobalEntityTimingBucket {
+	u64   exclusive_ticks;
+	isize call_count;
+};
+
+struct CheckerGlobalEntityTimingStackEntry {
+	CheckerGlobalEntityTimingKind kind;
+	u64                           start;
+	u64                           child_ticks;
+};
+
+struct CheckerGlobalEntityTimingState {
+	bool                           enabled;
+	isize                          loop_entity_count;
+	isize                          lazy_skipped_count;
+	isize                          layout_entity_count;
+	isize                          soa_completion_count;
+	u64                            post_layout_ticks;
+	u64                            post_soa_ticks;
+	CheckerGlobalEntityTimingBucket buckets[CheckerGlobalEntityTiming_COUNT];
+	CheckerGlobalEntityTimingStackEntry stack[1024];
+	isize                          stack_count;
+};
+
+gb_global CheckerGlobalEntityTimingState checker_global_entity_timing_state = {};
+
+enum CheckerGlobalVariableTimingKind {
+	CheckerGlobalVariableTiming_Attributes,
+	CheckerGlobalVariableTiming_ExplicitType,
+	CheckerGlobalVariableTiming_ForeignAndLinks,
+	CheckerGlobalVariableTiming_InitExpr,
+	CheckerGlobalVariableTiming_InitVariable,
+	CheckerGlobalVariableTiming_RodataValidation,
+	CheckerGlobalVariableTiming_RttiDisallowed,
+
+	CheckerGlobalVariableTiming_COUNT,
+};
+
+gb_global char const *checker_global_variable_timing_labels[CheckerGlobalVariableTiming_COUNT] = {
+	"attributes",
+	"explicit type",
+	"foreign/link bookkeeping",
+	"init expr",
+	"init assignment",
+	"rodata validation",
+	"rtti disallowed",
+};
+
+struct CheckerGlobalVariableTimingState {
+	bool                           enabled;
+	isize                          variable_decl_count;
+	isize                          early_visited_count;
+	CheckerGlobalEntityTimingBucket buckets[CheckerGlobalVariableTiming_COUNT];
+	struct SlowInitExpr {
+		u64     ticks;
+		Entity *entity;
+		Ast    *expr;
+	};
+	SlowInitExpr                    slow_init_exprs[16];
+	isize                           slow_init_expr_count;
+};
+
+gb_global CheckerGlobalVariableTimingState checker_global_variable_timing_state = {};
+
+enum CheckerProcedureBodyTimingKind {
+	CheckerProcedureBodyTiming_ContextSetup,
+	CheckerProcedureBodyTiming_ParameterSetup,
+	CheckerProcedureBodyTiming_WhereClauses,
+	CheckerProcedureBodyTiming_Statements,
+	CheckerProcedureBodyTiming_Termination,
+	CheckerProcedureBodyTiming_ScopeUsage,
+	CheckerProcedureBodyTiming_DependencyPropagation,
+	CheckerProcedureBodyTiming_VariadicReuse,
+	CheckerProcedureBodyTiming_PostBody,
+
+	CheckerProcedureBodyTiming_COUNT,
+};
+
+gb_global char const *checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_COUNT] = {
+	"context setup",
+	"parameter/using setup",
+	"where clauses",
+	"statements",
+	"termination checks",
+	"scope usage",
+	"dependency propagation",
+	"variadic reuse layout",
+	"post-body bookkeeping",
+};
+
+struct CheckerProcedureBodyTimingState {
+	bool                              enabled;
+	isize                             initial_queue_count;
+	isize                             dispatch_count;
+	isize                             body_count;
+	isize                             successful_body_count;
+	isize                             polymorphic_specialization_count;
+	isize                             polymorphic_attempt_count;
+	isize                             polymorphic_resolution_success_count;
+	isize                             polymorphic_operand_lookup_pass_count;
+	isize                             polymorphic_operand_cache_hit_count;
+	isize                             polymorphic_operand_failure_cache_hit_count;
+	isize                             polymorphic_operand_candidate_count;
+	isize                             polymorphic_resolved_lookup_pass_count;
+	isize                             polymorphic_resolved_cache_hit_count;
+	isize                             polymorphic_resolved_candidate_count;
+	isize                             polymorphic_generated_count;
+	isize                             polymorphic_failure_cached_count;
+	isize                             proc_group_selection_count;
+	isize                             proc_group_cacheable_count;
+	isize                             proc_group_cache_hit_count;
+	isize                             proc_group_cache_candidate_count;
+	isize                             proc_group_candidate_count;
+	isize                             proc_group_avoided_candidate_count;
+	u64                               polymorphic_resolution_ticks;
+	u64                               polymorphic_operand_lookup_ticks;
+	u64                               polymorphic_resolved_lookup_ticks;
+	u64                               proc_group_cache_lookup_ticks;
+	u64                               proc_group_candidate_ticks;
+	u64                               body_ticks;
+	CheckerGlobalEntityTimingBucket   buckets[CheckerProcedureBodyTiming_COUNT];
+	struct SlowBody {
+		u64       ticks;
+		ProcInfo *info;
+	};
+	SlowBody                          slow_bodies[16];
+	isize                             slow_body_count;
+	CheckerGlobalEntityTimingBucket   statement_buckets[Ast_COUNT];
+	struct StatementStackEntry {
+		AstKind kind;
+		u64     start;
+		u64     child_ticks;
+	};
+	StatementStackEntry               statement_stack[1024];
+	isize                             statement_stack_count;
+};
+
+gb_global CheckerProcedureBodyTimingState checker_procedure_body_timing_state = {};
+
+gb_internal void checker_procedure_body_timing_reset(void) {
+	gb_zero_item(&checker_procedure_body_timing_state);
+}
+
+gb_internal void checker_procedure_body_timing_add(CheckerProcedureBodyTimingKind kind, u64 ticks) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind >= 0 && kind < CheckerProcedureBodyTiming_COUNT);
+	state->buckets[kind].exclusive_ticks += ticks;
+	state->buckets[kind].call_count += 1;
+}
+
+gb_internal void checker_procedure_body_timing_note_polymorphic_resolution(u64 ticks, bool success) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	state->polymorphic_attempt_count += 1;
+	state->polymorphic_resolution_success_count += success;
+	state->polymorphic_resolution_ticks += ticks;
+}
+
+gb_internal void checker_procedure_body_timing_note_polymorphic_lookup(bool operand_lookup, isize candidate_count, u64 ticks) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	if (operand_lookup) {
+		state->polymorphic_operand_lookup_pass_count += 1;
+		state->polymorphic_operand_candidate_count += candidate_count;
+		state->polymorphic_operand_lookup_ticks += ticks;
+	} else {
+		state->polymorphic_resolved_lookup_pass_count += 1;
+		state->polymorphic_resolved_candidate_count += candidate_count;
+		state->polymorphic_resolved_lookup_ticks += ticks;
+	}
+}
+
+gb_internal void checker_statement_timing_begin(AstKind kind) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind >= 0 && kind < Ast_COUNT);
+	GB_ASSERT(state->statement_stack_count < gb_count_of(state->statement_stack));
+
+	auto *entry = &state->statement_stack[state->statement_stack_count++];
+	entry->kind = kind;
+	entry->start = time_stamp_time_now();
+	entry->child_ticks = 0;
+}
+
+gb_internal void checker_statement_timing_end(void) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->statement_stack_count > 0);
+
+	CheckerProcedureBodyTimingState::StatementStackEntry entry = state->statement_stack[--state->statement_stack_count];
+	u64 total_ticks = time_stamp_time_now() - entry.start;
+	u64 exclusive_ticks = total_ticks - entry.child_ticks;
+
+	auto *bucket = &state->statement_buckets[entry.kind];
+	bucket->exclusive_ticks += exclusive_ticks;
+	bucket->call_count += 1;
+
+	if (state->statement_stack_count > 0) {
+		state->statement_stack[state->statement_stack_count-1].child_ticks += total_ticks;
+	}
+}
+
+gb_internal void checker_procedure_body_timing_note_body(ProcInfo *info, u64 ticks, bool successful) {
+	auto *state = &checker_procedure_body_timing_state;
+	GB_ASSERT(state->enabled);
+
+	state->body_count += 1;
+	state->body_ticks += ticks;
+	state->successful_body_count += successful;
+	if (info->type->Proc.is_polymorphic && info->type->Proc.is_poly_specialized) {
+		state->polymorphic_specialization_count += 1;
+	}
+
+	isize count = state->slow_body_count;
+	isize cap = gb_count_of(state->slow_bodies);
+	if (count == cap && ticks <= state->slow_bodies[count-1].ticks) {
+		return;
+	}
+
+	isize idx = count;
+	if (idx < cap) {
+		state->slow_body_count += 1;
+	} else {
+		idx = cap-1;
+	}
+
+	while (idx > 0 && state->slow_bodies[idx-1].ticks < ticks) {
+		if (idx < cap) {
+			state->slow_bodies[idx] = state->slow_bodies[idx-1];
+		}
+		idx -= 1;
+	}
+
+	state->slow_bodies[idx].ticks = ticks;
+	state->slow_bodies[idx].info = info;
+}
+
+gb_internal CheckerGlobalEntityTimingKind checker_global_entity_timing_kind_from_entity_kind(EntityKind kind) {
+	switch (kind) {
+	case Entity_Variable:  return CheckerGlobalEntityTiming_Variable;
+	case Entity_Constant:  return CheckerGlobalEntityTiming_Constant;
+	case Entity_TypeName:  return CheckerGlobalEntityTiming_TypeName;
+	case Entity_Procedure: return CheckerGlobalEntityTiming_Procedure;
+	case Entity_ProcGroup: return CheckerGlobalEntityTiming_ProcGroup;
+	}
+	return CheckerGlobalEntityTiming_Invalid;
+}
+
+gb_internal void checker_global_entity_timing_reset(void) {
+	gb_zero_item(&checker_global_entity_timing_state);
+	gb_zero_item(&checker_global_variable_timing_state);
+}
+
+gb_internal void checker_global_entity_timing_begin(CheckerGlobalEntityTimingKind kind) {
+	auto *state = &checker_global_entity_timing_state;
+	GB_ASSERT(state->enabled);
+	GB_ASSERT(kind > CheckerGlobalEntityTiming_Invalid && kind < CheckerGlobalEntityTiming_COUNT);
+	GB_ASSERT(state->stack_count < gb_count_of(state->stack));
+
+	auto *entry = &state->stack[state->stack_count++];
+	entry->kind = kind;
+	entry->start = time_stamp_time_now();
+	entry->child_ticks = 0;
+}
+
+gb_internal void checker_global_entity_timing_end(void) {
+	auto *state = &checker_global_entity_timing_state;
+	GB_ASSERT(state->stack_count > 0);
+
+	CheckerGlobalEntityTimingStackEntry entry = state->stack[--state->stack_count];
+	u64 total_ticks = time_stamp_time_now() - entry.start;
+	u64 exclusive_ticks = total_ticks - entry.child_ticks;
+
+	auto *bucket = &state->buckets[entry.kind];
+	bucket->exclusive_ticks += exclusive_ticks;
+	bucket->call_count += 1;
+
+	if (state->stack_count > 0) {
+		state->stack[state->stack_count-1].child_ticks += total_ticks;
+	}
+}
+
+gb_internal void checker_global_entity_timing_add_soa_ticks(u64 ticks, isize completion_count) {
+	auto *state = &checker_global_entity_timing_state;
+	state->post_soa_ticks += ticks;
+	state->soa_completion_count += completion_count;
+}
+
+gb_internal void checker_global_entity_timing_add_layout_ticks(u64 ticks) {
+	auto *state = &checker_global_entity_timing_state;
+	state->post_layout_ticks += ticks;
+	state->layout_entity_count += 1;
+}
+
+gb_internal void checker_global_variable_timing_add(CheckerGlobalVariableTimingKind kind, u64 ticks) {
+	auto *state = &checker_global_variable_timing_state;
+	state->buckets[kind].exclusive_ticks += ticks;
+	state->buckets[kind].call_count += 1;
+}
+
+gb_internal void checker_global_variable_timing_note_init_expr(Entity *entity, Ast *expr, u64 ticks) {
+	if (ticks == 0 || entity == nullptr || expr == nullptr) {
+		return;
+	}
+
+	auto *state = &checker_global_variable_timing_state;
+	isize count = state->slow_init_expr_count;
+	isize cap = gb_count_of(state->slow_init_exprs);
+	if (count == cap && ticks <= state->slow_init_exprs[count-1].ticks) {
+		return;
+	}
+
+	isize idx = count;
+	if (idx < cap) {
+		state->slow_init_expr_count += 1;
+	} else {
+		idx = cap-1;
+	}
+
+	while (idx > 0 && state->slow_init_exprs[idx-1].ticks < ticks) {
+		if (idx < cap) {
+			state->slow_init_exprs[idx] = state->slow_init_exprs[idx-1];
+		}
+		idx -= 1;
+	}
+
+	state->slow_init_exprs[idx].ticks = ticks;
+	state->slow_init_exprs[idx].entity = entity;
+	state->slow_init_exprs[idx].expr = expr;
+}
+
+gb_internal f64 checker_global_entity_ticks_as_ms(u64 ticks, u64 freq) {
+	return 1000.0*cast(f64)ticks/cast(f64)freq;
+}
+
+gb_internal void checker_global_entity_timing_print_line(char const *label, u64 ticks, isize count, f64 total_ms, u64 freq) {
+	if (ticks == 0 && count == 0) {
+		return;
+	}
+
+	f64 ms = checker_global_entity_ticks_as_ms(ticks, freq);
+	f64 pct = total_ms > 0 ? 100.0*ms/total_ms : 0.0;
+
+	gb_printf_err("%s - %.3f ms - %.2f%%", label, ms, pct);
+	if (count > 0) {
+		gb_printf_err(" - %td calls - %.3f us/call", count, 1000.0*ms/cast(f64)count);
+	}
+	gb_printf_err("\n");
+}
+
+gb_internal void show_checker_global_entity_timings(Timings *t) {
+	if (!build_context.show_more_timings) {
+		return;
+	}
+
+	auto *state = &checker_global_entity_timing_state;
+	if (state->loop_entity_count == 0) {
+		return;
+	}
+
+	TimeStamp phase = {};
+	for (TimeStamp const &section : t->sections) {
+		if (section.label == "check all global entities") {
+			phase = section;
+			break;
+		}
+	}
+	if (phase.label.len == 0) {
+		return;
+	}
+
+	u64 measured_ticks = state->post_layout_ticks + state->post_soa_ticks;
+	for (isize i = CheckerGlobalEntityTiming_Variable; i < CheckerGlobalEntityTiming_COUNT; i++) {
+		measured_ticks += state->buckets[i].exclusive_ticks;
+	}
+
+	u64 phase_ticks = phase.finish - phase.start;
+	u64 other_ticks = phase_ticks > measured_ticks ? phase_ticks - measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Global Entity Breakdown\n");
+	gb_printf_err("loop entities                - %td total, %td lazy skipped\n", state->loop_entity_count, state->lazy_skipped_count);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Variable],  state->buckets[CheckerGlobalEntityTiming_Variable].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_Variable].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Constant],  state->buckets[CheckerGlobalEntityTiming_Constant].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_Constant].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_TypeName],  state->buckets[CheckerGlobalEntityTiming_TypeName].exclusive_ticks,  state->buckets[CheckerGlobalEntityTiming_TypeName].call_count,  phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_Procedure], state->buckets[CheckerGlobalEntityTiming_Procedure].exclusive_ticks, state->buckets[CheckerGlobalEntityTiming_Procedure].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_global_entity_timing_labels[CheckerGlobalEntityTiming_ProcGroup], state->buckets[CheckerGlobalEntityTiming_ProcGroup].exclusive_ticks, state->buckets[CheckerGlobalEntityTiming_ProcGroup].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("complete_soa_type", state->post_soa_ticks, state->soa_completion_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("type_size/type_align", state->post_layout_ticks, state->layout_entity_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("other/setup", other_ticks, 0, phase_ms, t->freq);
+
+	auto *var_state = &checker_global_variable_timing_state;
+	u64 variable_total_ticks = state->buckets[CheckerGlobalEntityTiming_Variable].exclusive_ticks;
+	if (variable_total_ticks == 0 || var_state->variable_decl_count == 0) {
+		return;
+	}
+
+	u64 variable_measured_ticks = 0;
+	for (isize i = 0; i < CheckerGlobalVariableTiming_COUNT; i++) {
+		variable_measured_ticks += var_state->buckets[i].exclusive_ticks;
+	}
+	u64 variable_other_ticks = variable_total_ticks > variable_measured_ticks ? variable_total_ticks - variable_measured_ticks : 0;
+	f64 variable_ms = checker_global_entity_ticks_as_ms(variable_total_ticks, t->freq);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Global Variable Breakdown\n");
+	gb_printf_err("variable decls               - %td total, %td early visited\n", var_state->variable_decl_count, var_state->early_visited_count);
+	for (isize i = 0; i < CheckerGlobalVariableTiming_COUNT; i++) {
+		checker_global_entity_timing_print_line(checker_global_variable_timing_labels[i], var_state->buckets[i].exclusive_ticks, var_state->buckets[i].call_count, variable_ms, t->freq);
+	}
+	checker_global_entity_timing_print_line("other/setup", variable_other_ticks, 0, variable_ms, t->freq);
+
+	if (var_state->slow_init_expr_count <= 0) {
+		return;
+	}
+
+	gb_printf_err("\n");
+	gb_printf_err("Slowest Global Init Exprs\n");
+	for (isize i = 0; i < var_state->slow_init_expr_count; i++) {
+		auto *entry = &var_state->slow_init_exprs[i];
+		Ast *expr = unparen_expr(entry->expr);
+		f64 ms = checker_global_entity_ticks_as_ms(entry->ticks, t->freq);
+
+		gb_printf_err("%td. %.3f ms - %s - %.*s", i+1, ms, token_pos_to_string(entry->entity->token.pos), LIT(entry->entity->token.string));
+		if (expr != nullptr) {
+			gb_printf_err(" - %.*s", LIT(ast_strings[expr->kind]));
+			if (expr->kind == Ast_CompoundLit) {
+				ast_node(cl, CompoundLit, expr);
+				gb_printf_err(" (%td elems", cl->elems.count);
+				if (cl->tag && cl->tag->BasicDirective.name.string == "partial") {
+					gb_printf_err(", #partial");
+				}
+				gb_printf_err(")");
+			}
+		}
+
+		Entity *target = strip_entity_wrapping(entity_from_expr(expr));
+		if (target != nullptr && target != entry->entity) {
+			gb_printf_err(" -> %s - %.*s", token_pos_to_string(target->token.pos), LIT(target->token.string));
+		}
+		gb_printf_err("\n");
+	}
+}
+
+gb_internal void show_checker_procedure_body_timings(Timings *t) {
+	if (!build_context.show_more_timings || !build_context.no_threaded_checker) {
+		return;
+	}
+
+	auto *state = &checker_procedure_body_timing_state;
+	if (state->body_count == 0) {
+		return;
+	}
+
+	TimeStamp phase = {};
+	for (TimeStamp const &section : t->sections) {
+		if (section.label == "check procedure bodies") {
+			phase = section;
+			break;
+		}
+	}
+	if (phase.label.len == 0) {
+		return;
+	}
+
+	u64 body_measured_ticks = 0;
+	for (isize i = CheckerProcedureBodyTiming_ParameterSetup; i < CheckerProcedureBodyTiming_PostBody; i++) {
+		body_measured_ticks += state->buckets[i].exclusive_ticks;
+	}
+	u64 body_other_ticks = state->body_ticks > body_measured_ticks ? state->body_ticks - body_measured_ticks : 0;
+
+	u64 phase_ticks = phase.finish - phase.start;
+	u64 phase_measured_ticks = state->buckets[CheckerProcedureBodyTiming_ContextSetup].exclusive_ticks +
+	                           state->body_ticks +
+	                           state->buckets[CheckerProcedureBodyTiming_PostBody].exclusive_ticks;
+	u64 dispatch_ticks = phase_ticks > phase_measured_ticks ? phase_ticks - phase_measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+
+	isize appended_dispatch_count = gb_max(state->dispatch_count - state->initial_queue_count, 0);
+	isize skipped_dispatch_count = gb_max(state->dispatch_count - state->body_count, 0);
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Procedure Body Breakdown\n");
+	gb_printf_err("body queue                   - %td initial, %td appended/requeued, %td dispatches\n", state->initial_queue_count, appended_dispatch_count, state->dispatch_count);
+	gb_printf_err("body results                 - %td entered, %td successful, %td skipped/deferred, %td polymorphic specializations\n", state->body_count, state->successful_body_count, skipped_dispatch_count, state->polymorphic_specialization_count);
+	checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_ContextSetup], state->buckets[CheckerProcedureBodyTiming_ContextSetup].exclusive_ticks, state->buckets[CheckerProcedureBodyTiming_ContextSetup].call_count, phase_ms, t->freq);
+	for (isize i = CheckerProcedureBodyTiming_ParameterSetup; i < CheckerProcedureBodyTiming_PostBody; i++) {
+		checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[i], state->buckets[i].exclusive_ticks, state->buckets[i].call_count, phase_ms, t->freq);
+	}
+	checker_global_entity_timing_print_line("body other", body_other_ticks, state->body_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line(checker_procedure_body_timing_labels[CheckerProcedureBodyTiming_PostBody], state->buckets[CheckerProcedureBodyTiming_PostBody].exclusive_ticks, state->buckets[CheckerProcedureBodyTiming_PostBody].call_count, phase_ms, t->freq);
+	checker_global_entity_timing_print_line("dispatch/filtering", dispatch_ticks, state->dispatch_count, phase_ms, t->freq);
+
+	if (state->polymorphic_attempt_count > 0) {
+		isize request_count = state->polymorphic_attempt_count +
+		                      state->polymorphic_operand_cache_hit_count +
+		                      state->polymorphic_operand_failure_cache_hit_count;
+		gb_printf_err("\n");
+		gb_printf_err("Polymorphic Specialization Lookup\n");
+		gb_printf_err("requests                     - %td total, %td resolution attempts, %td resolved, %td generated\n",
+		              request_count,
+		              state->polymorphic_attempt_count,
+		              state->polymorphic_resolution_success_count,
+		              state->polymorphic_generated_count);
+		gb_printf_err("cache hits                    - %td operand, %td rejected, %td resolved-type\n",
+		              state->polymorphic_operand_cache_hit_count,
+		              state->polymorphic_operand_failure_cache_hit_count,
+		              state->polymorphic_resolved_cache_hit_count);
+		gb_printf_err("cached rejected resolutions   - %td\n", state->polymorphic_failure_cached_count);
+		gb_printf_err("lookup candidates             - %td operand over %td passes, %td resolved-type over %td passes\n",
+		              state->polymorphic_operand_candidate_count,
+		              state->polymorphic_operand_lookup_pass_count,
+		              state->polymorphic_resolved_candidate_count,
+		              state->polymorphic_resolved_lookup_pass_count);
+		checker_global_entity_timing_print_line("polymorphic resolution", state->polymorphic_resolution_ticks, state->polymorphic_attempt_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("polymorphic operand lookup", state->polymorphic_operand_lookup_ticks, state->polymorphic_operand_lookup_pass_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("polymorphic resolved lookup", state->polymorphic_resolved_lookup_ticks, state->polymorphic_resolved_lookup_pass_count, phase_ms, t->freq);
+	}
+
+	if (state->proc_group_selection_count > 0) {
+		gb_printf_err("\n");
+		gb_printf_err("Procedure Group Selection\n");
+		gb_printf_err("requests                     - %td total, %td cacheable, %td winner-cache hits\n",
+		              state->proc_group_selection_count,
+		              state->proc_group_cacheable_count,
+		              state->proc_group_cache_hit_count);
+		gb_printf_err("candidate checks             - %td performed, %td avoided\n",
+		              state->proc_group_candidate_count,
+		              state->proc_group_avoided_candidate_count);
+		gb_printf_err("lookup candidates             - %td\n", state->proc_group_cache_candidate_count);
+		checker_global_entity_timing_print_line("procedure group candidate checks", state->proc_group_candidate_ticks, state->proc_group_candidate_count, phase_ms, t->freq);
+		checker_global_entity_timing_print_line("procedure group cache lookup", state->proc_group_cache_lookup_ticks, state->proc_group_cacheable_count, phase_ms, t->freq);
+	}
+
+	gb_printf_err("\n");
+	gb_printf_err("Slowest Procedure Bodies\n");
+	for (isize i = 0; i < state->slow_body_count; i++) {
+		auto *entry = &state->slow_bodies[i];
+		ProcInfo *info = entry->info;
+		String name = info->token.kind == Token_Ident ? info->token.string : str_lit("(anonymous-procedure)");
+		f64 ms = checker_global_entity_ticks_as_ms(entry->ticks, t->freq);
+
+		gb_printf_err("%td. %.3f ms - %s - %.*s", i+1, ms, token_pos_to_string(info->token.pos), LIT(name));
+		if (info->type->Proc.is_polymorphic && info->type->Proc.is_poly_specialized) {
+			gb_printf_err(" - polymorphic specialization");
+		}
+		gb_printf_err("\n");
+	}
+}
+
+gb_internal void show_checker_statement_timings(Timings *t) {
+	if (!build_context.show_more_timings || !build_context.no_threaded_checker) {
+		return;
+	}
+
+	auto *state = &checker_procedure_body_timing_state;
+	u64 phase_ticks = state->buckets[CheckerProcedureBodyTiming_Statements].exclusive_ticks;
+	if (phase_ticks == 0) {
+		return;
+	}
+
+	u64 measured_ticks = 0;
+	for (isize i = 0; i < Ast_COUNT; i++) {
+		measured_ticks += state->statement_buckets[i].exclusive_ticks;
+	}
+	u64 other_ticks = phase_ticks > measured_ticks ? phase_ticks - measured_ticks : 0;
+	f64 phase_ms = checker_global_entity_ticks_as_ms(phase_ticks, t->freq);
+	bool printed[Ast_COUNT] = {};
+
+	gb_printf_err("\n");
+	gb_printf_err("Checker Statement Breakdown\n");
+	for (isize rank = 0; rank < Ast_COUNT; rank++) {
+		isize best = -1;
+		for (isize i = 0; i < Ast_COUNT; i++) {
+			if (printed[i] || state->statement_buckets[i].call_count == 0) {
+				continue;
+			}
+			if (best < 0 || state->statement_buckets[i].exclusive_ticks > state->statement_buckets[best].exclusive_ticks) {
+				best = i;
+			}
+		}
+		if (best < 0) {
+			break;
+		}
+		printed[best] = true;
+
+		auto *bucket = &state->statement_buckets[best];
+		f64 ms = checker_global_entity_ticks_as_ms(bucket->exclusive_ticks, t->freq);
+		f64 pct = phase_ms > 0 ? 100.0*ms/phase_ms : 0.0;
+		gb_printf_err("%.*s - %.3f ms - %.2f%% - %td calls - %.3f us/call\n", LIT(ast_strings[best]), ms, pct, bucket->call_count, 1000.0*ms/cast(f64)bucket->call_count);
+	}
+	checker_global_entity_timing_print_line("statement-list setup/other", other_ticks, 0, phase_ms, t->freq);
+}
 
 gb_internal bool is_operand_value(Operand o) {
 	switch (o.mode) {
@@ -82,50 +703,18 @@ gb_internal void entity_graph_node_destroy(EntityGraphNode *n, gbAllocator a) {
 }
 
 
-gb_internal int entity_source_order_cmp(Entity *x, Entity *y) {
-	if (x == y) {
-		return 0;
-	}
-	int cmp = 0;
-	if (x->pkg != y->pkg) {
-		isize order_x = x->pkg ? x->pkg->order : 0;
-		isize order_y = y->pkg ? y->pkg->order : 0;
-		cmp = isize_cmp(order_x, order_y);
-		if (cmp) {
-			return cmp;
-		}
-	}
-	if (x->file != y->file) {
-		if (x->file != nullptr && y->file != nullptr && x->file->pkg != nullptr && x->file->pkg == y->file->pkg) {
-			// NOTE(bill): the same order as by name, as a package's files are sorted by it
-			cmp = i32_cmp(x->file->index_in_pkg, y->file->index_in_pkg);
-		} else {
-			String fullpath_x = x->file ? x->file->fullpath : (String{});
-			String fullpath_y = y->file ? y->file->fullpath : (String{});
-			String file_x = filename_from_path(fullpath_x);
-			String file_y = filename_from_path(fullpath_y);
-
-			cmp = string_compare(file_x, file_y);
-		}
-		if (cmp) {
-			return cmp;
-		}
-	}
-
-	cmp = u64_cmp(x->order_in_src, y->order_in_src);
-	if (cmp) {
-		return cmp;
-	}
-	return i32_cmp(x->token.pos.offset, y->token.pos.offset);
-}
-
 gb_internal int entity_graph_node_cmp(EntityGraphNode **data, isize i, isize j) {
 	EntityGraphNode *x = data[i];
 	EntityGraphNode *y = data[j];
-	if (x->dep_count != y->dep_count) {
-		return x->dep_count < y->dep_count ? -1 : +1;
+	u64 a = x->entity->order_in_src;
+	u64 b = y->entity->order_in_src;
+	if (x->dep_count < y->dep_count) {
+		return -1;
 	}
-	return entity_source_order_cmp(x->entity, y->entity);
+	if (x->dep_count == y->dep_count) {
+		return a < b ? -1 : b > a;
+	}
+	return +1;
 }
 
 gb_internal void entity_graph_node_swap(EntityGraphNode **data, isize i, isize j) {
@@ -179,10 +768,10 @@ gb_internal int import_graph_node_cmp(ImportGraphNode **data, isize i, isize j) 
 	bool xg = (x->scope->flags&ScopeFlag_Global) != 0;
 	bool yg = (y->scope->flags&ScopeFlag_Global) != 0;
 	if (xg != yg) return xg ? -1 : +1;
+	if (xg && yg) return x->pkg->id < y->pkg->id ? +1 : -1;
 	if (x->dep_count < y->dep_count) return -1;
 	if (x->dep_count > y->dep_count) return +1;
-	// NOTE: a total order, so the package order does not depend on parsing or hashing order
-	return string_compare(x->pkg->fullpath, y->pkg->fullpath);
+	return 0;
 }
 
 gb_internal void import_graph_node_swap(ImportGraphNode **data, isize i, isize j) {
@@ -207,7 +796,6 @@ gb_internal void init_decl_info(DeclInfo *d, Scope *scope, DeclInfo *parent) {
 	ptr_set_init(&d->deps, 0);
 	type_set_init(&d->type_info_deps, 0);
 	d->labels.allocator = heap_allocator();
-	d->nested_to_check.allocator = heap_allocator();
 	d->variadic_reuses.allocator = heap_allocator();
 	d->variadic_reuse_max_bytes = 0;
 	d->variadic_reuse_max_align = 1;
@@ -252,10 +840,10 @@ gb_internal Scope *create_scope(CheckerInfo *info, Scope *parent) {
 	s->parent = parent;
 
 	if (parent != nullptr && parent != builtin_pkg->scope) {
-		Scope *prev_head_child = parent->head_child.load(std::memory_order_acquire);
-		do {
-			s->next.store(prev_head_child, std::memory_order_relaxed);
-		} while (!parent->head_child.compare_exchange_weak(prev_head_child, s, std::memory_order_acq_rel, std::memory_order_acquire));
+		Scope *prev_head_child = parent->head_child.exchange(s, std::memory_order_acq_rel);
+		if (prev_head_child) {
+			s->next.store(prev_head_child, std::memory_order_release);
+		}
 	}
 
 	if (parent != nullptr && parent->flags & ScopeFlag_ContextDefined) {
@@ -277,13 +865,6 @@ gb_internal Scope *create_scope_from_file(CheckerInfo *info, AstFile *f) {
 	s->flags |= ScopeFlag_File;
 	s->file = f;
 	f->scope = s;
-
-	bool global_context = f->feature_flags_set && (f->feature_flags & OptInFeatureFlag_GlobalContext) != 0;
-	if (global_context) {
-		s->flags |= ScopeFlag_ContextDefined;
-	} else {
-		s->flags &= ~ScopeFlag_ContextDefined;
-	}
 
 	return s;
 }
@@ -343,6 +924,7 @@ gb_internal void add_scope(CheckerContext *c, Ast *node, Scope *scope) {
 	case Ast_ForStmt:         node->ForStmt.scope         = scope; break;
 	case Ast_RangeStmt:       node->RangeStmt.scope       = scope; break;
 	case Ast_UnrollRangeStmt: node->UnrollRangeStmt.scope = scope; break;
+	case Ast_WithStmt:        node->WithStmt.scope        = scope; break;
 	case Ast_CaseClause:      node->CaseClause.scope      = scope; break;
 	case Ast_SwitchStmt:      node->SwitchStmt.scope      = scope; break;
 	case Ast_TypeSwitchStmt:  node->TypeSwitchStmt.scope  = scope; break;
@@ -365,6 +947,7 @@ gb_internal Scope *scope_of_node(Ast *node) {
 	case Ast_ForStmt:         return node->ForStmt.scope;
 	case Ast_RangeStmt:       return node->RangeStmt.scope;
 	case Ast_UnrollRangeStmt: return node->UnrollRangeStmt.scope;
+	case Ast_WithStmt:        return node->WithStmt.scope;
 	case Ast_CaseClause:      return node->CaseClause.scope;
 	case Ast_SwitchStmt:      return node->SwitchStmt.scope;
 	case Ast_TypeSwitchStmt:  return node->TypeSwitchStmt.scope;
@@ -400,9 +983,8 @@ gb_internal void check_open_scope(CheckerContext *c, Ast *node) {
 		break;
 	}
 	if (c->decl && c->decl->proc_lit) {
-		// NOTE(bill): numbered by position rather than in checking order, as that order varies
-		// (e.g. with which caller instantiates a record first); 0 is the procedure's own scope
-		scope->index = node->kind == Ast_ProcType ? 0 : 1 + ast_token(node).pos.offset;
+		// Number the scopes within a procedure body depth-first
+		scope->index = c->decl->scope_index++;
 	}
 	c->scope = scope;
 	c->state_flags |= StateFlag_bounds_check;
@@ -413,32 +995,23 @@ gb_internal void check_close_scope(CheckerContext *c) {
 }
 
 
-gb_internal Entity *force_scope_placeholders(Scope *s, InternedString name, u32 hash);
-
-struct GlobalWhenTrial;
-gb_global GlobalWhenTrial *global_when_trial;
-gb_internal Entity *global_when_trial_lookup(Scope *s, InternedString name, u32 hash, Entity *found);
-
 gb_internal Entity *scope_lookup_current(Scope *s, InternedString name, u32 hash) {
 	// Entity **found = string_map_get(&s->elements, name);
 	if (hash == 0) {
 		hash = name.hash();
 	}
 	Entity *found = scope_map_get(&s->elements, name, hash);
-	if (global_when_trial != nullptr) {
-		found = global_when_trial_lookup(s, name, hash, found);
-	}
 	if (found) {
 		return found;
-	}
-	if (s->placeholders != nullptr) {
-		return force_scope_placeholders(s, name, hash);
 	}
 	return nullptr;
 }
 
 
+gb_global std::atomic<bool> in_single_threaded_checker_stage;
+
 gb_internal void scope_lookup_parent(Scope *scope, InternedString name, Scope **scope_, Entity **entity_, u32 hash) {
+	bool is_single_threaded = in_single_threaded_checker_stage.load(std::memory_order_relaxed);
 	if (scope != nullptr) {
 		bool gone_thru_proc = false;
 		bool gone_thru_package = false;
@@ -447,19 +1020,9 @@ gb_internal void scope_lookup_parent(Scope *scope, InternedString name, Scope **
 		}
 		for (Scope *s = scope; s != nullptr; s = s->parent) {
 			Entity *found = nullptr;
-			if (s->flags & ScopeFlag_ReadOnly) {
-				found = scope_map_get(&s->elements, name, hash);
-			} else {
-				rw_mutex_shared_lock(&s->mutex);
-				found = scope_map_get(&s->elements, name, hash);
-				rw_mutex_shared_unlock(&s->mutex);
-			}
-			if (global_when_trial != nullptr) {
-				found = global_when_trial_lookup(s, name, hash, found);
-			}
-			if (found == nullptr && s->placeholders != nullptr) {
-				found = force_scope_placeholders(s, name, hash);
-			}
+			if (!is_single_threaded) rw_mutex_shared_lock(&s->mutex);
+			found = scope_map_get(&s->elements, name, hash);
+			if (!is_single_threaded) rw_mutex_shared_unlock(&s->mutex);
 			if (found) {
 				Entity *e = found;
 				if (gone_thru_proc) {
@@ -504,7 +1067,6 @@ gb_internal Entity *scope_insert_with_name_no_mutex(Scope *s, InternedString nam
 	if (name.value == 0) {
 		return nullptr;
 	}
-	GB_ASSERT_MSG((s->flags & ScopeFlag_ReadOnly) == 0, "%.*s", LIT(entity->token.string));
 	Entity *found = nullptr;
 	Entity *result = nullptr;
 
@@ -541,7 +1103,6 @@ gb_internal Entity *scope_insert_with_name(Scope *s, InternedString name, u32 ha
 	if (name.value == 0) {
 		return nullptr;
 	}
-	GB_ASSERT_MSG((s->flags & ScopeFlag_ReadOnly) == 0, "%.*s", LIT(entity->token.string));
 	Entity *found = nullptr;
 	Entity *result = nullptr;
 
@@ -584,7 +1145,11 @@ gb_internal Entity *scope_insert(Scope *s, Entity *entity) {
 	auto name = entity_interned_name(entity);
 	u32 hash = entity->interned_name_hash.load(std::memory_order_relaxed);
 	GB_ASSERT(hash != 0);
-	return scope_insert_with_name(s, name, hash, entity);
+	if (in_single_threaded_checker_stage.load(std::memory_order_relaxed)) {
+		return scope_insert_with_name_no_mutex(s, name, hash, entity);
+	} else {
+		return scope_insert_with_name(s, name, hash, entity);
+	}
 }
 
 gb_internal Entity *scope_insert_no_mutex(Scope *s, Entity *entity) {
@@ -600,6 +1165,55 @@ gb_internal GB_COMPARE_PROC(entity_variable_pos_cmp) {
 	Entity *y = *cast(Entity **)b;
 
 	return token_pos_cmp(x->token.pos, y->token.pos);
+}
+
+gb_internal GB_COMPARE_PROC(check_global_entity_cmp) {
+	Entity *x = *cast(Entity **)a;
+	Entity *y = *cast(Entity **)b;
+	if (x == y) {
+		return 0;
+	}
+
+	if (x->pkg != y->pkg) {
+		if (x->pkg == nullptr) {
+			return -1;
+		}
+		if (y->pkg == nullptr) {
+			return +1;
+		}
+
+		int cmp = isize_cmp(x->pkg->order, y->pkg->order);
+		if (cmp != 0) {
+			return cmp;
+		}
+		cmp = string_compare(x->pkg->name, y->pkg->name);
+		if (cmp != 0) {
+			return cmp;
+		}
+	}
+
+	if (x->file != y->file) {
+		String path_x = x->file ? x->file->fullpath : String{};
+		String path_y = y->file ? y->file->fullpath : String{};
+		int cmp = string_compare(path_x, path_y);
+		if (cmp != 0) {
+			return cmp;
+		}
+	}
+
+	int cmp = u64_cmp(x->order_in_src, y->order_in_src);
+	if (cmp != 0) {
+		return cmp;
+	}
+	cmp = token_pos_cmp(x->token.pos, y->token.pos);
+	if (cmp != 0) {
+		return cmp;
+	}
+	cmp = i32_cmp(cast(i32)(x->kind), cast(i32)(y->kind));
+	if (cmp != 0) {
+		return cmp;
+	}
+	return string_compare(x->token.string, y->token.string);
 }
 
 
@@ -930,9 +1544,13 @@ gb_internal void check_scope_usage(Checker *c, Scope *scope, u64 vet_flags) {
 
 
 gb_internal void add_dependency(CheckerInfo *info, DeclInfo *d, Entity *e) {
-	rw_mutex_lock(&d->deps_mutex);
-	ptr_set_add(&d->deps, e);
-	rw_mutex_unlock(&d->deps_mutex);
+	if (in_single_threaded_checker_stage.load(std::memory_order_relaxed)) {
+		ptr_set_add(&d->deps, e);
+	} else {
+		rw_mutex_lock(&d->deps_mutex);
+		ptr_set_add(&d->deps, e);
+		rw_mutex_unlock(&d->deps_mutex);
+	}
 }
 gb_internal void add_type_info_dependency(CheckerInfo *info, DeclInfo *d, Type *type) {
 	if (d == nullptr || type == nullptr) {
@@ -1301,6 +1919,7 @@ gb_internal void init_universal(void) {
 			{"iPhoneSimulator", Subtarget_iPhoneSimulator},
 			{"Android",         Subtarget_Android},
 			{"Playdate",        Subtarget_Playdate},
+			{"RP2040",          Subtarget_RP2040},
 		};
 
 		auto fields = add_global_enum_type(str_lit("Odin_Platform_Subtarget_Type"), values, gb_count_of(values));
@@ -1410,12 +2029,13 @@ gb_internal void init_universal(void) {
 	add_global_bool_constant("ODIN_DEBUG",                      bc->ODIN_DEBUG);
 	add_global_bool_constant("ODIN_DISABLE_ASSERT",             bc->ODIN_DISABLE_ASSERT);
 	add_global_bool_constant("ODIN_DEFAULT_TO_NIL_ALLOCATOR",   bc->ODIN_DEFAULT_TO_NIL_ALLOCATOR);
+	add_global_bool_constant("ODIN_EMIT_DOWNCAST_ASSERT",       bc->emit_downcast_assert);
 	add_global_bool_constant("ODIN_NO_BOUNDS_CHECK",            build_context.no_bounds_check);
 	add_global_bool_constant("ODIN_NO_TYPE_ASSERT",             build_context.no_type_assert);
 	add_global_bool_constant("ODIN_DEFAULT_TO_PANIC_ALLOCATOR", bc->ODIN_DEFAULT_TO_PANIC_ALLOCATOR);
 	add_global_bool_constant("ODIN_NO_CRT",                     bc->no_crt);
 	add_global_bool_constant("ODIN_USE_SEPARATE_MODULES",       bc->use_separate_modules);
-	add_global_bool_constant("ODIN_TEST",                       bc->command_kind == Command_test);
+	add_global_bool_constant("ODIN_TEST",                       is_test_context());
 	add_global_bool_constant("ODIN_NO_ENTRY_POINT",             bc->no_entry_point);
 	add_global_bool_constant("ODIN_FOREIGN_ERROR_PROCEDURES",   bc->ODIN_FOREIGN_ERROR_PROCEDURES);
 	add_global_bool_constant("ODIN_NO_RTTI",                    bc->no_rtti);
@@ -1657,7 +2277,7 @@ gb_internal void init_checker_info(CheckerInfo *i) {
 	array_init(&i->definitions,   a);
 	array_init(&i->entities,      a);
 	map_init(&i->global_untyped);
-	array_init(&i->link_names, heap_allocator());
+	string_map_init(&i->foreigns);
 
 	type_set_init(&i->min_dep_type_info_set);
 	map_init(&i->min_dep_type_info_index_map);
@@ -1679,9 +2299,20 @@ gb_internal void init_checker_info(CheckerInfo *i) {
 	string_map_init(&i->load_file_cache);
 	array_init(&i->all_procedures, a);
 	mpsc_init(&i->all_procedures_queue, a);
+	for (isize token = 0; token < Token_Count; token++) {
+		array_init(&i->operator_overloads[token], a);
+	}
+	array_init(&i->index_operator_get_overloads, a);
+	array_init(&i->index_operator_set_overloads, a);
+	array_init(&i->iterator_operator_overloads, a);
+	map_init(&i->overloaded_operator_calls);
+	map_init(&i->assignment_operation_expr_map);
+	map_init(&i->assignment_overloaded_call_expr_map);
+	map_init(&i->range_stmt_iterator_overload_state_map);
+	map_init(&i->proc_group_call_cache);
 
-	per_thread_array_init(&i->entity_queue,     global_thread_pool.threads.count);
-	per_thread_array_init(&i->definition_queue, global_thread_pool.threads.count);
+	mpsc_init(&i->entity_queue, a); // 1<<20);
+	mpsc_init(&i->definition_queue, a); //); // 1<<20);
 	mpsc_init(&i->required_global_variable_queue, a); // 1<<10);
 	mpsc_init(&i->required_foreign_imports_through_force_queue, a); // 1<<10);
 	mpsc_init(&i->foreign_imports_to_check_fullpaths, a); // 1<<10);
@@ -1699,7 +2330,7 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	array_free(&i->definitions);
 	array_free(&i->entities);
 	map_destroy(&i->global_untyped);
-	array_free(&i->link_names);
+	string_map_destroy(&i->foreigns);
 
 	type_set_destroy(&i->min_dep_type_info_set);
 	map_destroy(&i->min_dep_type_info_index_map);
@@ -1711,11 +2342,22 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	array_free(&i->defineables);
 
 	array_free(&i->all_procedures);
+	for (isize token = 0; token < Token_Count; token++) {
+		array_free(&i->operator_overloads[token]);
+	}
+	array_free(&i->index_operator_get_overloads);
+	array_free(&i->index_operator_set_overloads);
+	array_free(&i->iterator_operator_overloads);
+	map_destroy(&i->overloaded_operator_calls);
+	map_destroy(&i->assignment_operation_expr_map);
+	map_destroy(&i->assignment_overloaded_call_expr_map);
+	map_destroy(&i->range_stmt_iterator_overload_state_map);
+	map_destroy(&i->proc_group_call_cache);
 
 	mpsc_destroy(&i->all_procedures_queue);
 
-	per_thread_array_destroy(&i->entity_queue);
-	per_thread_array_destroy(&i->definition_queue);
+	mpsc_destroy(&i->entity_queue);
+	mpsc_destroy(&i->definition_queue);
 	mpsc_destroy(&i->required_global_variable_queue);
 	mpsc_destroy(&i->required_foreign_imports_through_force_queue);
 	mpsc_destroy(&i->foreign_imports_to_check_fullpaths);
@@ -1757,6 +2399,7 @@ gb_internal bool add_curr_ast_file(CheckerContext *ctx, AstFile *file) {
 		ctx->decl  = file->pkg->decl_info;
 		ctx->scope = file->scope;
 		ctx->pkg   = file->pkg;
+		checker_context_set_trigger_trace_from_scope(ctx, file->pkg->scope);
 		return true;
 	}
 	return false;
@@ -1808,7 +2451,7 @@ gb_internal void init_checker(Checker *c) {
 	array_init(&c->procs_to_check, heap_allocator(), 0, 1<<20);
 	array_init(&c->nested_proc_lits, heap_allocator(), 0, 1<<20);
 
-	per_thread_array_init(&c->global_untyped_queue, global_thread_pool.threads.count);
+	mpsc_init(&c->global_untyped_queue, a); // , 1<<20);
 	mpsc_init(&c->soa_types_to_complete, a); // , 1<<20);
 
 	init_checker_context(&c->builtin_ctx, c);
@@ -1821,7 +2464,7 @@ gb_internal void destroy_checker(Checker *c) {
 
 	array_free(&c->nested_proc_lits);
 	array_free(&c->procs_to_check);
-	per_thread_array_destroy(&c->global_untyped_queue);
+	mpsc_destroy(&c->global_untyped_queue);
 	mpsc_destroy(&c->soa_types_to_complete);
 }
 
@@ -1906,13 +2549,6 @@ gb_internal DeclInfo *decl_info_of_entity(Entity *e) {
 	return nullptr;
 }
 
-gb_internal Type *proc_entity_full_type(Entity *e) {
-	if (e->kind == Entity_Procedure && e->decl_info != nullptr && e->decl_info->gen_proc_type != nullptr) {
-		return e->decl_info->gen_proc_type;
-	}
-	return e->type;
-}
-
 // gb_internal DeclInfo *decl_info_of_ident(Ast *ident) {
 // 	return decl_info_of_entity(entity_of_node(ident));
 // }
@@ -1932,12 +2568,13 @@ gb_internal ExprInfo *check_get_expr_info(CheckerContext *c, Ast *expr) {
 		}
 		return nullptr;
 	} else {
-		// NOTE: read under the lock, as another thread's insert may move the entries
 		rw_mutex_shared_lock(&c->info->global_untyped_mutex);
 		ExprInfo **found = map_get(&c->info->global_untyped, expr);
-		ExprInfo *info = found ? *found : nullptr;
 		rw_mutex_shared_unlock(&c->info->global_untyped_mutex);
-		return info;
+		if (found) {
+			return *found;
+		}
+		return nullptr;
 	}
 }
 
@@ -2037,6 +2674,8 @@ gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMo
 		return;
 	}
 
+	BlockingMutex *mutex = tav_mutex_for_node(expr);
+
 	/* Previous logic:
 		BlockingMutex *mutex = &ctx->info->type_and_value_mutex;
 		if (ctx->decl) {
@@ -2046,11 +2685,10 @@ gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMo
 		}
 	*/
 
+	mutex_lock(mutex);
 	Ast *prev_expr = nullptr;
 	while (prev_expr != expr) {
 		prev_expr = expr;
-		BlockingMutex *mutex = tav_mutex_for_node(expr);
-		mutex_lock(mutex);
 		expr->tav.mode = mode;
 		if (type != nullptr && expr->tav.type != nullptr &&
 		    is_type_any(type) && is_type_untyped(expr->tav.type)) {
@@ -2066,13 +2704,13 @@ gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMo
 		} else if (mode == Addressing_Value && type != nullptr && is_type_proc(type)) {
 			expr->tav.value = value;
 		}
-		mutex_unlock(mutex);
 
 		expr = unparen_expr(expr);
 		if (expr == nullptr) {
 			break;
 		};
 	}
+	mutex_unlock(mutex);
 }
 
 gb_internal void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *entity) {
@@ -2087,7 +2725,7 @@ gb_internal void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *
 	GB_ASSERT(entity != nullptr);
 	identifier->Ident.entity = entity;
 	entity->identifier = identifier;
-	per_thread_array_add(&i->definition_queue, entity);
+	mpsc_enqueue(&i->definition_queue, entity);
 }
 
 gb_internal bool redeclaration_error(String name, Entity *prev, Entity *found) {
@@ -2116,8 +2754,8 @@ gb_internal bool redeclaration_error(String name, Entity *prev, Entity *found) {
 			// NOTE(bill): Error should have been handled already
 			return false;
 		}
-		// NOTE(bill): the insertion order is a race between the files of a package, so order the pair by position;
-		// the later declaration stays the anchor, as it is the one being reported
+		// NOTE: the insertion order is a race between the files of a package, so order the pair by
+		// position; the later declaration stays the anchor, as it is the one being reported
 		TokenPos first = prev->token.pos;
 		TokenPos second = pos;
 		if (second < first) {
@@ -2210,6 +2848,12 @@ gb_internal void add_entity_use(CheckerContext *c, Ast *identifier, Entity *enti
 			add_entity_use(c, nullptr, deferred);
 		}
 	}
+	if (entity_has_scope_exit_contract(entity)) {
+		Entity *cleanup = entity->Procedure.scope_exit_contract.cleanup;
+		if (cleanup != entity) {
+			add_entity_use(c, nullptr, cleanup);
+		}
+	}
 	if (identifier == nullptr || identifier->kind != Ast_Ident) {
 		return;
 	}
@@ -2299,19 +2943,6 @@ gb_internal void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, En
 		e->flags &= ~EntityFlag_Lazy;
 	}
 
-	if (c->trial_entities != nullptr) {
-		// NOTE(bill): a scratch copy for a global 'when' trial, put in no scope or queue
-		e->flags &= ~EntityFlag_Lazy;
-		e->file = c->file;
-		e->decl_info = d;
-		e->pkg = c->pkg;
-		d->entity.store(e);
-		identifier->Ident.entity = e;
-		e->identifier = identifier;
-		array_add(c->trial_entities, e);
-		return;
-	}
-
 	if (e->scope != nullptr) {
 		Scope *scope = e->scope;
 
@@ -2340,16 +2971,19 @@ gb_internal void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, En
 	e->pkg = c->pkg;
 	d->entity.store(e);
 
-	bool is_lazy = (e->flags & EntityFlag_Lazy) == EntityFlag_Lazy;
+	isize queue_count = -1;
+	bool is_lazy = false;
+
+	is_lazy = (e->flags & EntityFlag_Lazy) == EntityFlag_Lazy;
 	if (!is_lazy) {
-		per_thread_array_add(&info->entity_queue, e);
+		queue_count = mpsc_enqueue(&info->entity_queue, e);
 	}
 
 	if (e->token.pos.file_id != 0) {
 		e->order_in_src = cast(u64)(e->token.pos.file_id)<<32 | u32(e->token.pos.offset);
 	} else {
 		GB_ASSERT(!is_lazy);
-		e->order_in_src = 1 + info->entities_without_file.fetch_add(1);
+		e->order_in_src = cast(u64)(1+queue_count);
 	}
 }
 
@@ -2522,8 +3156,6 @@ gb_internal void add_type_info_type_internal(CheckerContext *c, Type *t) {
 		break;
 
 	case Type_Union:
-		if (bt->Union.variants_wait_signal.futex.load() == 0)
-			return;
 		if (union_tag_size(t) > 0) {
 			add_type_info_type_internal(c, union_tag_type(t));
 		} else {
@@ -2614,7 +3246,7 @@ gb_internal void add_type_info_type_internal(CheckerContext *c, Type *t) {
 		break;
 
 	default:
-		GB_PANIC("Unhandled type: %*.s %d", LIT(type_strings[bt->kind]), bt->kind);
+		GB_PANIC("Unhandled type: %*.s %d", LIT(type_kind_strings[bt->kind]), bt->kind);
 		break;
 	}
 #endif
@@ -2639,9 +3271,7 @@ gb_internal void check_procedure_later(Checker *c, ProcInfo *info) {
 	if (global_procedure_body_in_worker_queue.load()) {
 		thread_pool_add_task(check_proc_info_worker_proc, info);
 	} else {
-		mutex_lock(&c->procs_to_check_mutex);
 		array_add(&c->procs_to_check, info);
-		mutex_unlock(&c->procs_to_check_mutex);
 	}
 
 	if (DEBUG_CHECK_ALL_PROCEDURES) {
@@ -2659,6 +3289,10 @@ gb_internal void check_procedure_later(Checker *c, AstFile *file, Token token, D
 	info->type  = type;
 	info->body  = body;
 	info->tags  = tags;
+	info->trigger_trace_count = gb_clamp(decl->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (info->trigger_trace_count > 0) {
+		gb_memmove(info->trigger_trace, decl->trigger_trace, info->trigger_trace_count*gb_size_of(TriggerTraceFrame));
+	}
 	check_procedure_later(c, info);
 }
 
@@ -2852,7 +3486,7 @@ gb_internal void add_min_dep_type_info(Checker *c, Type *t) {
 		break;
 
 	default:
-		GB_PANIC("Unhandled type: %*.s", LIT(type_strings[bt->kind]));
+		GB_PANIC("Unhandled type: %*.s", LIT(type_kind_strings[bt->kind]));
 		break;
 	}
 }
@@ -2917,91 +3551,73 @@ gb_internal void add_dependency_to_set(Checker *c, Entity *entity) {
 	}
 
 }
-gb_internal bool min_dep_visit(Entity *entity) {
+gb_internal WORKER_TASK_PROC(add_dependency_to_set_worker) {
+	Checker *c = global_checker_ptr.load(std::memory_order_relaxed);
+	Entity *entity = cast(Entity *)data;
+	if (entity == nullptr) {
+		return 0;
+	}
+
 	if (entity->type != nullptr &&
 	    is_type_polymorphic(entity->type)) {
 		DeclInfo *decl = decl_info_of_entity(entity);
 		if (decl != nullptr && decl->gen_proc_type == nullptr) {
-			return false;
-		}
-	}
-	return entity->min_dep_count.fetch_add(1, std::memory_order_relaxed) == 0;
-}
-
-// NOTE(bill): a task walks from its own stack of entities, and hands half of it to a new task once it is large,
-// as with a task for each dependency, adding the tasks was most of the work
-enum { MIN_DEP_TASK_SPLIT = 256 };
-
-gb_internal WORKER_TASK_PROC(add_dependency_to_set_worker) {
-	Checker *c = global_checker_ptr.load(std::memory_order_relaxed);
-	Array<Entity *> *stack = cast(Array<Entity *> *)data;
-
-	while (stack->count > 0) {
-		Entity *entity = array_pop(stack);
-		if (entity == nullptr || !min_dep_visit(entity)) {
-			continue;
-		}
-		DeclInfo *decl = decl_info_of_entity(entity);
-		if (decl == nullptr) {
-			continue;
-		}
-		for (TypeInfoPair const tt : decl->type_info_deps) {
-			add_min_dep_type_info(c, tt.type);
-		}
-
-		FOR_PTR_SET(e, decl->deps) {
-			Entity *fl = nullptr;
-			switch (e->kind) {
-			case Entity_Procedure:
-				if (e->Procedure.is_foreign) {
-					fl = e->Procedure.foreign_library;
-				}
-				break;
-			case Entity_Variable:
-				if (e->Variable.is_foreign) {
-					fl = e->Variable.foreign_library;
-				}
-				break;
-			}
-			if (fl != nullptr) {
-				GB_ASSERT_MSG(fl->kind == Entity_LibraryName &&
-				              (fl->flags&EntityFlag_Used),
-				              "%.*s", LIT(entity->token.string));
-				array_add(stack, fl);
-			}
-		}
-
-		FOR_PTR_SET(e, decl->deps) {
-			if (e->min_dep_count.load(std::memory_order_relaxed) == 0) {
-				array_add(stack, e);
-			}
-		}
-
-		if (stack->count >= MIN_DEP_TASK_SPLIT) {
-			isize half = stack->count/2;
-			Array<Entity *> *other = gb_alloc_item(heap_allocator(), Array<Entity *>);
-			array_init(other, heap_allocator(), 0, MIN_DEP_TASK_SPLIT);
-			array_add_elems(other, stack->data, half);
-			gb_memmove(stack->data, stack->data + half, (stack->count - half)*gb_size_of(Entity *));
-			stack->count -= half;
-			thread_pool_add_task(add_dependency_to_set_worker, other);
+			return 0;
 		}
 	}
 
-	array_free(stack);
-	gb_free(heap_allocator(), stack);
+	if (entity->min_dep_count.fetch_add(1, std::memory_order_relaxed) > 0) {
+		return 0;
+	}
+
+	DeclInfo *decl = decl_info_of_entity(entity);
+	if (decl == nullptr) {
+		return 0;
+	}
+	for (TypeInfoPair const tt : decl->type_info_deps) {
+		add_min_dep_type_info(c, tt.type);
+	}
+
+	FOR_PTR_SET(e, decl->deps) {
+		switch (e->kind) {
+		case Entity_Procedure:
+			if (e->Procedure.is_foreign) {
+				Entity *fl = e->Procedure.foreign_library;
+				if (fl != nullptr) {
+					GB_ASSERT_MSG(fl->kind == Entity_LibraryName &&
+					              (fl->flags&EntityFlag_Used),
+					              "%.*s", LIT(entity->token.string));
+					add_dependency_to_set_threaded(c, fl);
+				}
+			}
+			break;
+		case Entity_Variable:
+			if (e->Variable.is_foreign) {
+				Entity *fl = e->Variable.foreign_library;
+				if (fl != nullptr) {
+					GB_ASSERT_MSG(fl->kind == Entity_LibraryName &&
+					              (fl->flags&EntityFlag_Used),
+					              "%.*s", LIT(entity->token.string));
+					add_dependency_to_set_threaded(c, fl);
+				}
+			}
+			break;
+		}
+	}
+
+	FOR_PTR_SET(e, decl->deps) {
+		add_dependency_to_set_threaded(c, e);
+	}
+
 	return 0;
 }
 
 
 gb_internal void add_dependency_to_set_threaded(Checker *c, Entity *entity) {
-	if (entity == nullptr || entity->min_dep_count.load(std::memory_order_relaxed) > 0) {
+	if (entity == nullptr) {
 		return;
 	}
-	Array<Entity *> *stack = gb_alloc_item(heap_allocator(), Array<Entity *>);
-	array_init(stack, heap_allocator(), 0, 64);
-	array_add(stack, entity);
-	thread_pool_add_task(add_dependency_to_set_worker, stack);
+	thread_pool_add_task(add_dependency_to_set_worker, entity);
 }
 
 
@@ -3059,43 +3675,27 @@ gb_internal void collect_testing_procedures_of_package(Checker *c, AstPackage *p
 	}
 }
 
-gb_internal WORKER_TASK_PROC(add_definitions_to_set_worker) {
-	Checker *c = global_checker_ptr.load(std::memory_order_relaxed);
+gb_internal void generate_minimum_dependency_set_internal(Checker *c, Entity *start) {
+	void (*add_to_set)(Checker *, Entity *) = build_context.no_threaded_checker
+	                                         ? add_dependency_to_set
+	                                         : add_dependency_to_set_threaded;
+
 	Scope *builtin_scope = builtin_pkg->scope;
-	for (Entity *e : *cast(Slice<Entity *> *)data) {
+	for_array(i, c->info.definitions) {
+		Entity *e = c->info.definitions[i];
 		if (e->scope == builtin_scope) {
 			if (e->type == nullptr) {
-				add_dependency_to_set_threaded(c, e);
+				add_to_set(c, e);
 			}
 		} else if (e->kind == Entity_Procedure) {
 			if (e->Procedure.is_export) {
-				add_dependency_to_set_threaded(c, e);
+				add_to_set(c, e);
 			}
 		} else if (e->kind == Entity_Variable) {
 			if (e->Variable.is_export) {
-				add_dependency_to_set_threaded(c, e);
+				add_to_set(c, e);
 			}
 		}
-	}
-	return 0;
-}
-
-gb_internal void generate_minimum_dependency_set_internal(Checker *c, Entity *start) {
-	// auto const &add_to_set = add_dependency_to_set;
-	auto const &add_to_set = add_dependency_to_set_threaded;
-
-	{
-		// NOTE(bill): in parallel, as nearly all definitions are of locals, which add nothing
-		isize const CHUNK_SIZE = 4096;
-		auto chunks = array_make<Slice<Entity *> >(heap_allocator(), 0, c->info.definitions.count/CHUNK_SIZE + 1);
-		defer (array_free(&chunks));
-		for (isize i = 0; i < c->info.definitions.count; i += CHUNK_SIZE) {
-			array_add(&chunks, slice(slice_from_array(c->info.definitions), i, gb_min(i + CHUNK_SIZE, c->info.definitions.count)));
-		}
-		for (Slice<Entity *> &chunk : chunks) {
-			thread_pool_add_task(add_definitions_to_set_worker, &chunk);
-		}
-		thread_pool_wait();
 	}
 
 	for (Entity *e; mpsc_dequeue(&c->info.required_foreign_imports_through_force_queue, &e); /**/) {
@@ -3205,7 +3805,7 @@ gb_internal void generate_minimum_dependency_set_internal(Checker *c, Entity *st
 		}
 	}
 
-	if (build_context.command_kind == Command_test) {
+	if (is_test_context()) {
 		AstPackage *testing_package = get_core_package(&c->info, str_lit("testing"));
 		Scope *testing_scope = testing_package->scope;
 
@@ -3321,10 +3921,17 @@ gb_internal void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	FORCE_ADD_RUNTIME_ENTITIES(!build_context.no_bounds_check,
 		// Bounds checking related procedures
 		str_lit("bounds_check_error"),
+		str_lit("array_len_mismatch_error"),
 		str_lit("matrix_bounds_check_error"),
 		str_lit("slice_expr_error_hi"),
 		str_lit("slice_expr_error_lo_hi"),
 		str_lit("multi_pointer_slice_expr_error"),
+	);
+
+	FORCE_ADD_RUNTIME_ENTITIES(build_context.emit_downcast_assert,
+		// Explicit integer downcast checking related procedures
+		str_lit("downcast_assertion_check_with_context"),
+		str_lit("downcast_assertion_check_contextless"),
 	);
 
 	add_dependency_to_set(c, c->info.instrumentation_enter_entity);
@@ -3351,36 +3958,44 @@ gb_internal gb_inline bool is_entity_a_dependency(Entity *e) {
 	return false;
 }
 
-struct EntityGraphEdgesChunk {
-	PtrMap<Entity *, EntityGraphNode *> *vars;
-	Slice<EntityGraphNode *>             nodes;
-};
+gb_internal Array<EntityGraphNode *> generate_entity_dependency_graph(CheckerInfo *info, Arena *arena) {
+	PtrMap<Entity *, EntityGraphNode *> M_procs = {};
+	PtrMap<Entity *, EntityGraphNode *> M_vars  = {};
+	PtrMap<Entity *, EntityGraphNode *> M_other = {};
 
-// NOTE(bill): A variable depends on every variable reachable from its declaration through procedures and constants,
-// as its initializer may read any of them. Variables are not walked through, as they are ordered by their own edges.
-// Each node's search only reads, and only writes its own successors, so the searches run in parallel.
-gb_internal WORKER_TASK_PROC(generate_entity_dependency_graph_edges_worker) {
-	EntityGraphEdgesChunk *chunk = cast(EntityGraphEdgesChunk *)data;
+	map_init(&M_procs, info->entities.count);
+	defer (map_destroy(&M_procs));
 
-	PtrSet<Entity *> visited = {};
-	defer (ptr_set_destroy(&visited));
-	auto stack = array_make<Entity *>(heap_allocator(), 0, 64);
-	defer (array_free(&stack));
+	map_init(&M_vars, info->entities.count);
+	defer (map_destroy(&M_vars));
 
-	for (EntityGraphNode *n : chunk->nodes) {
-		ptr_set_clear(&visited);
-		array_clear(&stack);
+	map_init(&M_other, info->entities.count);
+	defer (map_destroy(&M_other));
 
-		DeclInfo *decl = decl_info_of_entity(n->entity);
-		if (decl == nullptr) {
+	for_array(i, info->entities) {
+		Entity *e = info->entities[i];
+		if (e == nullptr || !is_entity_a_dependency(e)) {
 			continue;
 		}
-		FOR_PTR_SET(dep, decl->deps) {
-			array_add(&stack, dep);
+		EntityGraphNode *n = arena_alloc_item<EntityGraphNode>(arena);
+		n->entity = e;
+		switch (e->kind) {
+		case Entity_Procedure: map_set(&M_procs, e, n); break;
+		case Entity_Variable:  map_set(&M_vars,  e, n); break;
+		default:               map_set(&M_other, e, n); break;
 		}
+	}
 
-		while (stack.count > 0) {
-			Entity *dep = array_pop(&stack);
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 1");
+	// Calculate edges for graph M
+	for (auto const &entry : M_procs) {
+		EntityGraphNode *n = entry.value;
+		Entity *e = n->entity;
+
+		DeclInfo *decl = decl_info_of_entity(e);
+		GB_ASSERT(decl != nullptr);
+
+		FOR_PTR_SET(dep, decl->deps) {
 			GB_ASSERT(dep != nullptr);
 			if (dep->flags & EntityFlag_Field) {
 				continue;
@@ -3388,62 +4003,65 @@ gb_internal WORKER_TASK_PROC(generate_entity_dependency_graph_edges_worker) {
 			if (!is_entity_a_dependency(dep)) {
 				continue;
 			}
-			if (dep->kind == Entity_Variable) {
-				EntityGraphNode **m = map_get(chunk->vars, dep);
-				// NOTE(bill): a variable naming itself, e.g. `t: struct { next: ^type_of(t) }`, is not an initialization cycle
-				if (m != nullptr && *m != n) {
-					entity_graph_node_set_add(&n->succ, *m);
-				}
-				continue;
+			EntityGraphNode *m = nullptr;
+
+			switch (dep->kind) {
+			case Entity_Procedure: m = map_must_get(&M_procs, dep); break;
+			case Entity_Variable:  m = map_must_get(&M_vars,  dep); break;
+			default:               m = map_must_get(&M_other, dep); break;
 			}
-			if (ptr_set_update(&visited, dep)) {
-				continue;
-			}
-			DeclInfo *dep_decl = decl_info_of_entity(dep);
-			if (dep_decl != nullptr) {
-				FOR_PTR_SET(next, dep_decl->deps) {
-					array_add(&stack, next);
-				}
-			}
-		}
-	}
-	return 0;
-}
-
-gb_internal Array<EntityGraphNode *> generate_entity_dependency_graph(CheckerInfo *info, Arena *arena) {
-	PtrMap<Entity *, EntityGraphNode *> M_vars = {};
-	map_init(&M_vars, info->entities.count);
-	defer (map_destroy(&M_vars));
-
-	auto G = array_make<EntityGraphNode *>(arena_allocator(arena), 0, info->entities.count);
-	for (Entity *e : info->entities) {
-		if (e == nullptr || e->kind != Entity_Variable || !is_entity_a_dependency(e)) {
-			continue;
-		}
-		EntityGraphNode *n = arena_alloc_item<EntityGraphNode>(arena);
-		n->entity = e;
-		map_set(&M_vars, e, n);
-		array_add(&G, n);
-	}
-
-	TIME_SECTION("generate_entity_dependency_graph: Calculate edges");
-
-	isize const CHUNK_SIZE = 32;
-	auto chunks = array_make<EntityGraphEdgesChunk>(heap_allocator(), 0, G.count/CHUNK_SIZE + 1);
-	defer (array_free(&chunks));
-	for (isize i = 0; i < G.count; i += CHUNK_SIZE) {
-		array_add(&chunks, EntityGraphEdgesChunk{&M_vars, slice(slice_from_array(G), i, gb_min(i + CHUNK_SIZE, G.count))});
-	}
-	for (EntityGraphEdgesChunk &chunk : chunks) {
-		thread_pool_add_task(generate_entity_dependency_graph_edges_worker, &chunk);
-	}
-	thread_pool_wait();
-
-	// NOTE: in the order of the nodes, so each node's predecessors are added in the order they were before
-	for (EntityGraphNode *n : G) {
-		FOR_PTR_SET(m, n->succ) {
+			entity_graph_node_set_add(&n->succ, m);
 			entity_graph_node_set_add(&m->pred, n);
 		}
+	}
+
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 2a (init)");
+
+	auto G = array_make<EntityGraphNode *>(arena_allocator(arena), 0, M_procs.count + M_vars.count + M_other.count);
+
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 2b (procs)");
+
+	for (auto const &m_entry : M_procs) {
+		EntityGraphNode *n = m_entry.value;
+
+		// Connect each pred 'p' of 'n' with each succ 's' and from
+		// the procedure node
+		FOR_PTR_SET(p, n->pred) {
+			// Ignore self-cycles
+			if (p == n) {
+				continue;
+			}
+			// Each succ 's' of 'n' becomes a succ of 'p', and
+			// each pred 'p' of 'n' becomes a pred of 's'
+			FOR_PTR_SET(s, n->succ) {
+				// Ignore self-cycles
+				if (s == n) {
+					continue;
+				}
+				if (p->entity->kind == Entity_Procedure &&
+				    s->entity->kind == Entity_Procedure) {
+				    	// NOTE(bill, 2020-11-15): Only care about variable initialization ordering
+				    	// TODO(bill): This is probably wrong!!!!
+					continue;
+				}
+				// IMPORTANT NOTE/TODO(bill, 2020-11-15): These three calls take the majority of the
+				// the time to process
+				entity_graph_node_set_add(&p->succ, s);
+				entity_graph_node_set_add(&s->pred, p);
+				// Remove edge to 'n'
+				entity_graph_node_set_remove(&s->pred, n);
+			}
+
+			// Remove edge to 'n'
+			entity_graph_node_set_remove(&p->succ, n);
+		}
+	}
+
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 2c (vars)");
+
+	for (auto const &m_entry : M_vars) {
+		EntityGraphNode *n = m_entry.value;
+		array_add(&G, n);
 	}
 
 	TIME_SECTION("generate_entity_dependency_graph: Dependency Count Checker");
@@ -3454,11 +4072,33 @@ gb_internal Array<EntityGraphNode *> generate_entity_dependency_graph(CheckerInf
 		GB_ASSERT(n->dep_count >= 0);
 	}
 
+	// f64 succ_count = 0.0;
+	// f64 pred_count = 0.0;
+	// f64 succ_capacity = 0.0;
+	// f64 pred_capacity = 0.0;
+	// f64 succ_max = 0.0;
+	// f64 pred_max = 0.0;
+	// for_array(i, G) {
+	// 	EntityGraphNode *n = G[i];
+	// 	succ_count += n->succ.entries.count;
+	// 	pred_count += n->pred.entries.count;
+	// 	succ_capacity += n->succ.entries.capacity;
+	// 	pred_capacity += n->pred.entries.capacity;
+
+	// 	succ_max = gb_max(succ_max, n->succ.entries.capacity);
+	// 	pred_max = gb_max(pred_max, n->pred.entries.capacity);
+
+	// }
+	// f64 count = cast(f64)G.count;
+	// gb_printf_err(">>>count    pred: %f succ: %f\n", pred_count/count, succ_count/count);
+	// gb_printf_err(">>>capacity pred: %f succ: %f\n", pred_capacity/count, succ_capacity/count);
+	// gb_printf_err(">>>max      pred: %f succ: %f\n", pred_max, succ_max);
+
 	return G;
 }
 
 
-gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d, UntypedExprInfoMap *untyped=nullptr);
+gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d);
 
 
 gb_internal Entity *find_core_entity(Checker *c, String name) {
@@ -3565,6 +4205,217 @@ gb_internal Array<Entity *> proc_group_entities_cloned(CheckerContext *c, Operan
 		return {};
 	}
 	return array_clone(permanent_allocator(), entities);
+}
+
+gb_internal bool token_kind_is_custom_overloadable_binary_operator(TokenKind kind) {
+	switch (kind) {
+	case Token_Add:
+	case Token_Sub:
+	case Token_Mul:
+	case Token_Quo:
+		return true;
+	}
+	return false;
+}
+
+struct ParsedOperatorOverload {
+	OperatorOverloadKind kind;
+	TokenKind binary_kind;
+};
+
+gb_internal ParsedOperatorOverload parse_operator_overload_string(String op) {
+	ParsedOperatorOverload parsed = {};
+	parsed.kind = OperatorOverloadKind_Invalid;
+	parsed.binary_kind = Token_Invalid;
+
+	if (op.len == 0) {
+		return parsed;
+	}
+	if (op == str_lit("[]")) {
+		parsed.kind = OperatorOverloadKind_IndexGet;
+		return parsed;
+	}
+	if (op == str_lit("[]=")) {
+		parsed.kind = OperatorOverloadKind_IndexSet;
+		return parsed;
+	}
+	if (op == str_lit("in") || op == str_lit("for in")) {
+		parsed.kind = OperatorOverloadKind_Iterator;
+		return parsed;
+	}
+
+	for (i32 kind = Token__OperatorBegin+1; kind < Token__OperatorEnd; kind++) {
+		if (!token_kind_is_custom_overloadable_binary_operator(cast(TokenKind)kind)) {
+			continue;
+		}
+		if (token_strings[kind] == op) {
+			parsed.kind = OperatorOverloadKind_Binary;
+			parsed.binary_kind = cast(TokenKind)kind;
+			return parsed;
+		}
+	}
+	return parsed;
+}
+
+gb_internal void add_operator_overload_proc(CheckerContext *c, TokenKind kind, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+
+	if (!token_kind_is_custom_overloadable_binary_operator(kind)) {
+		return;
+	}
+
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	Array<Entity *> *procs = &c->info->operator_overloads[kind];
+	for (Entity *e : *procs) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(procs, proc);
+}
+
+gb_internal Array<Entity *> operator_overload_procs_cloned(CheckerContext *c, TokenKind kind, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	if (!token_kind_is_custom_overloadable_binary_operator(kind)) {
+		return {};
+	}
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->operator_overloads[kind]);
+}
+
+gb_internal void add_index_get_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->index_operator_get_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->index_operator_get_overloads, proc);
+}
+
+gb_internal void add_index_set_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->index_operator_set_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->index_operator_set_overloads, proc);
+}
+
+gb_internal Array<Entity *> index_get_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->index_operator_get_overloads);
+}
+
+gb_internal Array<Entity *> index_set_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->index_operator_set_overloads);
+}
+
+gb_internal void add_iterator_operator_overload_proc(CheckerContext *c, Entity *proc) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(proc != nullptr);
+	GB_ASSERT(proc->kind == Entity_Procedure);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	for (Entity *e : c->info->iterator_operator_overloads) {
+		if (e == proc) {
+			return;
+		}
+	}
+	array_add(&c->info->iterator_operator_overloads, proc);
+}
+
+gb_internal Array<Entity *> iterator_operator_overload_procs_cloned(CheckerContext *c, gbAllocator a) {
+	GB_ASSERT(c != nullptr);
+	MUTEX_GUARD(&c->info->operator_overload_mutex);
+	return array_clone(a, c->info->iterator_operator_overloads);
+}
+
+gb_internal void set_overloaded_operator_call_expr(CheckerContext *c, Ast *expr, Ast *call) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(expr != nullptr);
+	GB_ASSERT(call != nullptr);
+	MUTEX_GUARD(&c->info->overloaded_operator_call_mutex);
+	map_set(&c->info->overloaded_operator_calls, expr, call);
+}
+
+gb_internal Ast *get_overloaded_operator_call_expr(CheckerInfo *info, Ast *expr) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(expr != nullptr);
+	MUTEX_GUARD(&info->overloaded_operator_call_mutex);
+	Ast **found = map_get(&info->overloaded_operator_calls, expr);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_assignment_operation_expr(CheckerContext *c, Ast *assign_stmt, Ast *binary_expr) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	GB_ASSERT(binary_expr != nullptr);
+	MUTEX_GUARD(&c->info->assignment_operation_expr_mutex);
+	map_set(&c->info->assignment_operation_expr_map, assign_stmt, binary_expr);
+}
+
+gb_internal Ast *get_assignment_operation_expr(CheckerInfo *info, Ast *assign_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	MUTEX_GUARD(&info->assignment_operation_expr_mutex);
+	Ast **found = map_get(&info->assignment_operation_expr_map, assign_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_assignment_overloaded_call_expr(CheckerContext *c, Ast *assign_stmt, Ast *call_expr) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	GB_ASSERT(call_expr != nullptr);
+	MUTEX_GUARD(&c->info->assignment_overloaded_call_expr_mutex);
+	map_set(&c->info->assignment_overloaded_call_expr_map, assign_stmt, call_expr);
+}
+
+gb_internal Ast *get_assignment_overloaded_call_expr(CheckerInfo *info, Ast *assign_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(assign_stmt != nullptr);
+	MUTEX_GUARD(&info->assignment_overloaded_call_expr_mutex);
+	Ast **found = map_get(&info->assignment_overloaded_call_expr_map, assign_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
+}
+
+gb_internal void set_range_stmt_iterator_overload_state_entity(CheckerContext *c, Ast *range_stmt, Entity *state_entity) {
+	GB_ASSERT(c != nullptr);
+	GB_ASSERT(range_stmt != nullptr);
+	GB_ASSERT(state_entity != nullptr);
+	MUTEX_GUARD(&c->info->range_stmt_iterator_overload_state_mutex);
+	map_set(&c->info->range_stmt_iterator_overload_state_map, range_stmt, state_entity);
+}
+
+gb_internal Entity *get_range_stmt_iterator_overload_state_entity(CheckerInfo *info, Ast *range_stmt) {
+	GB_ASSERT(info != nullptr);
+	GB_ASSERT(range_stmt != nullptr);
+	MUTEX_GUARD(&info->range_stmt_iterator_overload_state_mutex);
+	Entity **found = map_get(&info->range_stmt_iterator_overload_state_map, range_stmt);
+	if (found) {
+		return *found;
+	}
+	return nullptr;
 }
 
 
@@ -3924,6 +4775,10 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_group_attribute) {
 
 
 gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
+	if (string_starts_with(name, str_lit("deferred_"))) {
+		warning(elem, "Legacy '@(%.*s=...)' attribute; use '#scope_exit(...)' instead", LIT(name));
+	}
+
 	if (name == ATTRIBUTE_USER_TAG_NAME) {
 		ExactValue ev = check_decl_attribute_value(c, value);
 		if (ev.kind != ExactValue_String) {
@@ -4183,7 +5038,33 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		}
 		ac->require_results = true;
 		return true;
-	} else if (name == "disabled") {
+	} else if (name == "operator") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+		if (ev.kind != ExactValue_String) {
+			error(elem, "Expected a string value for '%.*s'", LIT(name));
+			return false;
+		}
+		if (ac->has_operator_overload) {
+			error(elem, "Previous usage of an 'operator' attribute");
+			return false;
+		}
+
+			ParsedOperatorOverload parsed = parse_operator_overload_string(ev.value_string);
+			if (parsed.kind == OperatorOverloadKind_Invalid) {
+				ERROR_BLOCK();
+				error(elem, "Invalid operator '%.*s' for '%.*s'", LIT(ev.value_string), LIT(name));
+				error_line("\tSupported operators for now: '+', '-', '*', '/', '[]', '[]=', 'in'\n");
+				if (ev.value_string == "==" || ev.value_string == "!=") {
+					error_line("\tNote: '==' and '!=' currently use Odin's default comparison rules\n");
+				}
+				return false;
+			}
+
+			ac->has_operator_overload = true;
+			ac->operator_overload_kind = parsed.kind;
+			ac->operator_overload_binary_kind = parsed.binary_kind;
+			return true;
+		} else if (name == "disabled") {
 		ExactValue ev = check_decl_attribute_value(c, value);
 
 		if (ev.kind == ExactValue_Bool) {
@@ -4313,6 +5194,12 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 			error(value, "'%.*s' expects no parameter", LIT(name));
 		}
 		ac->entry_point_only = true;
+		return true;
+	} else if (name == "no_warn_excessive_inlining") {
+		if (value != nullptr) {
+			error(value, "'%.*s' expects no parameter", LIT(name));
+		}
+		ac->no_warn_excessive_inlining = true;
 		return true;
 	} else if (name == "no_instrumentation") {
 		ExactValue ev = check_decl_attribute_value(c, value);
@@ -4672,12 +5559,28 @@ gb_internal DECL_ATTRIBUTE_PROC(asm_decl_attribute) {
 	return false;
 }
 
+#ifndef CLANGD_TU_check_expr
+
+
 #include "check_expr.cpp"
+
+
+#endif
+#ifndef CLANGD_TU_check_builtin
 #include "check_builtin.cpp"
+#endif
+#ifndef CLANGD_TU_check_type
 #include "check_type.cpp"
+#endif
+#ifndef CLANGD_TU_name_canonicalization
 #include "name_canonicalization.cpp"
+#endif
+#ifndef CLANGD_TU_check_decl
 #include "check_decl.cpp"
+#endif
+#ifndef CLANGD_TU_check_stmt
 #include "check_stmt.cpp"
+#endif
 
 
 
@@ -5222,9 +6125,7 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 				}
 			}
 
-			if (c->trial_entities == nullptr) {
-				check_builtin_attributes(c, e, &d->attributes);
-			}
+			check_builtin_attributes(c, e, &d->attributes);
 
 			bool is_exported = entity_visibility_kind != EntityVisiblity_PrivateToFile;
 			add_entity_and_decl_info(c, name, e, d, is_exported);
@@ -5234,7 +6135,9 @@ gb_internal void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 	}
 }
 
-gb_internal void check_add_foreign_block_decl(CheckerContext *ctx, Ast *decl) {
+gb_internal bool collect_file_decls(CheckerContext *ctx, Slice<Ast *> const &decls);
+
+gb_internal bool check_add_foreign_block_decl(CheckerContext *ctx, Ast *decl) {
 	ast_node(fb, ForeignBlockDecl, decl);
 	Ast *foreign_library = fb->foreign_library;
 
@@ -5249,7 +6152,11 @@ gb_internal void check_add_foreign_block_decl(CheckerContext *ctx, Ast *decl) {
 	check_decl_attributes(&c, fb->attributes, foreign_block_decl_attribute, nullptr);
 
 	ast_node(block, BlockStmt, fb->body);
+	if (c.collect_delayed_decls && (c.scope->flags&ScopeFlag_File) != 0) {
+		return collect_file_decls(&c, block->stmts);
+	}
 	check_collect_entities(&c, block->stmts);
+	return false;
 }
 
 gb_internal bool correct_single_type_alias(CheckerContext *c, Entity *e) {
@@ -5257,11 +6164,7 @@ gb_internal bool correct_single_type_alias(CheckerContext *c, Entity *e) {
 		DeclInfo *d = e->decl_info;
 		if (d != nullptr && d->init_expr != nullptr) {
 			Ast *init = d->init_expr;
-			// NOTE: in the scope of its own file, as a package's files may bind a name differently
-			Scope *prev_scope = c->scope;
-			c->scope = d->scope;
 			Entity *alias_of = check_entity_from_ident_or_selector(c, init, true);
-			c->scope = prev_scope;
 			if (alias_of != nullptr && alias_of->kind == Entity_TypeName) {
 				e->kind = Entity_TypeName;
 				return true;
@@ -5294,7 +6197,7 @@ gb_internal bool correct_type_alias_in_scope_forwards(CheckerContext *c, Scope *
 }
 
 
-gb_internal void correct_type_aliases_in_package(CheckerContext *c, AstPackage *pkg) {
+gb_internal void correct_type_aliases_in_scope(CheckerContext *c, Scope *s) {
 	// NOTE(bill, 2022-02-04): This is used to solve the problem caused by type aliases
 	// of type aliases being "confused" as constants
 	//
@@ -5305,12 +6208,8 @@ gb_internal void correct_type_aliases_in_package(CheckerContext *c, AstPackage *
 	// See @TypeAliasingProblem for more information
 	for (;;) {
 		bool corrections = false;
-		corrections |= correct_type_alias_in_scope_backwards(c, pkg->scope);
-		corrections |= correct_type_alias_in_scope_forwards(c, pkg->scope);
-		for (AstFile *f : pkg->files) {
-			corrections |= correct_type_alias_in_scope_backwards(c, f->scope);
-			corrections |= correct_type_alias_in_scope_forwards(c, f->scope);
-		}
+		corrections |= correct_type_alias_in_scope_backwards(c, s);
+		corrections |= correct_type_alias_in_scope_forwards(c, s);
 		if (!corrections) {
 			return;
 		}
@@ -5329,7 +6228,17 @@ gb_internal void check_collect_entities(CheckerContext *c, Slice<Ast *> const &n
 	for_array(decl_index, nodes) {
 		Ast *decl = nodes[decl_index];
 		if (!is_ast_decl(decl) && !is_ast_when_stmt(decl)) {
-			// NOTE: global directives such as '#assert' are queued by `scan_global_decl_sources`
+			if (curr_file && decl->kind == Ast_ExprStmt) {
+				Ast *expr = decl->ExprStmt.expr;
+				if (expr->kind == Ast_CallExpr && expr->CallExpr.proc->kind == Ast_BasicDirective) {
+					if (c->collect_delayed_decls) {
+						if (decl->state_flags & StateFlag_BeenHandled) return;
+						decl->state_flags |= StateFlag_BeenHandled;
+						array_add(&curr_file->delayed_decls_queues[AstDelayQueue_Expr], expr);
+					}
+					continue;
+				}
+			}
 			continue;
 		}
 
@@ -5365,7 +6274,9 @@ gb_internal void check_collect_entities(CheckerContext *c, Slice<Ast *> const &n
 		case_end;
 
 		case_ast_node(fb, ForeignBlockDecl, decl);
-			// NOTE: global ones are resolved like global 'when's, see `resolve_global_decl_sources`
+			if (curr_file != nullptr) {
+				array_add(&curr_file->delayed_decls_queues[AstDelayQueue_ForeignBlock], decl);
+			}
 		case_end;
 
 		default:
@@ -5404,15 +6315,14 @@ gb_internal CheckerContext *create_checker_context(Checker *c) {
 	return ctx;
 }
 
-gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d, UntypedExprInfoMap *untyped) {
+gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
 	GB_ASSERT(e != nullptr);
-	if (e->state == EntityState_Resolved)  {
-		// NOTE: also an alias already overridden by what it aliases, which may have no `DeclInfo`
-		return;
-	}
 	GB_ASSERT(d != nullptr);
 
 	if (d->scope != e->scope) {
+		return;
+	}
+	if (e->state == EntityState_Resolved)  {
 		return;
 	}
 
@@ -5427,7 +6337,6 @@ gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d, 
 	GB_ASSERT(e->pkg != nullptr);
 	ctx->decl = d;
 	ctx->scope = d->scope;
-	ctx->untyped = untyped;
 
 	if (pkg->kind == Package_Init) {
 		if (e->kind != Entity_Procedure && e->token.string == "main") {
@@ -5437,6 +6346,61 @@ gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d, 
 	}
 
 	check_entity_decl(ctx, e, d, nullptr);
+}
+
+gb_internal void check_all_global_entities(Checker *c) {
+	in_single_threaded_checker_stage.store(true, std::memory_order_relaxed);
+	checker_global_entity_timing_reset();
+	checker_global_entity_timing_state.enabled = build_context.show_more_timings;
+	checker_global_variable_timing_state.enabled = build_context.show_more_timings;
+
+	// Entity collection is threaded and the MPSC queue is ordered by worker
+	// completion. Global checking must not depend on that scheduling order;
+	// proc-group aliases need their target groups resolved consistently first.
+	array_sort(c->info.entities, check_global_entity_cmp);
+
+	// NOTE(bill): This must be single threaded
+	// Don't bother trying
+	for_array(i, c->info.entities) {
+		Entity *e = c->info.entities[i];
+		GB_ASSERT(e != nullptr);
+		checker_global_entity_timing_state.loop_entity_count += 1;
+		if (e->flags & EntityFlag_Lazy) {
+			checker_global_entity_timing_state.lazy_skipped_count += 1;
+			continue;
+		}
+		DeclInfo *d = e->decl_info;
+		check_single_global_entity(c, e, d);
+		if (e->type != nullptr && is_type_typed(e->type)) {
+			u64 soa_start = 0;
+			isize soa_completion_count = 0;
+			if (checker_global_entity_timing_state.enabled) {
+				soa_start = time_stamp_time_now();
+			}
+			for (Type *t = nullptr; mpsc_dequeue(&c->soa_types_to_complete, &t); /**/) {
+				complete_soa_type(c, t, false);
+				soa_completion_count += 1;
+			}
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_soa_ticks(time_stamp_time_now() - soa_start, soa_completion_count);
+			}
+
+			u64 layout_start = 0;
+			if (checker_global_entity_timing_state.enabled) {
+				layout_start = time_stamp_time_now();
+			}
+			(void)type_size_of(e->type);
+			(void)type_align_of(e->type);
+			if (checker_global_entity_timing_state.enabled) {
+				checker_global_entity_timing_add_layout_ticks(time_stamp_time_now() - layout_start);
+			}
+		}
+	}
+
+	checker_global_entity_timing_state.enabled = false;
+	checker_global_variable_timing_state.enabled = false;
+	GB_ASSERT(checker_global_entity_timing_state.stack_count == 0);
+	in_single_threaded_checker_stage.store(false, std::memory_order_relaxed);
 }
 
 
@@ -5509,6 +6473,9 @@ gb_internal String path_to_entity_name(String name, String fullpath, bool strip_
 
 
 #if 1
+
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
 
 gb_internal void add_import_dependency_node(Checker *c, Ast *decl, PtrMap<AstPackage *, ImportGraphNode *> *M) {
 	AstPackage *parent_pkg = decl->file()->pkg;
@@ -5586,6 +6553,9 @@ gb_internal Array<ImportGraphNode *> generate_import_dependency_graph(Checker *c
 		AstPackage *p = c->parser->packages[i];
 		for_array(j, p->files) {
 			AstFile *f = p->files[j];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			for_array(k, f->decls) {
 				Ast *decl = f->decls[k];
 				add_import_dependency_node(c, decl, &M);
@@ -5612,6 +6582,286 @@ struct ImportPathItem {
 	AstPackage *pkg;
 	Ast *   decl;
 };
+
+gb_internal gb_inline bool trigger_trace_positions_match(TokenPos const &x, TokenPos const &y) {
+	return x.file_id == y.file_id &&
+	       x.line    == y.line &&
+	       x.column  == y.column &&
+	       x.offset  == y.offset;
+}
+
+gb_internal gb_inline String trigger_trace_import_name(String s) {
+	if (s.len >= 2) {
+		u8 first = s[0];
+		u8 last  = s[s.len-1];
+		if ((first == '"'  && last == '"') ||
+		    (first == '\'' && last == '\'') ||
+		    (first == '`'  && last == '`')) {
+			return substring(s, 1, s.len-1);
+		}
+	}
+	return s;
+}
+
+gb_internal void trigger_trace_push_back(TriggerTraceFrame *frames, i32 *count, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (count == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 n = *count;
+	if (n > 0) {
+		TriggerTraceFrame *prev = &frames[n-1];
+		if (prev->kind == kind &&
+		    trigger_trace_positions_match(prev->pos, pos) &&
+		    prev->name == name) {
+			return;
+		}
+	}
+	if (n >= MAX_TRIGGER_TRACE_FRAMES) {
+		return;
+	}
+
+	frames[n].kind = kind;
+	frames[n].pos  = pos;
+	frames[n].name = name;
+	*count = n+1;
+}
+
+gb_internal void checker_context_clear_trigger_trace(CheckerContext *ctx) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+}
+
+gb_internal void checker_context_copy_trigger_trace(CheckerContext *dst, CheckerContext const *src) {
+	if (dst == nullptr) {
+		return;
+	}
+	dst->trigger_trace_count = 0;
+	if (src == nullptr || src->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(src->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(dst->trigger_trace, src->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	dst->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_set_trigger_trace_from_proc_info(CheckerContext *ctx, ProcInfo const *pi) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+	if (pi == nullptr || pi->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(pi->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(ctx->trigger_trace, pi->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	ctx->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_set_trigger_trace_from_scope(CheckerContext *ctx, Scope const *scope) {
+	if (ctx == nullptr) {
+		return;
+	}
+	ctx->trigger_trace_count = 0;
+	if (scope == nullptr || scope->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(scope->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(ctx->trigger_trace, scope->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	ctx->trigger_trace_count = count;
+}
+
+gb_internal void checker_context_prepend_trigger_trace(CheckerContext *ctx, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (ctx == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (count > 0) {
+		TriggerTraceFrame *first = &ctx->trigger_trace[0];
+		if (first->kind == kind &&
+		    trigger_trace_positions_match(first->pos, pos) &&
+		    first->name == name) {
+			return;
+		}
+	}
+
+	if (count >= MAX_TRIGGER_TRACE_FRAMES) {
+		count = MAX_TRIGGER_TRACE_FRAMES-1;
+	}
+	if (count > 0) {
+		gb_memmove(ctx->trigger_trace+1, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	}
+	ctx->trigger_trace[0].kind = kind;
+	ctx->trigger_trace[0].pos  = pos;
+	ctx->trigger_trace[0].name = name;
+	ctx->trigger_trace_count = count+1;
+}
+
+gb_internal void decl_info_copy_trigger_trace(DeclInfo *decl, CheckerContext const *ctx) {
+	if (decl == nullptr) {
+		return;
+	}
+	decl->trigger_trace_count = 0;
+	if (ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(decl->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	decl->trigger_trace_count = count;
+}
+
+gb_internal void proc_info_copy_trigger_trace(ProcInfo *pi, CheckerContext const *ctx) {
+	if (pi == nullptr) {
+		return;
+	}
+	pi->trigger_trace_count = 0;
+	if (ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	gb_memmove(pi->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	pi->trigger_trace_count = count;
+	decl_info_copy_trigger_trace(pi->decl, ctx);
+}
+
+gb_internal void proc_info_prepend_trigger_trace(ProcInfo *pi, TriggerTraceKind kind, TokenPos pos, String name) {
+	if (pi == nullptr || pos.line == 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(pi->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (count > 0) {
+		TriggerTraceFrame *first = &pi->trigger_trace[0];
+		if (first->kind == kind &&
+		    trigger_trace_positions_match(first->pos, pos) &&
+		    first->name == name) {
+			return;
+		}
+	}
+
+	if (count >= MAX_TRIGGER_TRACE_FRAMES) {
+		count = MAX_TRIGGER_TRACE_FRAMES-1;
+	}
+	if (count > 0) {
+		gb_memmove(pi->trigger_trace+1, pi->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	}
+	pi->trigger_trace[0].kind = kind;
+	pi->trigger_trace[0].pos  = pos;
+	pi->trigger_trace[0].name = name;
+	pi->trigger_trace_count = count+1;
+}
+
+gb_internal void scope_copy_trigger_trace_if_shorter(Scope *scope, CheckerContext const *ctx) {
+	if (scope == nullptr || ctx == nullptr || ctx->trigger_trace_count <= 0) {
+		return;
+	}
+
+	i32 count = gb_clamp(ctx->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (scope->trigger_trace_count > 0 && scope->trigger_trace_count <= count) {
+		return;
+	}
+
+	gb_memmove(scope->trigger_trace, ctx->trigger_trace, count*gb_size_of(TriggerTraceFrame));
+	scope->trigger_trace_count = count;
+}
+
+gb_internal void checker_build_active_import_trigger_traces(Checker *c) {
+	if (c == nullptr) {
+		return;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	PtrSet<AstPackage *> has_incoming = {};
+	ptr_set_init(&has_incoming, c->parser->packages.count);
+	defer (ptr_set_destroy(&has_incoming));
+
+	Array<AstPackage *> queue = {};
+	array_init(&queue, temporary_allocator(), 0, c->parser->packages.count);
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg != nullptr && pkg->scope != nullptr) {
+			pkg->scope->trigger_trace_count = 0;
+		}
+	}
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg == nullptr) {
+			continue;
+		}
+		for_array(j, pkg->files) {
+			AstFile *f = pkg->files[j];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+			for_array(k, f->imports) {
+				Ast *decl = f->imports[k];
+				if (decl == nullptr || decl->kind != Ast_ImportDecl) {
+					continue;
+				}
+				AstPackage *child = decl->ImportDecl.package;
+				if (child != nullptr && child->scope != nullptr) {
+					ptr_set_add(&has_incoming, child);
+				}
+			}
+		}
+	}
+
+	for_array(i, c->parser->packages) {
+		AstPackage *pkg = c->parser->packages[i];
+		if (pkg == nullptr || pkg->scope == nullptr) {
+			continue;
+		}
+		if (!ptr_set_exists(&has_incoming, pkg)) {
+			array_add(&queue, pkg);
+		}
+	}
+
+	for (isize head = 0; head < queue.count; head++) {
+		AstPackage *pkg = queue[head];
+		CheckerContext pkg_ctx = {};
+		checker_context_set_trigger_trace_from_scope(&pkg_ctx, pkg->scope);
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+			for_array(j, f->imports) {
+				Ast *decl = f->imports[j];
+				if (decl == nullptr || decl->kind != Ast_ImportDecl) {
+					continue;
+				}
+
+				ast_node(id, ImportDecl, decl);
+				AstPackage *child = id->package;
+				if (child == nullptr || child->scope == nullptr) {
+					continue;
+				}
+
+				CheckerContext child_ctx = {};
+				checker_context_copy_trigger_trace(&child_ctx, &pkg_ctx);
+				checker_context_prepend_trigger_trace(&child_ctx, TriggerTrace_Import, id->relpath.pos, trigger_trace_import_name(id->relpath.string));
+
+				i32 prev_count = child->scope->trigger_trace_count;
+				scope_copy_trigger_trace_if_shorter(child->scope, &child_ctx);
+				if (child->scope->trigger_trace_count != prev_count) {
+					array_add(&queue, child);
+				}
+			}
+		}
+	}
+}
 
 gb_internal Array<ImportPathItem> find_import_path(Checker *c, AstPackage *start, AstPackage *end, PtrSet<AstPackage *> *visited, gbAllocator allocator) {
 	Array<ImportPathItem> empty_path = {};
@@ -5660,6 +6910,96 @@ gb_internal Array<ImportPathItem> find_import_path(Checker *c, AstPackage *start
 		}
 	}
 	return empty_path;
+}
+
+gb_internal void checker_context_build_import_trigger_trace(CheckerContext *ctx, AstPackage *pkg) {
+	checker_context_clear_trigger_trace(ctx);
+	if (ctx == nullptr || ctx->checker == nullptr || pkg == nullptr || pkg->kind == Package_Init) {
+		return;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	Array<ImportPathItem> best_path = {};
+	for_array(i, ctx->checker->parser->packages) {
+		AstPackage *start = ctx->checker->parser->packages[i];
+		if (start == nullptr || start->kind != Package_Init || start == pkg) {
+			continue;
+		}
+
+		PtrSet<AstPackage *> visited = {};
+		defer (ptr_set_destroy(&visited));
+
+		auto path = find_import_path(ctx->checker, start, pkg, &visited, temporary_allocator());
+		if (path.count == 0) {
+			continue;
+		}
+		if (best_path.count == 0 || path.count < best_path.count) {
+			best_path = path;
+		}
+	}
+
+	for (isize i = best_path.count-1; i >= 0; i--) {
+		ImportPathItem item = best_path[i];
+		if (item.decl == nullptr || item.decl->kind != Ast_ImportDecl) {
+			continue;
+		}
+		ast_node(id, ImportDecl, item.decl);
+		trigger_trace_push_back(ctx->trigger_trace, &ctx->trigger_trace_count, TriggerTrace_Import, id->relpath.pos, trigger_trace_import_name(id->relpath.string));
+	}
+}
+
+gb_internal void checker_context_print_trigger_trace_from(CheckerContext *ctx, i32 start_index) {
+	if (ctx == nullptr) {
+		return;
+	}
+
+	i32 start = gb_clamp(start_index, 0, ctx->trigger_trace_count);
+	for (i32 i = start; i < ctx->trigger_trace_count; i++) {
+		TriggerTraceFrame const &frame = ctx->trigger_trace[i];
+		char const *pos = token_pos_to_string(frame.pos);
+
+		switch (frame.kind) {
+		case TriggerTrace_Use:
+			if (i == 0) {
+				if (frame.name.len > 0) {
+					error_line("\tTriggered by use of '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tTriggered by use at %s\n", pos);
+				}
+			} else {
+				if (frame.name.len > 0) {
+					error_line("\tUsed from '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tUsed from %s\n", pos);
+				}
+			}
+			break;
+
+		case TriggerTrace_Import:
+			if (i == 0) {
+				if (frame.name.len > 0) {
+					error_line("\tTriggered by import '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tTriggered by import at %s\n", pos);
+				}
+			} else {
+				if (frame.name.len > 0) {
+					error_line("\tImported via '%.*s' at %s\n", LIT(frame.name), pos);
+				} else {
+					error_line("\tImported via %s\n", pos);
+				}
+			}
+			break;
+
+		case TriggerTrace_Invalid:
+			break;
+		}
+	}
+}
+
+gb_internal void checker_context_print_trigger_trace(CheckerContext *ctx) {
+	checker_context_print_trigger_trace_from(ctx, 0);
 }
 #endif
 
@@ -5836,25 +7176,9 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 		AstFile *f = decl->file();
 
 		reset_checker_context(&ctx, f, &untyped);
+		ctx.collect_delayed_decls = false;
 
 		GB_ASSERT(ctx.scope == e->scope);
-
-		AttributeContext ac = {};
-		check_decl_attributes(&ctx, fl->attributes, foreign_import_decl_attribute, &ac);
-		if (ac.require_declaration) {
-			mpsc_enqueue(&ctx.info->required_foreign_imports_through_force_queue, e);
-			add_entity_use(&ctx, nullptr, e);
-		}
-		if (ac.foreign_import_priority_index != 0) {
-			e->LibraryName.priority_index = ac.foreign_import_priority_index;
-		}
-		if (ac.ignore_duplicates) {
-			e->LibraryName.ignore_duplicates = true;
-		}
-		String extra_linker_flags = string_trim_whitespace(ac.extra_linker_flags);
-		if (extra_linker_flags.len != 0) {
-			e->LibraryName.extra_linker_flags = extra_linker_flags;
-		}
 
 		if (fl->fullpaths.count == 0) {
 			String base_dir = dir_from_path(decl->file()->fullpath);
@@ -5880,7 +7204,7 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 				String file_str = op.value.value_string;
 				file_str = string_trim_whitespace(file_str);
 				String fullpath = file_str;
-				if (!is_arch_wasm() || string_ends_with(file_str, str_lit(".o"))) {
+				if (!is_arch_wasm() || is_wasm_foreign_library_file_path(file_str)) {
 					String foreign_path = {};
 					bool ok = determine_path_from_string(nullptr, decl, base_dir, file_str, &foreign_path, /*use error not syntax_error*/true);
 					if (ok) {
@@ -5936,7 +7260,7 @@ gb_internal void check_foreign_import_fullpaths(Checker *c) {
 			module_name = foreign_library->LibraryName.paths[0];
 		}
 
-		if (!string_ends_with(module_name, str_lit(".o"))) {
+		if (!is_wasm_foreign_library_file_path(module_name)) {
 			name = concatenate3_strings(permanent_allocator(), module_name, WASM_MODULE_NAME_SEPARATOR, name);
 		}
 		e->Procedure.link_name = name;
@@ -5968,21 +7292,11 @@ gb_internal void check_add_foreign_import_decl(CheckerContext *ctx, Ast *decl) {
 	GB_ASSERT(fl->library_name.pos.line != 0);
 	fl->library_name.string = library_name;
 
-	// NOTE(bill): Only 'export' is needed to declare the entity; the attribute values are evaluated in
-	// `check_foreign_import_fullpaths` as the globals they may name are not all collected yet
-	bool is_export = false;
-	for (Ast *attr : fl->attributes) {
-		if (attr->kind != Ast_Attribute) continue;
-		for (Ast *elem : attr->Attribute.elems) {
-			Ast *name = elem->kind == Ast_FieldValue ? elem->FieldValue.field : elem;
-			if (name->kind == Ast_Ident && name->Ident.token.string == "export") {
-				is_export = true;
-			}
-		}
-	}
+	AttributeContext ac = {};
+	check_decl_attributes(ctx, fl->attributes, foreign_import_decl_attribute, &ac);
 
 	Scope *scope = parent_scope;
-	if (is_export) {
+	if (ac.is_export) {
 		scope = parent_scope->parent;
 	}
 
@@ -5992,8 +7306,183 @@ gb_internal void check_add_foreign_import_decl(CheckerContext *ctx, Ast *decl) {
 	add_entity_flags_from_file(ctx, e, parent_scope);
 	add_entity(ctx, scope, nullptr, e);
 
+
+	if (ac.require_declaration) {
+		mpsc_enqueue(&ctx->info->required_foreign_imports_through_force_queue, e);
+		add_entity_use(ctx, nullptr, e);
+	}
+	if (ac.foreign_import_priority_index != 0) {
+		e->LibraryName.priority_index = ac.foreign_import_priority_index;
+	}
+	if (ac.ignore_duplicates) {
+		e->LibraryName.ignore_duplicates = true;
+	}
+	String extra_linker_flags = string_trim_whitespace(ac.extra_linker_flags);
+	if (extra_linker_flags.len != 0) {
+		e->LibraryName.extra_linker_flags = extra_linker_flags;
+	}
+
 	mpsc_enqueue(&ctx->info->foreign_imports_to_check_fullpaths, e);
 
+}
+
+// Returns true if a new package is present
+gb_internal bool collect_file_decls(CheckerContext *ctx, Slice<Ast *> const &decls);
+gb_internal bool collect_file_decls_from_when_stmt(CheckerContext *ctx, AstWhenStmt *ws);
+
+gb_internal bool collect_when_stmt_from_file(CheckerContext *ctx, AstWhenStmt *ws) {
+	Operand operand = {Addressing_Invalid};
+	if (!ws->is_cond_determined) {
+		check_expr(ctx, &operand, ws->cond);
+		if (operand.mode != Addressing_Invalid && !is_type_boolean(operand.type)) {
+			error(ws->cond, "Non-boolean condition in 'when' statement");
+		}
+		if (operand.mode != Addressing_Constant) {
+			error(ws->cond, "Non-constant condition in 'when' statement");
+		}
+
+		ws->is_cond_determined = true;
+		ws->determined_cond = operand.value.kind == ExactValue_Bool && operand.value.value_bool;
+	}
+
+	if (ws->body == nullptr || ws->body->kind != Ast_BlockStmt) {
+		error(ws->cond, "Invalid body for 'when' statement");
+	} else {
+		if (ws->determined_cond) {
+			check_collect_entities(ctx, ws->body->BlockStmt.stmts);
+			return true;
+		} else if (ws->else_stmt) {
+			switch (ws->else_stmt->kind) {
+			case Ast_BlockStmt:
+				check_collect_entities(ctx, ws->else_stmt->BlockStmt.stmts);
+				return true;
+			case Ast_WhenStmt:
+				collect_when_stmt_from_file(ctx, &ws->else_stmt->WhenStmt);
+				return true;
+			default:
+				error(ws->else_stmt, "Invalid 'else' statement in 'when' statement");
+				break;
+			}
+		}
+	}
+
+	return false;
+}
+
+gb_internal bool collect_file_decls_from_when_stmt(CheckerContext *ctx, AstWhenStmt *ws) {
+	Operand operand = {Addressing_Invalid};
+	if (!ws->is_cond_determined) {
+		check_expr(ctx, &operand, ws->cond);
+		if (operand.mode != Addressing_Invalid && !is_type_boolean(operand.type)) {
+			error(ws->cond, "Non-boolean condition in 'when' statement");
+		}
+		if (operand.mode != Addressing_Constant) {
+			error(ws->cond, "Non-constant condition in 'when' statement");
+		}
+
+		ws->is_cond_determined = true;
+		ws->determined_cond = operand.value.kind == ExactValue_Bool && operand.value.value_bool;
+	}
+
+	if (ws->body == nullptr || ws->body->kind != Ast_BlockStmt) {
+		error(ws->cond, "Invalid body for 'when' statement");
+	} else {
+		if (ws->determined_cond) {
+			return collect_file_decls(ctx, ws->body->BlockStmt.stmts);
+		} else if (ws->else_stmt) {
+			switch (ws->else_stmt->kind) {
+			case Ast_BlockStmt:
+				return collect_file_decls(ctx, ws->else_stmt->BlockStmt.stmts);
+			case Ast_WhenStmt:
+				return collect_file_decls_from_when_stmt(ctx, &ws->else_stmt->WhenStmt);
+			default:
+				error(ws->else_stmt, "Invalid 'else' statement in 'when' statement");
+				break;
+			}
+		}
+	}
+
+	return false;
+}
+
+
+gb_internal bool collect_file_decl(CheckerContext *ctx, Ast *decl) {
+	GB_ASSERT(ctx->scope->flags&ScopeFlag_File);
+
+	AstFile *curr_file = ctx->scope->file;
+	GB_ASSERT(curr_file != nullptr);
+
+	if (decl->state_flags & StateFlag_BeenHandled) {
+		return false;
+	}
+
+	switch (decl->kind) {
+	case_ast_node(vd, ValueDecl, decl);
+		check_collect_value_decl(ctx, decl);
+	case_end;
+
+	case_ast_node(id, ImportDecl, decl);
+		check_add_import_decl(ctx, decl);
+	case_end;
+
+	case_ast_node(fl, ForeignImportDecl, decl);
+		check_add_foreign_import_decl(ctx, decl);
+	case_end;
+
+	case_ast_node(fb, ForeignBlockDecl, decl);
+		GB_ASSERT(ctx->collect_delayed_decls);
+		decl->state_flags |= StateFlag_BeenHandled;
+		array_add(&curr_file->delayed_decls_queues[AstDelayQueue_ForeignBlock], decl);
+	case_end;
+
+	case_ast_node(ws, WhenStmt, decl);
+		if (!ws->is_cond_determined) {
+			if (collect_when_stmt_from_file(ctx, ws)) {
+				return true;
+			}
+
+			CheckerContext nctx = *ctx;
+			nctx.collect_delayed_decls = true;
+
+			if (collect_file_decls_from_when_stmt(&nctx, ws)) {
+				return true;
+			}
+		} else {
+			CheckerContext nctx = *ctx;
+			nctx.collect_delayed_decls = true;
+
+			if (collect_file_decls_from_when_stmt(&nctx, ws)) {
+				return true;
+			}
+		}
+	case_end;
+
+	case_ast_node(es, ExprStmt, decl);
+		GB_ASSERT(ctx->collect_delayed_decls);
+		decl->state_flags |= StateFlag_BeenHandled;
+		if (es->expr->kind == Ast_CallExpr) {
+			ast_node(ce, CallExpr, es->expr);
+			if (ce->proc->kind == Ast_BasicDirective) {
+				array_add(&curr_file->delayed_decls_queues[AstDelayQueue_Expr], es->expr);
+			}
+		}
+	case_end;
+	}
+
+	return false;
+}
+
+gb_internal bool collect_file_decls(CheckerContext *ctx, Slice<Ast *> const &decls) {
+	GB_ASSERT(ctx->scope->flags&ScopeFlag_File);
+
+	for_array(i, decls) {
+		if (collect_file_decl(ctx, decls[i])) {
+			correct_type_aliases_in_scope(ctx, ctx->scope);
+			return true;
+		}
+	}
+	correct_type_aliases_in_scope(ctx, ctx->scope);
+	return false;
 }
 
 gb_internal GB_COMPARE_PROC(sort_file_by_name) {
@@ -6004,23 +7493,44 @@ gb_internal GB_COMPARE_PROC(sort_file_by_name) {
 	return string_compare(x_name, y_name);
 }
 
+gb_internal void check_register_package(Checker *c, AstPackage *p) {
+	if (string_map_get(&c->info.packages, p->fullpath) != nullptr) {
+		return;
+	}
+
+	Scope *scope = create_scope_from_package(&c->builtin_ctx, p);
+	p->decl_info = make_decl_info(scope, c->builtin_ctx.decl);
+	string_map_set(&c->info.packages, p->fullpath, p);
+
+	if (scope->flags&ScopeFlag_Init) {
+		c->info.init_package = p;
+		c->info.init_scope = p->scope;
+	}
+	if (p->kind == Package_Runtime) {
+		GB_ASSERT(c->info.runtime_package == nullptr);
+		c->info.runtime_package = p;
+	}
+}
+
+gb_internal void check_create_file_scopes_for_package(Checker *c, AstPackage *pkg) {
+	array_sort(pkg->files, sort_file_by_name);
+
+	isize total_pkg_decl_count = 0;
+	for_array(j, pkg->files) {
+		AstFile *f = pkg->files[j];
+		string_map_set(&c->info.files, f->fullpath, f);
+
+		create_scope_from_file(nullptr, f);
+		total_pkg_decl_count += f->total_file_decl_count;
+	}
+
+	mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+}
+
 gb_internal void check_create_file_scopes(Checker *c) {
 	for_array(i, c->parser->packages) {
 		AstPackage *pkg = c->parser->packages[i];
-
-		array_sort(pkg->files, sort_file_by_name);
-
-		isize total_pkg_decl_count = 0;
-		for_array(j, pkg->files) {
-			AstFile *f = pkg->files[j];
-			f->index_in_pkg = cast(i32)j;
-			string_map_set(&c->info.files, f->fullpath, f);
-
-			create_scope_from_file(nullptr, f);
-			total_pkg_decl_count += f->total_file_decl_count;
-		}
-
-		mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+		check_create_file_scopes_for_package(c, pkg);
 	}
 }
 
@@ -6032,6 +7542,9 @@ struct CollectEntityWorkerData {
 
 gb_global CollectEntityWorkerData *collect_entity_worker_data;
 
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
+
 gb_internal WORKER_TASK_PROC(check_collect_entities_all_worker_proc) {
 	CollectEntityWorkerData *wd = &collect_entity_worker_data[current_thread_index()];
 
@@ -6040,9 +7553,13 @@ gb_internal WORKER_TASK_PROC(check_collect_entities_all_worker_proc) {
 	UntypedExprInfoMap *untyped = &wd->untyped;
 
 	AstFile *f = cast(AstFile *)data;
+	if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+		return 0;
+	}
 	reset_checker_context(ctx, f, untyped);
 
 	check_collect_entities(ctx, f->decls);
+	GB_ASSERT(ctx->collect_delayed_decls == false);
 
 	add_untyped_expressions(&c->info, ctx->untyped);
 
@@ -6107,7 +7624,255 @@ gb_internal void check_export_entities(Checker *c) {
 	thread_pool_wait();
 }
 
-#include "checker_global.cpp"
+gb_internal void check_collect_entities_for_package(Checker *c, AstPackage *pkg) {
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
+
+	UntypedExprInfoMap untyped = {};
+	map_init(&untyped);
+	defer (map_destroy(&untyped));
+
+	for_array(i, pkg->files) {
+		AstFile *f = pkg->files[i];
+		if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+			continue;
+		}
+
+		reset_checker_context(&ctx, f, &untyped);
+		check_collect_entities(&ctx, f->decls);
+		add_untyped_expressions(&c->info, &untyped);
+	}
+
+	check_export_entities_in_pkg(&ctx, pkg, &untyped);
+}
+
+gb_internal void check_prepare_new_packages(Checker *c, isize first_package_index) {
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_register_package(c, c->parser->packages[i]);
+	}
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_create_file_scopes_for_package(c, c->parser->packages[i]);
+	}
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_collect_entities_for_package(c, c->parser->packages[i]);
+	}
+}
+
+struct DeferredBuildTagResolverData {
+	Checker *checker;
+	AstPackage *pkg;
+	bool missing_is_false;
+};
+
+gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f) {
+	return (f->flags & AstFile_ExcludedByDeferredBuildTags) != 0;
+}
+
+gb_internal bool ast_file_has_deferred_build_tags(AstFile *f) {
+	return (f->flags & AstFile_HasDeferredBuildTags) != 0;
+}
+
+gb_internal BuildTagConditionValue checker_when_expr_resolver(void *user_data, TokenPos pos, String name, ExactValue *value) {
+	auto *data = cast(DeferredBuildTagResolverData *)user_data;
+	char const *key = string_intern_cstring(name);
+	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+		map_set(&build_context.used_defined_values, key, true);
+		*value = *v;
+		return BuildTagCondition_True;
+	}
+
+	Entity *e = scope_lookup_current(data->pkg->scope, string_interner_insert(name));
+	if (e == nullptr) {
+		if (data->missing_is_false) {
+			*value = exact_value_bool(false);
+			return BuildTagCondition_True;
+		}
+		return BuildTagCondition_Unknown;
+	}
+
+	if (e->kind == Entity_Constant && e->decl_info != nullptr && e->state != EntityState_Resolved) {
+		check_single_global_entity(data->checker, e, e->decl_info);
+	}
+
+	if (e->kind != Entity_Constant) {
+		error(pos, "#+when: '%.*s' must be a constant", LIT(name));
+		return BuildTagCondition_False;
+	}
+	if (e->state != EntityState_Resolved) {
+		return data->missing_is_false ? BuildTagCondition_False : BuildTagCondition_Unknown;
+	}
+
+	*value = e->Constant.value;
+	return BuildTagCondition_True;
+}
+
+gb_internal BuildTagConditionValue check_evaluate_deferred_build_tags(Checker *c, AstFile *f, bool missing_is_false) {
+	DeferredBuildTagResolverData data = {};
+	data.checker = c;
+	data.pkg = f->pkg;
+	data.missing_is_false = missing_is_false;
+
+	BuildTagConditionValue result = BuildTagCondition_True;
+	for (String tag : f->deferred_build_tags) {
+		BuildTagConditionValue tag_result = evaluate_build_tag_condition(ast_token(f->pkg_decl), tag);
+		if (result == BuildTagCondition_False || tag_result == BuildTagCondition_False) {
+			result = BuildTagCondition_False;
+		} else if (result == BuildTagCondition_Unknown || tag_result == BuildTagCondition_Unknown) {
+			result = BuildTagCondition_Unknown;
+		} else {
+			result = BuildTagCondition_True;
+		}
+		if (result == BuildTagCondition_False) {
+			break;
+		}
+	}
+	if (result != BuildTagCondition_False) {
+		for (WhenExpr *expr : f->deferred_when_exprs) {
+			ExactValue when_val = {};
+			BuildTagConditionValue expr_result = evaluate_when_tag_expr(expr, checker_when_expr_resolver, &data, &when_val);
+			if (expr_result == BuildTagCondition_True) {
+				if (when_val.kind == ExactValue_Bool && !when_val.value_bool) {
+					result = BuildTagCondition_False;
+				}
+			} else if (expr_result == BuildTagCondition_Unknown) {
+				result = BuildTagCondition_Unknown;
+			} else {
+				result = BuildTagCondition_False;
+			}
+			if (result == BuildTagCondition_False) {
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+gb_internal bool check_collect_file_decls_from_ast_file(CheckerContext *ctx, AstPackage *pkg, AstFile *f, UntypedExprInfoMap *untyped) {
+	reset_checker_context(ctx, f, untyped);
+	ctx->collect_delayed_decls = true;
+
+	for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_Import]) {
+		check_add_import_decl(ctx, decl);
+	}
+	array_clear(&f->delayed_decls_queues[AstDelayQueue_Import]);
+
+	if (collect_file_decls(ctx, f->decls)) {
+		check_export_entities_in_pkg(ctx, pkg, untyped);
+		return true;
+	}
+
+	add_untyped_expressions(ctx->info, untyped);
+	return false;
+}
+
+gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> const &files,
+                                                isize first_package_index, CheckerContext *ctx,
+                                                UntypedExprInfoMap *untyped) {
+	for (AstFile *f : files) {
+		parse_setup_deferred_file_imports(c->parser, f);
+	}
+	thread_pool_wait();
+	check_prepare_new_packages(c, first_package_index);
+
+	for (AstFile *f : files) {
+		f->flags &= ~AstFile_HasDeferredBuildTags;
+		if (ast_file_is_excluded_by_build_tags(f)) {
+			continue;
+		}
+		check_collect_file_decls_from_ast_file(ctx, f->pkg, f, untyped);
+	}
+
+	for (AstFile *f : files) {
+		check_export_entities_in_pkg(ctx, f->pkg, untyped);
+	}
+}
+
+gb_internal bool check_prepare_deferred_build_tag_files(Checker *c) {
+	if (!c->parser->has_deferred_build_tag_files.load(std::memory_order_relaxed)) {
+		return false;
+	}
+
+	bool changed = false;
+
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
+
+	UntypedExprInfoMap untyped = {};
+	map_init(&untyped);
+	defer (map_destroy(&untyped));
+
+	for (;;) {
+		bool progress = false;
+		bool pending = false;
+		isize package_count = c->parser->packages.count;
+
+		Array<AstFile *> active = {};
+		array_init(&active, temporary_allocator(), 0, 0);
+
+		for (isize i = 0; i < package_count; i++) {
+			AstPackage *pkg = c->parser->packages[i];
+			for (AstFile *f : pkg->files) {
+				if (!ast_file_has_deferred_build_tags(f)) {
+					continue;
+				}
+
+				BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, false);
+				if (result == BuildTagCondition_Unknown) {
+					pending = true;
+					continue;
+				}
+
+				changed = true;
+				progress = true;
+				if (result == BuildTagCondition_False) {
+					f->flags &= ~AstFile_HasDeferredBuildTags;
+					f->flags |= AstFile_ExcludedByDeferredBuildTags;
+				} else {
+					array_add(&active, f);
+				}
+			}
+		}
+
+		if (active.count > 0) {
+			check_activate_deferred_files(c, active, package_count, &ctx, &untyped);
+		}
+
+		bool new_packages = c->parser->packages.count > package_count;
+		if ((!pending && !new_packages) || !progress) {
+			break;
+		}
+	}
+
+	isize package_count = c->parser->packages.count;
+	Array<AstFile *> active = {};
+	array_init(&active, temporary_allocator(), 0, 0);
+	for (isize i = 0; i < package_count; i++) {
+		AstPackage *pkg = c->parser->packages[i];
+		for (AstFile *f : pkg->files) {
+			if (!ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+
+			BuildTagConditionValue result = check_evaluate_deferred_build_tags(c, f, true);
+			if (result == BuildTagCondition_False) {
+				changed = true;
+				f->flags &= ~AstFile_HasDeferredBuildTags;
+				f->flags |= AstFile_ExcludedByDeferredBuildTags;
+			} else {
+				changed = true;
+				array_add(&active, f);
+			}
+		}
+	}
+	if (active.count > 0) {
+		check_activate_deferred_files(c, active, package_count, &ctx, &untyped);
+		if (c->parser->packages.count > package_count) {
+			changed |= check_prepare_deferred_build_tag_files(c);
+		}
+	}
+
+	return changed;
+}
 
 gb_internal void check_import_entities(Checker *c) {
 	TEMPORARY_ALLOCATOR_GUARD();
@@ -6165,46 +7930,99 @@ gb_internal void check_import_entities(Checker *c) {
 		array_add(&package_order, n);
 	}
 
+	TIME_SECTION("check_import_entities - collect file decls");
 	CheckerContext ctx = {};
 	init_checker_context(&ctx, c);
-	defer (destroy_checker_context(&ctx));
 
 	UntypedExprInfoMap untyped = {};
 	defer (map_destroy(&untyped));
 
-	TIME_SECTION("check_import_entities - imports");
-	// NOTE(bill): every import first, as resolving a 'when' may check declarations in any package
-	u64 stage_start = global_import_stage_begin();
+	isize min_pkg_index = 0;
 	for (isize pkg_index = 0; pkg_index < package_order.count; pkg_index++) {
-		AstPackage *pkg = package_order[pkg_index]->pkg;
+		ImportGraphNode *node = package_order[pkg_index];
+		AstPackage *pkg = node->pkg;
 		pkg->order = 1+pkg_index;
 
-		for (AstFile *f : pkg->files) {
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
+			if (check_collect_file_decls_from_ast_file(&ctx, pkg, f, &untyped)) {
+				pkg_index = min_pkg_index-1;
+				break;
+			}
+		}
+		if (pkg_index < 0) {
+			continue;
+		}
+		min_pkg_index = pkg_index;
+	}
+
+	if (check_prepare_deferred_build_tag_files(c)) {
+		check_import_entities(c);
+		return;
+	}
+
+	checker_build_active_import_trigger_traces(c);
+
+	TIME_SECTION("check_import_entities - check delayed entities");
+	for (isize pkg_index = 0; pkg_index < package_order.count; pkg_index++) {
+		ImportGraphNode *node = package_order[pkg_index];
+		GB_ASSERT(node->scope->flags&ScopeFlag_Pkg);
+		AstPackage *pkg = node->scope->pkg;
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			reset_checker_context(&ctx, f, &untyped);
+
 			for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_Import]) {
 				check_add_import_decl(&ctx, decl);
 			}
 			array_clear(&f->delayed_decls_queues[AstDelayQueue_Import]);
 			add_untyped_expressions(ctx.info, &untyped);
 		}
-	}
-	global_import_stage_end(GlobalImportStage_Imports, stage_start);
 
-	TIME_SECTION("check_import_entities - resolve 'when' and 'foreign' blocks");
-	resolve_global_decl_sources(c, package_order);
-
-	TIME_SECTION("check_import_entities - check delayed entities");
-	for (ImportGraphNode *node : package_order) {
-		GB_ASSERT(node->scope->flags&ScopeFlag_Pkg);
-		AstPackage *pkg = node->scope->pkg;
-
-		stage_start = global_import_stage_begin();
-		correct_type_aliases_in_package(&ctx, pkg);
-		global_import_stage_end(GlobalImportStage_TypeAliases, stage_start);
-
-		stage_start = global_import_stage_begin();
-		for (AstFile *f : pkg->files) {
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			if (ast_file_is_excluded_by_build_tags(f) || ast_file_has_deferred_build_tags(f)) {
+				continue;
+			}
 			reset_checker_context(&ctx, f, &untyped);
+			correct_type_aliases_in_scope(&ctx, pkg->scope);
+		}
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			reset_checker_context(&ctx, f, &untyped);
+
+			ctx.collect_delayed_decls = true;
+
+			bool will_recheck_foreign_block = false;
+			for (Ast *decl : f->delayed_decls_queues[AstDelayQueue_ForeignBlock]) {
+				if (check_add_foreign_block_decl(&ctx, decl)) {
+					pkg_index -= 1;    // Re-check package
+					will_recheck_foreign_block = true;
+					break;
+				}
+			}
+
+			if (will_recheck_foreign_block) {
+				break;
+			}
+
+			array_clear(&f->delayed_decls_queues[AstDelayQueue_ForeignBlock]);
+		}
+
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			reset_checker_context(&ctx, f, &untyped);
+			if (ctx.trigger_trace_count == 0) {
+				checker_context_build_import_trigger_trace(&ctx, pkg);
+			}
 
 			for (Ast *expr : f->delayed_decls_queues[AstDelayQueue_Expr]) {
 				Operand o = {};
@@ -6214,7 +8032,6 @@ gb_internal void check_import_entities(Checker *c) {
 
 			add_untyped_expressions(ctx.info, &untyped);
 		}
-		global_import_stage_end(GlobalImportStage_DelayedExprs, stage_start);
 	}
 }
 
@@ -6409,7 +8226,11 @@ gb_internal void check_procedure_later_from_entity(Checker *c, Entity *e, char c
 	pi->file  = e->file;
 	pi->token = e->token;
 	pi->decl  = e->decl_info;
-	pi->type  = proc_entity_full_type(e);
+	pi->type  = e->type;
+	pi->trigger_trace_count = gb_clamp(e->decl_info->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+	if (pi->trigger_trace_count > 0) {
+		gb_memmove(pi->trigger_trace, e->decl_info->trigger_trace, pi->trigger_trace_count*gb_size_of(TriggerTraceFrame));
+	}
 
 	Ast *pl = e->decl_info->proc_lit;
 	GB_ASSERT(pl != nullptr);
@@ -6455,6 +8276,8 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		break;
 	}
 	pi->decl->proc_checked_state.store(ProcCheckedState_InProgress);
+	bool procedure_timing_enabled = checker_procedure_body_timing_state.enabled;
+	u64 context_setup_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	GB_ASSERT(pi->type->kind == Type_Proc);
 	TypeProc *pt = &pi->type->Proc;
@@ -6486,12 +8309,22 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 	defer (destroy_checker_context(&ctx));
 	reset_checker_context(&ctx, pi->file, untyped);
 	ctx.decl = pi->decl;
+	if (pi->trigger_trace_count > 0) {
+		checker_context_set_trigger_trace_from_proc_info(&ctx, pi);
+	} else if (pi->decl != nullptr && pi->decl->trigger_trace_count > 0) {
+		CheckerContext trace_ctx = {};
+		trace_ctx.trigger_trace_count = gb_clamp(pi->decl->trigger_trace_count, 0, MAX_TRIGGER_TRACE_FRAMES);
+		gb_memmove(trace_ctx.trigger_trace, pi->decl->trigger_trace, trace_ctx.trigger_trace_count*gb_size_of(TriggerTraceFrame));
+		checker_context_copy_trigger_trace(&ctx, &trace_ctx);
+	}
 
 	bool bounds_check    = (pi->tags & ProcTag_bounds_check)    != 0;
 	bool no_bounds_check = (pi->tags & ProcTag_no_bounds_check) != 0;
 
 	bool type_assert    = (pi->tags & ProcTag_type_assert)    != 0;
 	bool no_type_assert = (pi->tags & ProcTag_no_type_assert) != 0;
+	bool downcast_assert    = (pi->tags & ProcTag_downcast_assert)    != 0;
+	bool no_downcast_assert = (pi->tags & ProcTag_no_downcast_assert) != 0;
 
 	if (bounds_check) {
 		ctx.state_flags |= StateFlag_bounds_check;
@@ -6509,7 +8342,24 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		ctx.state_flags &= ~StateFlag_type_assert;
 	}
 
+	if (downcast_assert) {
+		ctx.state_flags |= StateFlag_downcast_assert;
+		ctx.state_flags &= ~StateFlag_no_downcast_assert;
+	} else if (no_downcast_assert) {
+		ctx.state_flags |= StateFlag_no_downcast_assert;
+		ctx.state_flags &= ~StateFlag_downcast_assert;
+	}
+
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_ContextSetup, time_stamp_time_now() - context_setup_start);
+	}
+
+	u64 body_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 	bool body_was_checked = check_proc_body(&ctx, pi->token, pi->decl, pi->type, pi->body);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_note_body(pi, time_stamp_time_now() - body_start, body_was_checked);
+	}
+	u64 post_body_start = procedure_timing_enabled ? time_stamp_time_now() : 0;
 
 	if (body_was_checked) {
 		pi->decl->proc_checked_state.store(ProcCheckedState_Checked);
@@ -6529,17 +8379,6 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		}
 	}
 
-	// NOTE(bill): the nested procedures that waited for this body, see `check_proc_info_worker_proc`
-	mutex_lock(&pi->decl->next_mutex);
-	Array<ProcInfo *> nested = pi->decl->nested_to_check;
-	pi->decl->nested_to_check = {};
-	pi->decl->nested_to_check.allocator = heap_allocator();
-	mutex_unlock(&pi->decl->next_mutex);
-	for (ProcInfo *nested_pi : nested) {
-		thread_pool_add_task(check_proc_info_worker_proc, nested_pi);
-	}
-	array_free(&nested);
-
 	add_untyped_expressions(&c->info, ctx.untyped);
 
 	rw_mutex_shared_lock(&ctx.decl->deps_mutex);
@@ -6550,6 +8389,9 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		}
 	}
 	rw_mutex_shared_unlock(&ctx.decl->deps_mutex);
+	if (procedure_timing_enabled) {
+		checker_procedure_body_timing_add(CheckerProcedureBodyTiming_PostBody, time_stamp_time_now() - post_body_start);
+	}
 
 	return true;
 }
@@ -6701,18 +8543,8 @@ gb_internal WORKER_TASK_PROC(check_proc_info_worker_proc) {
 		if (parent->kind == Entity_Procedure && (parent->flags & EntityFlag_ProcBodyChecked) == 0) {
 			Type *pt = base_type(parent->type);
 			if (!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized) {
-				// NOTE(bill): waits for the parent's body to be checked, which then adds it again,
-				// rather than adding itself again and again until then
-				DeclInfo *pd = pi->decl->parent;
-				mutex_lock(&pd->next_mutex);
-				bool waiting = (parent->flags & EntityFlag_ProcBodyChecked) == 0;
-				if (waiting) {
-					array_add(&pd->nested_to_check, pi);
-				}
-				mutex_unlock(&pd->next_mutex);
-				if (waiting) {
-					return 1;
-				}
+				thread_pool_add_task(check_proc_info_worker_proc, pi);
+				return 1;
 			}
 		}
 	}
@@ -6737,6 +8569,11 @@ gb_internal void check_init_worker_data(Checker *c) {
 
 gb_internal void check_procedure_bodies(Checker *c) {
 	GB_ASSERT(c != nullptr);
+	checker_procedure_body_timing_reset();
+	checker_procedure_body_timing_state.enabled = build_context.show_more_timings && build_context.no_threaded_checker;
+	if (checker_procedure_body_timing_state.enabled) {
+		checker_procedure_body_timing_state.initial_queue_count = c->procs_to_check.count;
+	}
 
 	u32 thread_count = cast(u32)global_thread_pool.threads.count;
 	if (build_context.no_threaded_checker) {
@@ -6746,9 +8583,14 @@ gb_internal void check_procedure_bodies(Checker *c) {
 	if (thread_count == 1) {
 		UntypedExprInfoMap *untyped = &check_procedure_bodies_worker_data[0].untyped;
 		for_array(i, c->procs_to_check) {
+			if (checker_procedure_body_timing_state.enabled) {
+				checker_procedure_body_timing_state.dispatch_count += 1;
+			}
 			consume_proc_info(c, c->procs_to_check[i], untyped);
 		}
 		array_clear(&c->procs_to_check);
+		GB_ASSERT(checker_procedure_body_timing_state.statement_stack_count == 0);
+		checker_procedure_body_timing_state.enabled = false;
 
 		debugf("Total Procedure Bodies Checked: %td\n", total_bodies_checked.load(std::memory_order_relaxed));
 		return;
@@ -6766,6 +8608,7 @@ gb_internal void check_procedure_bodies(Checker *c) {
 	thread_pool_wait();
 
 	global_procedure_body_in_worker_queue = false;
+	checker_procedure_body_timing_state.enabled = false;
 }
 gb_internal void add_untyped_expressions(CheckerInfo *cinfo, UntypedExprInfoMap *untyped) {
 	if (untyped == nullptr) {
@@ -6775,7 +8618,7 @@ gb_internal void add_untyped_expressions(CheckerInfo *cinfo, UntypedExprInfoMap 
 		Ast *expr = entry.key;
 		ExprInfo *info = entry.value;
 		if (expr != nullptr && info != nullptr) {
-			per_thread_array_add(&cinfo->checker->global_untyped_queue, UntypedExprInfo{expr, info});
+			mpsc_enqueue(&cinfo->checker->global_untyped_queue, UntypedExprInfo{expr, info});
 		}
 	}
 	map_clear(untyped);
@@ -6833,14 +8676,8 @@ gb_internal void check_deferred_procedures(Checker *c) {
 			continue;
 		}
 
-		bool src_poly = is_type_polymorphic_or_specialized_proc(src->type);
-		bool dst_poly = is_type_polymorphic_or_specialized_proc(dst->type);
-		if (dst_poly && !src_poly) {
-			error(src->token, "A polymorphic deferred procedure '%.*s' requires the initial procedure '%.*s' to be polymorphic as well", LIT(dst->token.string), LIT(src->token.string));
-			continue;
-		}
-		if (dst_poly && dst_kind == DeferredProcedure_none) {
-			error(src->token, "'deferred_none' cannot be used with a polymorphic deferred procedure, as it has no inputs from which to determine its polymorphic types");
+		if (is_type_polymorphic(src->type) || is_type_polymorphic(dst->type)) {
+			error(src->token, "'%s' cannot be used with a polymorphic procedure", attribute);
 			continue;
 		}
 
@@ -6902,17 +8739,22 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				GB_ASSERT(src_params->kind == Type_Tuple);
 				GB_ASSERT(dst_params->kind == Type_Tuple);
 
-				if (src_poly || dst_poly || are_types_identical(src_params, dst_params)) {
+				if (are_types_identical(src_params, dst_params)) {
 					// Okay!
 				} else {
 					gbString s = type_to_string(src_params);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, src_params},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
@@ -6932,17 +8774,22 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				GB_ASSERT(src_results->kind == Type_Tuple);
 				GB_ASSERT(dst_params->kind == Type_Tuple);
 
-				if (src_poly || dst_poly || are_types_identical(src_results, dst_params)) {
+				if (are_types_identical(src_results, dst_params)) {
 					// Okay!
 				} else {
 					gbString s = type_to_string(src_results);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, src_results},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
@@ -6989,21 +8836,59 @@ gb_internal void check_deferred_procedures(Checker *c) {
 				GB_ASSERT(offset == len);
 
 
-				if (src_poly || dst_poly || are_types_identical(tsrc, dst_params)) {
+				if (are_types_identical(tsrc, dst_params)) {
 					// Okay!
 				} else {
 					gbString s = type_to_string(tsrc);
 					gbString d = type_to_string(dst_params);
+					TypeDiagnosticString type_strings[] = {
+						{&d, dst_params},
+						{&s, tsrc},
+					};
+					add_type_package_provenance(type_strings, gb_count_of(type_strings));
 					error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
 					      LIT(dst->token.string), LIT(src->token.string),
-					      d, s
+					      *type_strings[0].value, *type_strings[1].value
 					);
-					gb_string_free(d);
-					gb_string_free(s);
+					gb_string_free(*type_strings[0].value);
+					gb_string_free(*type_strings[1].value);
 					continue;
 				}
 			} break;
 		}
+
+		ScopeExitContract contract = {};
+		contract.policy = ScopeExitPolicy_Implicit;
+		contract.cleanup = dst;
+		contract.pos = src->token.pos;
+		bool bind_inputs = dst_kind == DeferredProcedure_in ||
+		                   dst_kind == DeferredProcedure_in_out ||
+		                   dst_kind == DeferredProcedure_in_by_ptr ||
+		                   dst_kind == DeferredProcedure_in_out_by_ptr;
+		bool bind_results = dst_kind == DeferredProcedure_out ||
+		                    dst_kind == DeferredProcedure_in_out ||
+		                    dst_kind == DeferredProcedure_out_by_ptr ||
+		                    dst_kind == DeferredProcedure_in_out_by_ptr;
+		bool bindings_by_pointer = dst_kind == DeferredProcedure_in_by_ptr ||
+		                           dst_kind == DeferredProcedure_out_by_ptr ||
+		                           dst_kind == DeferredProcedure_in_out_by_ptr;
+		Type *scope_src_type = base_type(src->type);
+		isize input_count = scope_src_type->Proc.params != nullptr ? scope_src_type->Proc.params->Tuple.variables.count : 0;
+		isize result_count = scope_src_type->Proc.results != nullptr ? scope_src_type->Proc.results->Tuple.variables.count : 0;
+		isize binding_count = (bind_inputs ? input_count : 0) + (bind_results ? result_count : 0);
+		contract.bindings = slice_make<ScopeExitBinding>(permanent_allocator(), binding_count);
+		isize binding_index = 0;
+		if (bind_inputs) {
+			for (isize i = 0; i < input_count; i++) {
+				contract.bindings[binding_index++] = ScopeExitBinding{ScopeExitBinding_Input, cast(i32)i, bindings_by_pointer};
+			}
+		}
+		if (bind_results) {
+			for (isize i = 0; i < result_count; i++) {
+				contract.bindings[binding_index++] = ScopeExitBinding{ScopeExitBinding_Result, cast(i32)i, bindings_by_pointer};
+			}
+		}
+		src->Procedure.scope_exit_contract = contract;
 	}
 
 }
@@ -7273,22 +9158,6 @@ gb_internal void handle_raddbg_type_view(Checker *c, RaddbgTypeView const &type_
 	array_add(&c->info.raddbg_type_views, RaddbgTypeView{type, view});
 }
 
-gb_internal GB_COMPARE_PROC(raddbg_type_view_cmp) {
-	RaddbgTypeView const *x = cast(RaddbgTypeView const *)a;
-	RaddbgTypeView const *y = cast(RaddbgTypeView const *)b;
-	Entity *xe = (x->type && x->type->kind == Type_Named) ? x->type->Named.type_name : nullptr;
-	Entity *ye = (y->type && y->type->kind == Type_Named) ? y->type->Named.type_name : nullptr;
-	if (xe != nullptr && ye != nullptr && xe != ye) {
-		return entity_source_order_cmp(xe, ye);
-	}
-	u64 xh = type_hash_canonical_type(x->type);
-	u64 yh = type_hash_canonical_type(y->type);
-	if (xh != yh) {
-		return xh < yh ? -1 : +1;
-	}
-	return string_compare(x->view, y->view);
-}
-
 gb_internal void check_objc_context_provider_procedures(Checker *c) {
 	for (Entity *e = nullptr; mpsc_dequeue(&c->procs_with_objc_context_provider_to_check, &e); /**/) {
 		GB_ASSERT(e->kind == Entity_TypeName);
@@ -7384,11 +9253,19 @@ gb_internal bool check_unique_package_names(Checker *c) {
 }
 
 gb_internal void check_add_entities_from_queues(Checker *c) {
-	per_thread_array_gather(&c->info.entity_queue, &c->info.entities);
+	isize cap = c->info.entities.count + c->info.entity_queue.count.load(std::memory_order_relaxed);
+	array_reserve(&c->info.entities, cap);
+	for (Entity *e; mpsc_dequeue(&c->info.entity_queue, &e); /**/) {
+		array_add(&c->info.entities, e);
+	}
 }
 
 gb_internal void check_add_definitions_from_queues(Checker *c) {
-	per_thread_array_gather(&c->info.definition_queue, &c->info.definitions);
+	isize cap = c->info.definitions.count + c->info.definition_queue.count.load(std::memory_order_relaxed);
+	array_reserve(&c->info.definitions, cap);
+	for (Entity *e; mpsc_dequeue(&c->info.definition_queue, &e); /**/) {
+		array_add(&c->info.definitions, e);
+	}
 }
 
 gb_internal void check_merge_queues_into_arrays(Checker *c) {
@@ -7401,7 +9278,40 @@ gb_internal void check_merge_queues_into_arrays(Checker *c) {
 }
 
 gb_internal GB_COMPARE_PROC(init_procedures_cmp) {
-	return entity_source_order_cmp(*(Entity **)a, *(Entity **)b);
+	int cmp = 0;
+	Entity *x = *(Entity **)a;
+	Entity *y = *(Entity **)b;
+	if (x == y) {
+		cmp = 0;
+		return cmp;
+	}
+
+	if (x->pkg != y->pkg) {
+		isize order_x = x->pkg ? x->pkg->order : 0;
+		isize order_y = y->pkg ? y->pkg->order : 0;
+		cmp = isize_cmp(order_x, order_y);
+		if (cmp) {
+			return cmp;
+		}
+	}
+	if (x->file != y->file) {
+		String fullpath_x = x->file ? x->file->fullpath : (String{});
+		String fullpath_y = y->file ? y->file->fullpath : (String{});
+		String file_x = filename_from_path(fullpath_x);
+		String file_y = filename_from_path(fullpath_y);
+
+		cmp = string_compare(file_x, file_y);
+		if (cmp) {
+			return cmp;
+		}
+	}
+
+
+	cmp = u64_cmp(x->order_in_src, y->order_in_src);
+	if (cmp) {
+		return cmp;
+	}
+	return i32_cmp(x->token.pos.offset, y->token.pos.offset);
 }
 
 gb_internal GB_COMPARE_PROC(fini_procedures_cmp) {
@@ -7458,48 +9368,56 @@ gb_internal void check_update_dependency_tree_for_procedures(Checker *c) {
 	}
 }
 #else
-// NOTE: post-order, so a declaration has the dependencies of all those nested in it before they are added to its parent
-gb_internal void check_walk_all_dependencies_post_order(DeclInfo *decl) {
+gb_internal void check_add_dependency_root(DeclInfo *decl, PtrSet<DeclInfo *> *roots, Array<DeclInfo *> *root_list) {
+	if (decl == nullptr) {
+		return;
+	}
+	while (decl->parent != nullptr) {
+		decl = decl->parent;
+	}
+	if (!ptr_set_update(roots, decl)) {
+		array_add(root_list, decl);
+	}
+}
+
+gb_internal void check_walk_all_dependencies_sequential(DeclInfo *decl) {
+	if (decl == nullptr) {
+		return;
+	}
 	for (DeclInfo *child = decl->next_child; child != nullptr; child = child->next_sibling) {
-		check_walk_all_dependencies_post_order(child);
+		check_walk_all_dependencies_sequential(child);
 	}
 	add_deps_from_child_to_parent(decl);
 }
 
-// NOTE(bill): in chunks, as with a task for each entity, adding the tasks was most of the work
-struct CheckWalkDependenciesChunk {
-	DeclInfo **decls;    // either these
-	Entity **  entities; // or the declarations of these
-	isize      count;
-};
-
-gb_internal WORKER_TASK_PROC(check_walk_all_dependencies_worker_proc) {
-	CheckWalkDependenciesChunk *chunk = cast(CheckWalkDependenciesChunk *)data;
-	for (isize i = 0; i < chunk->count; i++) {
-		DeclInfo *decl = chunk->decls != nullptr ? chunk->decls[i] : chunk->entities[i]->decl_info;
-		if (decl != nullptr) {
-			check_walk_all_dependencies_post_order(decl);
-		}
+gb_internal WORKER_TASK_PROC(check_dependency_root_worker) {
+	if (data == nullptr) {
+		return 0;
 	}
+	check_walk_all_dependencies_sequential(cast(DeclInfo *)data);
 	return 0;
 }
 
 gb_internal void check_update_dependency_tree_for_procedures(Checker *c) {
-	isize const CHUNK_SIZE = 256;
-	auto chunks = array_make<CheckWalkDependenciesChunk>(heap_allocator(), 0, c->info.entities.count/CHUNK_SIZE + 16);
-	defer (array_free(&chunks));
+	TEMPORARY_ALLOCATOR_GUARD();
+
+	Array<DeclInfo *> roots = {};
+	array_init(&roots, temporary_allocator(), 0, c->nested_proc_lits.count + c->info.entities.count);
+	PtrSet<DeclInfo *> root_set = {};
+	ptr_set_init(&root_set, c->nested_proc_lits.count + c->info.entities.count);
+	defer (ptr_set_destroy(&root_set));
 
 	mutex_lock(&c->nested_proc_lits_mutex);
-	for (isize i = 0; i < c->nested_proc_lits.count; i += CHUNK_SIZE) {
-		array_add(&chunks, CheckWalkDependenciesChunk{c->nested_proc_lits.data + i, nullptr, gb_min(CHUNK_SIZE, c->nested_proc_lits.count - i)});
+	for (DeclInfo *decl : c->nested_proc_lits) {
+		check_add_dependency_root(decl, &root_set, &roots);
 	}
 	mutex_unlock(&c->nested_proc_lits_mutex);
-	for (isize i = 0; i < c->info.entities.count; i += CHUNK_SIZE) {
-		array_add(&chunks, CheckWalkDependenciesChunk{nullptr, c->info.entities.data + i, gb_min(CHUNK_SIZE, c->info.entities.count - i)});
+	for (Entity *e : c->info.entities) {
+		check_add_dependency_root(e->decl_info, &root_set, &roots);
 	}
 
-	for (CheckWalkDependenciesChunk &chunk : chunks) {
-		thread_pool_add_task(check_walk_all_dependencies_worker_proc, &chunk);
+	for (DeclInfo *root : roots) {
+		thread_pool_add_task(check_dependency_root_worker, root);
 	}
 	thread_pool_wait();
 }
@@ -7582,18 +9500,7 @@ gb_internal void check_parsed_files(Checker *c) {
 	// Map full filepaths to Scopes
 	for_array(i, c->parser->packages) {
 		AstPackage *p = c->parser->packages[i];
-		Scope *scope = create_scope_from_package(&c->builtin_ctx, p);
-		p->decl_info = make_decl_info(scope, c->builtin_ctx.decl);
-		string_map_set(&c->info.packages, p->fullpath, p);
-
-		if (scope->flags&ScopeFlag_Init) {
-			c->info.init_package = p;
-			c->info.init_scope = scope;
-		}
-		if (p->kind == Package_Runtime) {
-			GB_ASSERT(c->info.runtime_package == nullptr);
-			c->info.runtime_package = p;
-		}
+		check_register_package(c, p);
 	}
 
 	TIME_SECTION("init worker data");
@@ -7614,36 +9521,11 @@ gb_internal void check_parsed_files(Checker *c) {
 	TIME_SECTION("export entities - post");
 	check_export_entities(c);
 
-	// NOTE: no global name is declared from here on, so their scopes are read without locking
-	for (AstPackage *pkg : c->parser->packages) {
-		pkg->scope->flags |= ScopeFlag_ReadOnly;
-		for (AstFile *f : pkg->files) {
-			f->scope->flags |= ScopeFlag_ReadOnly;
-		}
-	}
-	builtin_pkg->scope->flags    |= ScopeFlag_ReadOnly;
-	intrinsics_pkg->scope->flags |= ScopeFlag_ReadOnly;
-	config_pkg->scope->flags     |= ScopeFlag_ReadOnly;
-
 	TIME_SECTION("add entities from packages");
 	check_merge_queues_into_arrays(c);
 
-	TIME_SECTION("sort global entities");
-	// NOTE: the queues are filled by parallel workers, so their order differs between runs
-	array_sort(c->info.entities, init_procedures_cmp);
-
 	TIME_SECTION("check all global entities");
-	isize entity_count = c->info.entities.count;
 	check_all_global_entities(c);
-
-	// NOTE(bill): lazy entities are added once checked, which with several threads is in no fixed order
-	gb_sort_array(c->info.entities.data + entity_count, c->info.entities.count - entity_count, init_procedures_cmp);
-
-	if (build_context.internal_global_entity_graph) {
-		TIME_SECTION("print global entity graph");
-		print_global_groups(&global_groups);
-	}
-	destroy_global_groups(&global_groups);
 
 	TIME_SECTION("init preload");
 	init_preload(c);
@@ -7730,7 +9612,7 @@ gb_internal void check_parsed_files(Checker *c) {
 	thread_pool_wait();
 
 	TIME_SECTION("check entry point");
-	if (build_context.build_mode == BuildMode_Executable && !build_context.no_entry_point && build_context.command_kind != Command_test) {
+	if (build_context.build_mode == BuildMode_Executable && !build_context.no_entry_point && !is_test_context()) {
 		Scope *s = c->info.init_scope;
 		GB_ASSERT(s != nullptr);
 		GB_ASSERT(s->flags&ScopeFlag_Init);
@@ -7763,16 +9645,13 @@ gb_internal void check_parsed_files(Checker *c) {
 
 	debugf("Total Procedure Bodies Checked: %td\n", total_bodies_checked.load(std::memory_order_relaxed));
 
-	TIME_SECTION("check unique link names");
-	check_link_name_uses(c);
-
 	TIME_SECTION("check unique package names");
 	bool package_names_are_unique = check_unique_package_names(c);
 
 	TIME_SECTION("sanity checks");
 	check_merge_queues_into_arrays(c);
-	GB_ASSERT(per_thread_array_count(&c->info.entity_queue) == 0);
-	GB_ASSERT(per_thread_array_count(&c->info.definition_queue) == 0);
+	GB_ASSERT(c->info.entity_queue.count.load(std::memory_order_relaxed) == 0);
+	GB_ASSERT(c->info.definition_queue.count.load(std::memory_order_relaxed) == 0);
 
 	TIME_SECTION("check instrumentation calls");
 	{
@@ -7786,10 +9665,7 @@ gb_internal void check_parsed_files(Checker *c) {
 
 
 	TIME_SECTION("add untyped expression values");
-	auto untyped = array_make<UntypedExprInfo>(heap_allocator());
-	defer (array_free(&untyped));
-	per_thread_array_gather(&c->global_untyped_queue, &untyped);
-	for (UntypedExprInfo const &u : untyped) {
+	for (UntypedExprInfo u = {}; mpsc_dequeue(&c->global_untyped_queue, &u); /**/) {
 		GB_ASSERT(u.expr != nullptr && u.info != nullptr);
 		if (is_type_typed(u.info->type)) {
 			compiler_error("%s (type %s) is typed!", expr_to_string(u.expr), type_to_string(u.info->type));
@@ -7867,16 +9743,8 @@ gb_internal void check_parsed_files(Checker *c) {
 	}
 
 	TIME_SECTION("collate type info stuff");
-	{
-		auto views = array_make<RaddbgTypeView>(heap_allocator());
-		defer (array_free(&views));
-		for (RaddbgTypeView type_view; mpsc_dequeue(&c->info.raddbg_type_views_queue, &type_view); /**/) {
-			array_add(&views, type_view);
-		}
-		array_sort(views, raddbg_type_view_cmp);
-		for (RaddbgTypeView const &type_view : views) {
-			handle_raddbg_type_view(c, type_view);
-		}
+	for (RaddbgTypeView type_view; mpsc_dequeue(&c->info.raddbg_type_views_queue, &type_view); /**/) {
+		handle_raddbg_type_view(c, type_view);
 	}
 
 

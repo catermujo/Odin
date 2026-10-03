@@ -149,7 +149,9 @@ gb_internal bool type_set_update(TypeSet *s, TypeInfoPair pair) { // returns tru
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -191,7 +193,9 @@ gb_internal bool type_set_update_with_mutex(TypeSet *s, TypeInfoPair pair, RWSpi
 	GB_ASSERT(hash_index < s->capacity);
 	for (usize i = 0; i < s->capacity; i++) {
 		TypeInfoPair *key = &s->keys[hash_index];
-		GB_ASSERT(!are_types_identical_unique_tuples(key->type, pair.type));
+		if (are_types_identical_unique_tuples(key->type, pair.type)) {
+			return true;
+		}
 		if (key->hash == TYPE_SET_TOMBSTONE || key->hash == 0) {
 			*key = pair;
 			s->count++;
@@ -458,6 +462,9 @@ gb_internal void write_canonical_params(TypeWriter *w, Type *params) {
 
 		switch (v->kind) {
 		case Entity_Variable:
+			if (v->flags&EntityFlag_ByPtr) {
+				type_writer_appendc(w, CANONICAL_PARAM_BY_PTR);
+			}
 			if (v->flags&EntityFlag_CVarArg) {
 				type_writer_appendc(w, CANONICAL_PARAM_C_VARARG);
 			}
@@ -510,7 +517,9 @@ gb_internal void write_canonical_params(TypeWriter *w, Type *params) {
 						}
 					}
 				}
-				write_canonical_exact_value(w, v->Constant.value);
+				gbString s = exact_value_to_string(v->Constant.value, 1<<16);
+				type_writer_append(w, s, gb_string_length(s));
+				gb_string_free(s);
 			}
 			break;
 		default:
@@ -521,69 +530,21 @@ gb_internal void write_canonical_params(TypeWriter *w, Type *params) {
 	return;
 }
 
-gb_internal void write_canonical_exact_value(TypeWriter *w, ExactValue const &v);
-
-gb_internal void write_canonical_constant_expr(TypeWriter *w, Ast *expr) {
-	if (expr->tav.mode == Addressing_Constant) {
-		write_canonical_exact_value(w, expr->tav.value);
-		return;
-	}
-	gbString s = write_expr_to_string(gb_string_make(heap_allocator(), ""), expr, false);
-	type_writer_append(w, s, gb_string_length(s));
-	gb_string_free(s);
-}
-
-gb_internal void write_canonical_exact_value(TypeWriter *w, ExactValue const &v) {
-	if (v.kind == ExactValue_Compound && v.value_compound != nullptr && v.value_compound->kind == Ast_CompoundLit) {
-		ast_node(cl, CompoundLit, v.value_compound);
-		type_writer_appendb(w, '{');
-		for_array(i, cl->elems) {
-			if (i > 0) {
-				type_writer_appendc(w, CANONICAL_FIELD_SEPARATOR);
-			}
-			Ast *elem = cl->elems[i];
-			if (elem->kind == Ast_FieldValue) {
-				Ast *field = elem->FieldValue.field;
-				if (field->kind == Ast_Ident) {
-					type_writer_append(w, field->Ident.token.string.text, field->Ident.token.string.len);
-				} else if (is_ast_range(field)) {
-					write_canonical_constant_expr(w, field->BinaryExpr.left);
-					type_writer_append(w, field->BinaryExpr.op.string.text, field->BinaryExpr.op.string.len);
-					write_canonical_constant_expr(w, field->BinaryExpr.right);
-				} else {
-					write_canonical_constant_expr(w, field);
-				}
-				type_writer_appendc(w, "=");
-				elem = elem->FieldValue.value;
-			}
-			write_canonical_constant_expr(w, elem);
-		}
-		type_writer_appendb(w, '}');
-		return;
-	}
-	if (v.kind == ExactValue_Variant && v.value_variant != nullptr) {
-		Ast *expr = v.value_variant;
-		bool is_self = expr->tav.value.kind == ExactValue_Variant && expr->tav.value.value_variant == expr;
-		if (expr->tav.mode == Addressing_Constant && !is_self) {
-			write_type_to_canonical_string(w, expr->tav.type);
-			type_writer_appendc(w, "=");
-			write_canonical_exact_value(w, expr->tav.value);
-			return;
-		}
-	}
-	if (v.kind == ExactValue_Typeid) {
-		write_type_to_canonical_string(w, v.value_typeid);
-		return;
-	}
-	gbString s = exact_value_to_string(v, 1<<16);
-	type_writer_append(w, s, gb_string_length(s));
-	gb_string_free(s);
-}
-
 gb_internal u64 type_hash_canonical_type(Type *type) {
 	if (type == nullptr) {
 		return 0;
 	}
+
+	// Hash aliases identically to their base types.
+	while (type->kind == Type_Named &&
+	       type->Named.type_name != nullptr &&
+	       type->Named.type_name->TypeName.is_type_alias) {
+		type = type->Named.base;
+		if (type == nullptr) {
+			return 0;
+		}
+	}
+
 	u64 prev_hash = type->canonical_hash.load(std::memory_order_relaxed);
 	if (prev_hash != 0) {
 		return prev_hash;
@@ -658,9 +619,9 @@ gb_internal void write_canonical_parent_prefix(TypeWriter *w, Entity *e) {
 			Entity *p = e->parent_proc_decl.load(std::memory_order_relaxed)->entity;
 			write_canonical_parent_prefix(w, p);
 			type_writer_append(w, p->token.string.text, p->token.string.len);
-			if (is_type_polymorphic_or_specialized_proc(proc_entity_full_type(p))) {
+			if (is_type_polymorphic(p->type)) {
 				type_writer_appendc(w, CANONICAL_TYPE_SEPARATOR);
-				write_type_to_canonical_string(w, proc_entity_full_type(p));
+				write_type_to_canonical_string(w, p->type);
 			}
 			type_writer_appendc(w, CANONICAL_NAME_SEPARATOR);
 
@@ -688,9 +649,9 @@ gb_internal void write_canonical_parent_prefix(TypeWriter *w, Entity *e) {
 		type_writer_append(w, e->token.string.text, e->token.string.len);
 	}
 
-	if (is_type_polymorphic_or_specialized_proc(proc_entity_full_type(e))) {
+	if (is_type_polymorphic(e->type)) {
 		type_writer_appendc(w, CANONICAL_TYPE_SEPARATOR);
-		write_type_to_canonical_string(w, proc_entity_full_type(e));
+		write_type_to_canonical_string(w, e->type);
 	}
 	type_writer_appendc(w, CANONICAL_NAME_SEPARATOR);
 
@@ -828,9 +789,9 @@ write_base_name:
 	case Entity_AsmTemplate:
 	case Entity_Variable:
 		type_writer_append(w, e->token.string.text, e->token.string.len);
-		if (is_type_polymorphic_or_specialized_proc(proc_entity_full_type(e))) {
+		if (is_type_polymorphic(e->type)) {
 			type_writer_appendc(w, CANONICAL_TYPE_SEPARATOR);
-			write_type_to_canonical_string(w, proc_entity_full_type(e));
+			write_type_to_canonical_string(w, e->type);
 		}
 		break;
 
@@ -998,10 +959,11 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 			write_canonical_params(w, type->Struct.polymorphic_params);
 		}
 
-		if (type->Struct.is_packed)      type_writer_appendc(w, "#packed");
-		if (type->Struct.is_raw_union)   type_writer_appendc(w, "#raw_union");
-		if (type->Struct.is_all_or_none) type_writer_appendc(w, "#all_or_none");
-		if (type->Struct.custom_min_field_align != 0) type_writer_append_fmt(w, "#min_field_align(%lld)", cast(long long)type->Struct.custom_min_field_align);
+			if (type->Struct.is_packed)      type_writer_appendc(w, "#packed");
+			if (type->Struct.is_raw_union)   type_writer_appendc(w, "#raw_union");
+			if (type->Struct.is_no_copy)     type_writer_appendc(w, "#no_copy");
+			if (type->Struct.is_all_or_none) type_writer_appendc(w, "#all_or_none");
+			if (type->Struct.custom_min_field_align != 0) type_writer_append_fmt(w, "#min_field_align(%lld)", cast(long long)type->Struct.custom_min_field_align);
 		if (type->Struct.custom_max_field_align != 0) type_writer_append_fmt(w, "#max_field_align(%lld)", cast(long long)type->Struct.custom_max_field_align);
 		if (type->Struct.custom_align != 0)           type_writer_append_fmt(w, "#align(%lld)",           cast(long long)type->Struct.custom_align);
 		type_writer_appendb(w, '{');
@@ -1054,7 +1016,9 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		return;
 
 	case Type_Proc:
-		type_writer_appendc(w, "proc");
+		// a closure ('lambda') is a distinct type from a same-signature proc (2-word value, captures an
+		// environment). It must hash and compare differently, otherwise the two collide in type-keyed caches.
+		type_writer_appendc(w, type->Proc.is_closure ? "lambda" : "proc");
 		if (default_calling_convention() != type->Proc.calling_convention) {
 			type_writer_appendc(w, "\"");
 			type_writer_appendc(w, proc_calling_convention_strings[type->Proc.calling_convention]);
@@ -1105,7 +1069,7 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		write_canonical_params(w, type);
 		return;
 	default:
-		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_strings[type->kind]));
+		GB_PANIC("unknown type kind %d %.*s", type->kind, LIT(type_kind_strings[type->kind]));
 		break;
 	}
 
