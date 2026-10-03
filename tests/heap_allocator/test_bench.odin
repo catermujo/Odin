@@ -642,6 +642,26 @@ test_orphaned_huge_segment_with_remote_free :: proc() {
 	log.info("Orphaned huge segment with remote free test succeeded.")
 }
 
+test_adopted_huge_segment_freed_before_larger_request :: proc() {
+	bytes: []byte
+	worker := thread.create_and_start_with_data(&bytes, proc(data: rawptr) {
+		(^[]byte)(data)^ = make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 2, runtime.heap_allocator())
+	})
+	thread.join(worker)
+	thread.destroy(worker)
+
+	// DUMBAI: Adopt the live orphan before freeing it, then request more space than its slab could provide.
+	large := make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 4, runtime.heap_allocator())
+	delete(bytes, runtime.heap_allocator())
+	larger := make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 8, runtime.heap_allocator())
+	verify_zeroed(larger)
+	larger[len(larger)-1] = 0xAA
+	expect(larger[len(larger)-1] == 0xAA)
+	delete(large, runtime.heap_allocator())
+	delete(larger, runtime.heap_allocator())
+	log.info("Adopted huge segment freed before larger request test succeeded.")
+}
+
 test_single_alloc_and_resize_incremental :: proc(start, target: int) {
 	log.infof("Testing allocation of %i bytes, resizing by increments of one until %i is reached.", start, target)
 	allocator := context.allocator
@@ -1008,6 +1028,7 @@ main :: proc() {
 
 			test_orphaned_segment_with_remote_frees()
 			test_orphaned_huge_segment_with_remote_free()
+			test_adopted_huge_segment_freed_before_larger_request()
 
 			// Reset the heap, removing any of the dirty slabs before the next tests.
 			runtime.compact_local_heap()

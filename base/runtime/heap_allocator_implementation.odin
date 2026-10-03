@@ -1346,9 +1346,14 @@ heap_adopt_orphan :: proc "contextless" (bin_size: int, class: Heap_Slab_Class) 
 			}
 
 			segment.may_return = segment.free_slabs == len(segment.slabs)
-			if segment.slab_size_class == .Huge && segment.may_return {
-				heap_free_segment(segment)
-				segment = nil
+			if segment.slab_size_class == .Huge {
+				if segment.may_return {
+					heap_free_segment(segment)
+					segment = nil
+				} else {
+					// DUMBAI: Huge slabs have request-specific capacities and must be returned on their final free.
+					segment.may_return = true
+				}
 			}
 		}
 	}
