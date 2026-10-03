@@ -5,6 +5,7 @@ package tests_heap_allocator
 
 import "base:intrinsics"
 import "base:runtime"
+import "base:sanitizer"
 import "core:flags"
 import "core:fmt"
 import "core:log"
@@ -662,6 +663,29 @@ test_adopted_huge_segment_freed_before_larger_request :: proc() {
 	log.info("Adopted huge segment freed before larger request test succeeded.")
 }
 
+test_released_huge_segment_clears_address_poison :: proc() {
+	when .Address in ODIN_SANITIZER_FLAGS && .Thread not_in ODIN_SANITIZER_FLAGS {
+		SIZE :: 32 * runtime.Megabyte
+		ALIGNMENT :: 16 * runtime.Megabyte
+		for _ in 0..<16 {
+			bytes := make([]byte, SIZE, runtime.heap_allocator())
+			old_address := rawptr(raw_data(bytes))
+			delete(bytes, runtime.heap_allocator())
+			expect(sanitizer.address_region_is_poisoned(old_address, SIZE) == nil)
+
+			replacement := runtime.allocate_virtual_memory_aligned(SIZE, ALIGNMENT)
+			expect(replacement != nil)
+			expect(sanitizer.address_region_is_poisoned(replacement, SIZE) == nil)
+			new_bytes := cast([^]byte)replacement
+			new_bytes[0] = 0xAA
+			new_bytes[SIZE-1] = 0xBB
+			expect(new_bytes[0] == 0xAA && new_bytes[SIZE-1] == 0xBB)
+			runtime.free_virtual_memory(replacement, SIZE)
+		}
+		log.info("Released huge segment clears address poison test succeeded.")
+	}
+}
+
 test_single_alloc_and_resize_incremental :: proc(start, target: int) {
 	log.infof("Testing allocation of %i bytes, resizing by increments of one until %i is reached.", start, target)
 	allocator := context.allocator
@@ -951,6 +975,7 @@ main :: proc() {
 		context.allocator = allocator
 
 		if opt.vmem_tests {
+			test_released_huge_segment_clears_address_poison()
 			log.info("Testing virtual memory allocation ...")
 			log.infof("base:runtime reports OS page size is %M and superpage size is %M", runtime.page_size, runtime.superpage_size)
 			for size in 12..<uint(22) {
