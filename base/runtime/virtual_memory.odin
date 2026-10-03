@@ -97,6 +97,10 @@ free_virtual_memory :: proc "contextless" (ptr: rawptr, size: int) {
 	//
 	// This is a workaround for the time being.
 	when .Thread not_in ODIN_SANITIZER_FLAGS {
+		when .Address in ODIN_SANITIZER_FLAGS {
+			// DUMBAI: OS mappings can be reused outside Odin; released heap poison must not follow the pages.
+			__asan_unpoison_memory_region(ptr, uint(size))
+		}
 		_free_virtual_memory(ptr, size)
 	}
 }
