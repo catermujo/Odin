@@ -627,14 +627,7 @@ unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind) -> (err: Unm
 				}
 				continue struct_loop
 			} else {
-				// allows skipping unused struct fields
-
-				// NOTE(bill): prevent possible memory leak if a string is unquoted
-				allocator := p.allocator
-				defer p.allocator = allocator
-				p.allocator = mem.nil_allocator()
-
-				_ = parse_value(p) or_return
+				skip_value(p) or_return
 				if parse_comma(p) {
 					break struct_loop
 				}

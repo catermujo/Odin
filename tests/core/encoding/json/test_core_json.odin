@@ -560,6 +560,37 @@ unmarshal_nested_struct_ignores_unknown_array_field :: proc(t: ^testing.T) {
 }
 
 @test
+unmarshal_struct_reads_fields_after_unknown_nested_arrays :: proc(t: ^testing.T) {
+	Playback :: struct {
+		is_playing: bool,
+		progress_ms: int,
+	}
+	input := `{"device":{"flags":[1,2]},"ignored":[{"nested":["escaped\nstring",null,true]}],"is_playing":true,"progress_ms":123}`
+	playback: Playback
+	err := json.unmarshal_string(input, &playback)
+
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, playback.is_playing, true)
+	testing.expect_value(t, playback.progress_ms, 123)
+}
+
+@test
+unmarshal_struct_rejects_malformed_unknown_array :: proc(t: ^testing.T) {
+	Playback :: struct {
+		is_playing: bool,
+	}
+	inputs := []string{
+		`{"ignored":[1,,2],"is_playing":true}`,
+		`{"ignored":[{"nested":[1,2}],"is_playing":true}`,
+	}
+	for input in inputs {
+		playback: Playback
+		err := json.unmarshal_string(input, &playback)
+		testing.expect_value(t, err, json.Unmarshal_Data_Error.Invalid_Data)
+	}
+}
+
+@test
 enumerated_array :: proc(t: ^testing.T) {
 	Fruit :: enum { Apple, Banana, Pear }
 	Fruit_Stock :: [Fruit]uint {
