@@ -2819,7 +2819,7 @@ IDevice_VTable :: struct {
 	SetStablePowerState:              proc "system" (this: ^IDevice, Enable: BOOL) -> HRESULT,
 	CreateCommandSignature:           proc "system" (this: ^IDevice, pDesc: ^COMMAND_SIGNATURE_DESC, pRootSignature: ^IRootSignature, riid: ^IID, ppvCommandSignature: ^rawptr) -> HRESULT,
 	GetResourceTiling:                proc "system" (this: ^IDevice, pTiledResource: ^IResource, pNumTilesForEntireResource: ^u32, pPackedMipDesc: ^PACKED_MIP_INFO, pStandardTileShapeForNonPackedMips: ^TILE_SHAPE, pNumSubresourceTilings: ^u32, FirstSubresourceTilingToGet: u32, pSubresourceTilingsForNonPackedMips: ^SUBRESOURCE_TILING),
-	GetAdapterLuid:                   proc "system" (this: ^IDevice) -> LUID,
+	GetAdapterLuid:                   proc "system" (this: ^IDevice, pRetVal: ^LUID) -> ^LUID,
 }
 
 
