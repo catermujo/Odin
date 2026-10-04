@@ -1115,7 +1115,8 @@ try_cross_linking:;
 					// Trim the trailing newline.
 					darwin_sdk_path = gb_string_trim_space(darwin_sdk_path);
 				}
-				platform_lib_str = gb_string_append_fmt(platform_lib_str, "--sysroot %s ", darwin_sdk_path);
+				// DUMBAI: SDK libraries must win over package-manager copies so system imports keep portable install names.
+				platform_lib_str = gb_string_append_fmt(platform_lib_str, "--sysroot \"%s\" -L\"%s/usr/lib\" ", darwin_sdk_path, darwin_sdk_path);
 
 				platform_lib_str = gb_string_appendc(platform_lib_str, "-L/usr/local/lib ");
 
