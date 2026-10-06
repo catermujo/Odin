@@ -56,7 +56,7 @@ Raw_SOA_Footer_Dynamic_Array :: struct {
 // Multipointer indexing lowers to GEP and doesn't capture, so prefer that throughout.
 
 @(builtin, require_results, no_instrumentation)
-raw_soa_footer_slice :: proc(array: ^$T/#soa[]$E) -> (footer: ^Raw_SOA_Footer_Slice) {
+raw_soa_footer_slice :: proc "contextless" (array: ^$T/#soa[]$E) -> (footer: ^Raw_SOA_Footer_Slice) {
 	if array == nil {
 		return nil
 	}
@@ -65,7 +65,7 @@ raw_soa_footer_slice :: proc(array: ^$T/#soa[]$E) -> (footer: ^Raw_SOA_Footer_Sl
 	return
 }
 @(builtin, require_results, no_instrumentation)
-raw_soa_footer_dynamic_array :: proc(array: ^$T/#soa[dynamic]$E) -> (footer: ^Raw_SOA_Footer_Dynamic_Array) {
+raw_soa_footer_dynamic_array :: proc "contextless" (array: ^$T/#soa[dynamic]$E) -> (footer: ^Raw_SOA_Footer_Dynamic_Array) {
 	if array == nil {
 		return nil
 	}

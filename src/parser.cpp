@@ -117,16 +117,6 @@ gb_internal bool file_allow_newline(AstFile *f) {
 	return !is_strict;
 }
 
-gb_internal Token token_end_of_line(AstFile *f, Token tok) {
-	u8 const *start = f->tokenizer.start + tok.pos.offset;
-	u8 const *s = start;
-	while (*s && *s != '\n' && s < f->tokenizer.end) {
-		s += 1;
-	}
-	tok.pos.column += cast(i32)(s - start) - 1;
-	return tok;
-}
-
 gb_internal gbString get_file_line_as_string(TokenPos const &pos, i32 *offset_) {
 	AstFile *file = thread_safe_get_ast_file_from_id(pos.file_id);
 	if (file == nullptr) {
@@ -910,7 +900,7 @@ gb_internal Ast *ast_ident(AstFile *f, Token token) {
 	Ast *result = alloc_ast_node(f, Ast_Ident);
 	result->Ident.token    = token;
 	result->Ident.hash     = string_hash(token.string);
-	result->Ident.interned = string_interner_insert(token.string);
+	result->Ident.interned = string_interner_insert(token.string, result->Ident.hash);
 	return result;
 }
 
@@ -1618,13 +1608,35 @@ gb_internal Ast *ast_attribute(AstFile *f, Token token, Token open, Token close,
 }
 
 
-gb_internal bool next_token0(AstFile *f) {
-	if (f->curr_token_index+1 < f->tokens.count) {
-		f->curr_token = f->tokens[++f->curr_token_index];
-		return true;
+gb_internal Token tokenize_next(AstFile *f) {
+	Token token = {};
+	tokenizer_get_token(&f->tokenizer, &token);
+	f->token_count += 1;
+	if (token.kind == Token_Invalid) {
+		f->invalid_token_pos = token.pos;
+		syntax_error(token.pos, "Failed to parse file: %.*s; invalid token found in file", LIT(f->fullpath));
+		begin_error_mute();
+		token.kind = Token_EOF;
 	}
-	syntax_error(f->curr_token, "Token is EOF");
-	return false;
+	return token;
+}
+
+gb_internal bool next_token0(AstFile *f) {
+	if (f->curr_token.kind == Token_EOF) {
+		syntax_error(f->curr_token, "Token is EOF");
+		return false;
+	}
+	f->curr_token_index += 1;
+	if (f->lookahead_index < f->lookahead.count) {
+		f->curr_token = f->lookahead[f->lookahead_index++];
+		if (f->lookahead_index == f->lookahead.count) {
+			array_clear(&f->lookahead);
+			f->lookahead_index = 0;
+		}
+	} else {
+		f->curr_token = tokenize_next(f);
+	}
+	return true;
 }
 
 
@@ -1708,7 +1720,6 @@ gb_internal Token advance_token(AstFile *f) {
 	f->lead_comment = nullptr;
 	f->line_comment = nullptr;
 
-	f->prev_token_index = f->curr_token_index;
 	Token prev = f->prev_token = f->curr_token;
 
 	bool ok = next_token0(f);
@@ -1731,30 +1742,40 @@ gb_internal Token advance_token(AstFile *f) {
 }
 
 
-gb_internal Token peek_token(AstFile *f) {
-	for (isize i = f->curr_token_index+1; i < f->tokens.count; i++) {
-		Token tok = f->tokens[i];
+gb_internal Token peek_token_n(AstFile *f, isize n) {
+	if (f->curr_token.kind == Token_EOF) {
+		return {};
+	}
+	for (isize i = f->lookahead_index; /**/; i++) {
+		if (i == f->lookahead.count) {
+			array_add(&f->lookahead, tokenize_next(f));
+		}
+		Token tok = f->lookahead[i];
 		if (tok.kind == Token_Comment) {
 			continue;
 		}
-		return tok;
+		if (n-- == 0) {
+			return tok;
+		}
+		if (tok.kind == Token_EOF) {
+			return {};
+		}
 	}
-	return {};
 }
 
-gb_internal Token peek_token_n(AstFile *f, isize n) {
-	Token found = {};
-	for (isize i = f->curr_token_index+1; i < f->tokens.count; i++) {
-		Token tok = f->tokens[i];
-		if (tok.kind == Token_Comment) {
-			continue;
-		}
-		found = tok;
-		if (n-- == 0) {
-			return found;
-		}
+gb_internal Token peek_token(AstFile *f) {
+	return peek_token_n(f, 0);
+}
+
+// the next token, even if it is a comment
+gb_internal Token peek_raw_token(AstFile *f) {
+	if (f->curr_token.kind == Token_EOF) {
+		return f->curr_token;
 	}
-	return {};
+	if (f->lookahead_index == f->lookahead.count) {
+		array_add(&f->lookahead, tokenize_next(f));
+	}
+	return f->lookahead[f->lookahead_index];
 }
 
 
@@ -1821,6 +1842,9 @@ gb_internal Token expect_token(AstFile *f, TokenKind kind) {
 		end_error_block();
 
 		if (prev.kind == Token_EOF) {
+			if (f->invalid_token_pos.line != 0) {
+				end_error_mute();
+			}
 			exit_with_errors();
 		}
 	}
@@ -1870,6 +1894,18 @@ gb_internal bool is_token_range(Token tok) {
 }
 
 
+gb_internal void add_token_edit(AstFile *f, Token token, u8 flag) {
+	if (f->token_edits.count > 0) {
+		Token *last = &f->token_edits[f->token_edits.count-1];
+		if (last->pos.offset == token.pos.offset) {
+			last->flags |= flag;
+			return;
+		}
+	}
+	token.flags |= flag;
+	array_add(&f->token_edits, token);
+}
+
 gb_internal Token expect_operator(AstFile *f) {
 	Token prev = f->curr_token;
 	if ((prev.kind == Token_in || prev.kind == Token_not_in) && (f->expr_level >= 0 || f->allow_in_expr)) {
@@ -1890,7 +1926,7 @@ gb_internal Token expect_operator(AstFile *f) {
 	}
 	if (prev.kind == Token_Ellipsis) {
 		syntax_error(prev, "'..' for ranges are not allowed, did you mean '..<' or '..='?");
-		f->tokens[f->curr_token_index].flags |= TokenFlag_Replace;
+		add_token_edit(f, prev, TokenFlag_Replace);
 	}
 
 	advance_token(f);
@@ -1915,9 +1951,10 @@ gb_internal Token expect_closing_brace_of_field_list(AstFile *f) {
 	if (f->allow_newline) {
 		ok = !skip_possible_newline(f);
 	}
-	if (ok && allow_token(f, Token_Semicolon)) {
+	if (ok && f->curr_token.kind == Token_Semicolon) {
 		String p = token_to_string(token);
-		syntax_error(token_end_of_line(f, f->prev_token), "Expected a comma, got a %.*s", LIT(p));
+		syntax_error(token_pos_end(f->prev_token), "Expected a comma, got a %.*s", LIT(p));
+		advance_token(f);
 	}
 	return expect_token(f, Token_CloseBrace);
 }
@@ -2005,8 +2042,8 @@ gb_internal Token expect_closing(AstFile *f, TokenKind kind, String const &conte
 
 gb_internal void assign_removal_flag_to_semicolon(AstFile *f) {
 	// NOTE(bill): this is used for rewriting files to strip unneeded semicolons
-	Token *prev_token = &f->tokens[f->prev_token_index];
-	Token *curr_token = &f->tokens[f->curr_token_index];
+	Token const *prev_token = &f->prev_token;
+	Token const *curr_token = &f->curr_token;
 	GB_ASSERT(prev_token->kind == Token_Semicolon);
 	if (prev_token->string != ";") {
 		return;
@@ -2030,7 +2067,7 @@ gb_internal void assign_removal_flag_to_semicolon(AstFile *f) {
 	if (is_strict_style(f) || (ast_file_vet_flags(f) & VetFlag_Semicolon)) {
 		syntax_error(*prev_token, "Found unneeded semicolon");
 	}
-	prev_token->flags |= TokenFlag_Remove;
+	add_token_edit(f, *prev_token, TokenFlag_Remove);
 }
 
 gb_internal void expect_semicolon(AstFile *f) {
@@ -2327,11 +2364,7 @@ gb_internal Ast *convert_stmt_to_expr(AstFile *f, Ast *statement, String const &
 	}
 
 	syntax_error(f->curr_token, "Expected '%.*s', found a simple statement.", LIT(kind));
-	Token end = f->curr_token;
-	if (f->tokens.count < f->curr_token_index) {
-		end = f->tokens[f->curr_token_index+1];
-	}
-	return ast_bad_expr(f, f->curr_token, end);
+	return ast_bad_expr(f, f->curr_token, f->curr_token);
 }
 
 gb_internal Ast *convert_stmt_to_body(AstFile *f, Ast *stmt) {
@@ -3506,7 +3539,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 				capacity = parse_expr(f, false);
 			} else if (allow_token(f, Token_Comma) || allow_token(f, Token_Semicolon)) {
 				String p = token_to_string(f->prev_token);
-				syntax_error(token_end_of_line(f, f->prev_token), "Expected a semicolon, got a %.*s", LIT(p));
+				syntax_error(f->prev_token, "Expected a semicolon, got a %.*s", LIT(p));
 
 				capacity = parse_expr(f, false);
 			}
@@ -3901,7 +3934,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			underlying = parse_type(f);
 		} else if (allow_token(f, Token_Comma) || allow_token(f, Token_Semicolon)) {
 			String p = token_to_string(f->prev_token);
-			syntax_error(token_end_of_line(f, f->prev_token), "Expected a semicolon, got a %.*s", LIT(p));
+			syntax_error(f->prev_token, "Expected a semicolon, got a %.*s", LIT(p));
 
 			underlying = parse_type(f);
 		}
@@ -5220,7 +5253,7 @@ gb_internal bool allow_field_separator(AstFile *f) {
 		}
 		if (!ok) {
 			String p = token_to_string(token);
-			syntax_error(token_end_of_line(f, f->prev_token), "Expected a comma, got a %.*s", LIT(p));
+			syntax_error(token_pos_end(f->prev_token), "Expected a comma, got a %.*s", LIT(p));
 		}
 		advance_token(f);
 		return true;
@@ -5555,7 +5588,7 @@ gb_internal bool parse_control_statement_semicolon_separator(AstFile *f) {
 	Token tok = peek_token(f);
 	if (tok.kind != Token_OpenBrace) {
 		if (f->curr_token.kind == Token_Semicolon && f->curr_token.string != ";")  {
-			syntax_error(token_end_of_line(f, f->prev_token), "Expected ';', got newline");
+			syntax_error(token_pos_end(f->prev_token), "Expected ';', got newline");
 		}
 		return allow_token(f, Token_Semicolon);
 	}
@@ -5647,7 +5680,7 @@ if_else_chain:;
 			break;
 		default:
 			syntax_error(f->curr_token, "Expected if statement block statement");
-			else_stmt = ast_bad_stmt(f, f->curr_token, f->tokens[f->curr_token_index+1]);
+			else_stmt = ast_bad_stmt(f, f->curr_token, peek_raw_token(f));
 			break;
 		}
 	}
@@ -5705,7 +5738,7 @@ gb_internal Ast *parse_when_stmt(AstFile *f) {
 		} break;
 		default:
 			syntax_error(f->curr_token, "Expected when statement block statement");
-			else_stmt = ast_bad_stmt(f, f->curr_token, f->tokens[f->curr_token_index+1]);
+			else_stmt = ast_bad_stmt(f, f->curr_token, peek_raw_token(f));
 			break;
 		}
 	}
@@ -6573,11 +6606,21 @@ gb_internal Array<Ast *> parse_stmt_list(AstFile *f) {
 }
 
 
-gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, TokenPos *err_pos) {
+// Only the report of `-show-more-timings -show-debug-messages` uses a file's CPU time,
+// and getting a thread's CPU time is a system call
+gb_internal u64 parse_thread_cpu_time_now(void) {
+	if (build_context.show_debug_messages && build_context.show_more_timings) {
+		return thread_cpu_time_now();
+	}
+	return 0;
+}
+
+gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath) {
 	GB_ASSERT(f != nullptr);
 	f->fullpath  = string_trim_whitespace(fullpath); // Just in case
 	f->filename  = remove_directory_from_path(f->fullpath);
-	f->directory = directory_from_path(f->fullpath);
+	// NOTE(bill): It's file, therefore unlike `directory_from_path`, this needs no file system query
+	f->directory = substring(f->fullpath, 0, gb_max(f->fullpath.len - f->filename.len - 1, 0));
 	set_file_path_string(f->id, f->fullpath);
 	thread_safe_set_ast_file_from_id(f->id, f);
 	if (!string_ends_with(f->fullpath, str_lit(".odin"))) {
@@ -6586,7 +6629,11 @@ gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, Tok
 	gb_zero_item(&f->tokenizer);
 	f->tokenizer.curr_file_id = f->id;
 
+	u64 load_start     = time_stamp_time_now();
+	u64 load_cpu_start = parse_thread_cpu_time_now();
 	TokenizerInitError err = init_tokenizer_from_fullpath(&f->tokenizer, f->fullpath, build_context.copy_file_contents);
+	f->cpu_time_to_load = parse_thread_cpu_time_now()-load_cpu_start;
+	f->time_to_load     = cast(f64)(time_stamp_time_now()-load_start)/cast(f64)time_stamp__freq();
 	if (err != TokenizerInit_None) {
 		switch (err) {
 		case TokenizerInit_Empty:
@@ -6603,53 +6650,26 @@ gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, Tok
 
 	}
 
-	isize file_size = f->tokenizer.end - f->tokenizer.start;
-
-	// NOTE(bill): Determine allocation size required for tokens
-	isize token_cap = file_size/3ll;
-	isize pow2_cap = gb_max(cast(isize)prev_pow2(cast(i64)token_cap)/2, 16);
-	token_cap = ((token_cap + pow2_cap-1)/pow2_cap) * pow2_cap;
-
-	isize init_token_cap = gb_max(token_cap, 16);
-	array_init(&f->tokens, ast_allocator(f), 0, gb_max(init_token_cap, 16));
+	array_init(&f->lookahead,   ast_allocator(f), 0, 4);
+	array_init(&f->token_edits, ast_allocator(f), 0, 0);
+	array_init(&f->comments,    ast_allocator(f), 0, 0);
+	array_init(&f->imports,     ast_allocator(f), 0, 0);
+	array_init(&f->deferred_build_tags, ast_allocator(f), 0, 0);
+	array_init(&f->deferred_when_exprs, ast_allocator(f), 0, 0);
 
 	if (err == TokenizerInit_Empty) {
 		Token token = {Token_EOF};
 		token.pos.file_id = f->id;
 		token.pos.line    = 1;
 		token.pos.column  = 1;
-		array_add(&f->tokens, token);
+		f->token_count = 1;
+		f->first_token = f->prev_token = f->curr_token = token;
 		return ParseFile_None;
 	}
 
-	u64 start = time_stamp_time_now();
-
-	for (;;) {
-		Token *token = array_add_and_get(&f->tokens);
-		tokenizer_get_token(&f->tokenizer, token);
-		if (token->kind == Token_Invalid) {
-			err_pos->line   = token->pos.line;
-			err_pos->column = token->pos.column;
-			return ParseFile_InvalidToken;
-		}
-
-		if (token->kind == Token_EOF) {
-			break;
-		}
-	}
-
-	u64 end = time_stamp_time_now();
-	f->time_to_tokenize = cast(f64)(end-start)/cast(f64)time_stamp__freq();
-
-	f->prev_token_index = 0;
 	f->curr_token_index = 0;
-	f->prev_token = f->tokens[f->prev_token_index];
-	f->curr_token = f->tokens[f->curr_token_index];
+	f->first_token = f->prev_token = f->curr_token = tokenize_next(f);
 
-	array_init(&f->comments, ast_allocator(f), 0, 0);
-	array_init(&f->imports,  ast_allocator(f), 0, 0);
-	array_init(&f->deferred_build_tags, ast_allocator(f), 0, 0);
-	array_init(&f->deferred_when_exprs, ast_allocator(f), 0, 0);
 
 	f->curr_proc = nullptr;
 
@@ -6658,7 +6678,8 @@ gb_internal ParseFileError init_ast_file(AstFile *f, String const &fullpath, Tok
 
 gb_internal void destroy_ast_file(AstFile *f) {
 	GB_ASSERT(f != nullptr);
-	array_free(&f->tokens);
+	array_free(&f->lookahead);
+	array_free(&f->token_edits);
 	array_free(&f->comments);
 	array_free(&f->imports);
 	array_free(&f->deferred_build_tags);
@@ -6696,23 +6717,16 @@ gb_internal void parser_add_package(Parser *p, AstPackage *pkg) {
 
 gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile imported_file);
 
+gb_internal void parser_package_file_done(Parser *p, AstPackage *pkg) {
+	if (pkg->files_to_parse.fetch_sub(1) == 1 && p->package_parsed_proc != nullptr) {
+		thread_pool_add_task(p->package_parsed_proc, pkg);
+	}
+}
+
 gb_internal WORKER_TASK_PROC(parser_worker_proc) {
 	ParserWorkerData *wd = cast(ParserWorkerData *)data;
 	ParseFileError err = process_imported_file(wd->parser, wd->imported_file);
-	if (err != ParseFile_None) {
-		auto *node = permanent_alloc_item<ParseFileErrorNode>();
-		node->err = err;
-
-		MUTEX_GUARD_BLOCK(&wd->parser->file_error_mutex) {
-			if (wd->parser->file_error_tail != nullptr) {
-				wd->parser->file_error_tail->next = node;
-			}
-			wd->parser->file_error_tail = node;
-			if (wd->parser->file_error_head == nullptr) {
-				wd->parser->file_error_head = node;
-			}
-		}
-	}
+	parser_package_file_done(wd->parser, wd->imported_file.pkg);
 	return cast(isize)err;
 }
 
@@ -6723,6 +6737,7 @@ gb_internal void parser_add_file_to_process(Parser *p, AstPackage *pkg, FileInfo
 	auto wd = permanent_alloc_item<ParserWorkerData>();
 	wd->parser = p;
 	wd->imported_file = f;
+	pkg->files_to_parse.fetch_add(1);
 	thread_pool_add_task(parser_worker_proc, wd);
 }
 
@@ -6790,6 +6805,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String &path, String cons
 		pkg->fullpath = path;
 		array_init(&pkg->files, permanent_allocator());
 		pkg->foreign_files.allocator = permanent_allocator();
+	pkg->files_to_parse.store(1);
 
 		FileInfo fi = {};
 		fi.name = filename_from_path(path);
@@ -6801,6 +6817,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String &path, String cons
 		pkg->is_single_file = true;
 		parser_add_package(p, pkg);
 		parser_add_file_to_process(p, pkg, fi, pos);
+		parser_package_file_done(p, pkg);
 		return pkg;
 	}
 
@@ -6883,6 +6900,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String &path, String cons
 	pkg->fullpath = path;
 	array_init(&pkg->files, permanent_allocator());
 	pkg->foreign_files.allocator = permanent_allocator();
+	pkg->files_to_parse.store(1);
 
 	isize files_with_ext = 0;
 	isize files_to_reserve = 1; // always reserve 1
@@ -6928,6 +6946,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String &path, String cons
 	}
 
 	parser_add_package(p, pkg);
+	parser_package_file_done(p, pkg);
 
 	return pkg;
 }
@@ -7041,7 +7060,7 @@ gb_internal bool is_package_name_reserved(String const &name) {
 }
 
 
-gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node, String base_dir, String const &original_string, String *path, bool use_check_errors=false) {
+gb_internal bool determine_path_from_string(bool in_checker, Ast *node, String base_dir, String const &original_string, String *path, bool use_check_errors=false) {
 	GB_ASSERT(path != nullptr);
 
 	void (*do_error)(Ast *, char const *, ...);
@@ -7053,8 +7072,6 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 		do_error = &error;
 		do_warning = &warning;
 	}
-
-	// NOTE(bill): if file_mutex == nullptr, this means that the code is used within the semantics stage
 
 	String collection_name = {};
 	bool is_import_decl_path = node->kind == Ast_ImportDecl || node->kind == Ast_ForeignImportDecl;
@@ -7069,7 +7086,7 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 
 	bool has_windows_drive = false;
 #if defined(GB_SYSTEM_WINDOWS)
-	if (file_mutex == nullptr) {
+	if (in_checker) {
 		if (!is_import_decl_path &&
 		    colon_pos == 1 &&
 		    original_string.len > 2 &&
@@ -7165,10 +7182,6 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 		}
 	}
 
-	if (file_mutex) mutex_lock(file_mutex);
-	defer (if (file_mutex) mutex_unlock(file_mutex));
-
-
 	if (node->kind == Ast_ForeignImportDecl) {
 		node->ForeignImportDecl.collection_name = collection_name;
 	}
@@ -7183,6 +7196,32 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 }
 
 
+gb_internal void parse_setup_import_decl(Parser *p, AstFile *f, String const &base_dir, Ast **decl) {
+	Ast *node = *decl;
+	ast_node(id, ImportDecl, node);
+
+	String original_string = string_trim_whitespace(string_value_from_token(f, id->relpath));
+	if (is_import_path_absolute(original_string)) {
+		syntax_error(node, "Invalid import path: '%.*s'", LIT(original_string));
+		*decl = ast_bad_decl(f, id->relpath, id->relpath);
+		return;
+	}
+
+	String import_path = {};
+	bool ok = determine_path_from_string(false, node, base_dir, original_string, &import_path);
+	if (!ok) {
+		*decl = ast_bad_decl(f, id->relpath, id->relpath);
+		return;
+	}
+	import_path = string_trim_whitespace(import_path);
+
+	if (is_package_name_reserved(import_path)) {
+		id->fullpath = import_path;
+		return;
+	}
+	try_add_import_path(p, import_path, original_string, ast_token(node).pos);
+	id->fullpath = import_path;
+}
 
 gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &base_dir, Slice<Ast *> &decls, bool resolve_imports);
 
@@ -7227,35 +7266,12 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 
 				syntax_error(node, "Only declarations are allowed at file scope, got %.*s", LIT(ast_strings[node->kind]));
 		} else if (node->kind == Ast_ImportDecl) {
-			ast_node(id, ImportDecl, node);
 			if (!resolve_imports) {
 				continue;
 			}
-
-			String original_string = string_trim_whitespace(string_value_from_token(f, id->relpath));
-			if (is_import_path_absolute(original_string)) {
-				syntax_error(node, "Invalid import path: '%.*s'", LIT(original_string));
-				decls[i] = ast_bad_decl(f, id->relpath, id->relpath);
-				continue;
+			if (node->ImportDecl.fullpath.len == 0) {
+				parse_setup_import_decl(p, f, base_dir, &decls[i]);
 			}
-
-			String import_path = {};
-			bool ok = determine_path_from_string(&p->file_decl_mutex, node, base_dir, original_string, &import_path);
-			if (!ok) {
-				decls[i] = ast_bad_decl(f, id->relpath, id->relpath);
-				continue;
-			}
-			import_path = string_trim_whitespace(import_path);
-			while (import_path.len > 1 && (import_path[import_path.len-1] == '/' || import_path[import_path.len-1] == '\\')) {
-				import_path.len -= 1;
-			}
-
-			if (is_package_name_reserved(import_path)) {
-				id->fullpath = import_path;
-				continue;
-			}
-			try_add_import_path(p, import_path, original_string, ast_token(node).pos);
-			id->fullpath = import_path;
 		} else if (node->kind == Ast_ForeignImportDecl) {
 			ast_node(fl, ForeignImportDecl, node);
 			if (!resolve_imports) {
@@ -7281,7 +7297,7 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 				String fullpath = file_str;
 				if (!is_arch_wasm() || is_wasm_foreign_library_file_path(fullpath)) {
 					String foreign_path = {};
-					bool ok = determine_path_from_string(&p->file_decl_mutex, node, base_dir, file_str, &foreign_path);
+					bool ok = determine_path_from_string(false, node, base_dir, file_str, &foreign_path);
 					if (!ok) {
 						decls[i] = ast_bad_decl(f, fp_token, fp_token);
 						goto end;
@@ -7937,6 +7953,7 @@ gb_internal u64 parse_vet_tag(Token token_for_pos, String s, u64 base_vet_flags)
 			error_line("\tcast\n");
 			error_line("\ttabs\n");
 			error_line("\texplicit-allocators\n");
+			error_line("\twhen-shadowing\n");
 			return vet_flags;
 		}
 	}
@@ -8262,14 +8279,16 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 }
 
 gb_internal bool parse_file(Parser *p, AstFile *f) {
-	if (f->tokens.count == 0) {
-		return true;
-	}
-	if (f->tokens.count > 0 && f->tokens[0].kind == Token_EOF) {
-		return true;
+	if (f->first_token.kind == Token_EOF) {
+		return f->invalid_token_pos.line == 0;
 	}
 
 	u64 start = time_stamp_time_now();
+	u64 cpu_start = parse_thread_cpu_time_now();
+	u64 setup_start = 0;
+	u64 setup_cpu_start = 0;
+	u64 import_ticks = 0;
+	u64 import_cpu_ticks = 0;
 
 	String filepath = f->tokenizer.fullpath;
 	String base_dir = dir_from_path(filepath);
@@ -8368,17 +8387,32 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 				if (stmt->kind == Ast_WhenStmt || stmt->kind == Ast_ExprStmt || stmt->kind == Ast_ImportDecl || stmt->kind == Ast_ForeignBlockDecl) {
 					f->delayed_decl_count += 1;
 				}
+				if (stmt->kind == Ast_ImportDecl && (f->flags & AstFile_HasDeferredBuildTags) == 0) {
+					u64 import_start     = time_stamp_time_now();
+					u64 import_cpu_start = parse_thread_cpu_time_now();
+					parse_setup_import_decl(p, f, base_dir, &decls[decls.count-1]);
+					import_ticks     += time_stamp_time_now()-import_start;
+					import_cpu_ticks += parse_thread_cpu_time_now()-import_cpu_start;
+				}
 			}
 		}
 
 		f->decls = slice_from_array(decls);
 
+		setup_start = time_stamp_time_now();
+		setup_cpu_start = parse_thread_cpu_time_now();
 		bool resolve_imports = (f->flags & AstFile_HasDeferredBuildTags) == 0;
 		parse_setup_file_decls(p, f, base_dir, f->decls, resolve_imports);
 	}
 
-	u64 end = time_stamp_time_now();
-	f->time_to_parse = cast(f64)(end-start)/cast(f64)time_stamp__freq();
+	u64 end     = time_stamp_time_now();
+	u64 cpu_end = parse_thread_cpu_time_now();
+	u64 setup_ticks     = (setup_start     != 0 ? end-setup_start         : 0) + import_ticks;
+	u64 setup_cpu_ticks = (setup_cpu_start != 0 ? cpu_end-setup_cpu_start : 0) + import_cpu_ticks;
+	f->time_to_parse           = cast(f64)(end-start-setup_ticks)/cast(f64)time_stamp__freq();
+	f->time_to_setup_decls     = cast(f64)setup_ticks/cast(f64)time_stamp__freq();
+	f->cpu_time_to_parse       = cpu_end-cpu_start-setup_cpu_ticks;
+	f->cpu_time_to_setup_decls = setup_cpu_ticks;
 
 	for (int i = 0; i < AstDelayQueue_COUNT; i++) {
 		array_init(f->delayed_decls_queues+i, ast_allocator(f), 0, f->delayed_decl_count);
@@ -8397,10 +8431,7 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 	AstFile *file = permanent_alloc_item<AstFile>();
 	file->pkg = pkg;
 	file->id = cast(i32)(imported_file.index+1);
-	TokenPos err_pos = {0};
-	ParseFileError err = init_ast_file(file, fi.fullpath, &err_pos);
-	err_pos.file_id = file->id;
-	file->last_error = err;
+	ParseFileError err = init_ast_file(file, fi.fullpath);
 
 	if (err != ParseFile_None) {
 		if (err == ParseFile_EmptyFile) {
@@ -8421,9 +8452,6 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 				break;
 			case ParseFile_NotFound:
 				syntax_error(pos, "Failed to parse file: %.*s; file cannot be found ('%.*s')", LIT(fi.name), LIT(fi.fullpath));
-				break;
-			case ParseFile_InvalidToken:
-				syntax_error(err_pos, "Failed to parse file: %.*s; invalid token found in file", LIT(fi.name));
 				break;
 			case ParseFile_EmptyFile:
 				syntax_error(pos, "Failed to parse file: %.*s; file contains no tokens", LIT(fi.name));
@@ -8453,7 +8481,13 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 	}
 
 
-	if (parse_file(p, file)) {
+	bool parsed = parse_file(p, file);
+	if (file->invalid_token_pos.line != 0) {
+		end_error_mute();
+		return ParseFile_InvalidToken;
+	}
+
+	if (parsed) {
 		MUTEX_GUARD_BLOCK(&pkg->files_mutex) {
 			array_add(&pkg->files, file);
 		}
@@ -8462,7 +8496,7 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 		if (pkg->name.len == 0) {
 			pkg->name = file->package_name;
 		} else if (pkg->name != file->package_name) {
-			if (file->tokens.count > 0 && file->tokens[0].kind != Token_EOF) {
+			if (file->first_token.kind != Token_EOF) {
 				Token tok = file->package_token;
 				tok.pos.file_id = file->id;
 				tok.pos.line = gb_max(tok.pos.line, 1);
@@ -8476,7 +8510,7 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 		mutex_unlock(&pkg->name_mutex);
 
 		p->total_line_count.fetch_add(file->tokenizer.line_count);
-		p->total_token_count.fetch_add(file->tokens.count);
+		p->total_token_count.fetch_add(file->token_count);
 	}
 
 	return ParseFile_None;
@@ -8510,6 +8544,8 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 	}
 
 
+	p->init_fullpath = init_fullpath;
+
 	{ // Add these packages serially and then process them parallel
 		TokenPos init_pos = {};
 		{
@@ -8522,7 +8558,6 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 		}
 
 		try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
-		p->init_fullpath = init_fullpath;
 
 		if (is_test_context()) {
 			bool ok = false;
@@ -8553,23 +8588,9 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 	
 	thread_pool_wait();
 
-	for (ParseFileErrorNode *node = p->file_error_head; node != nullptr; node = node->next) {
-		if (node->err != ParseFile_None) {
-			return node->err;
-		}
-	}
-
-	for (isize i = p->packages.count-1; i >= 0; i--) {
-		AstPackage *pkg = p->packages[i];
-		for (isize j = pkg->files.count-1; j >= 0; j--) {
-			AstFile *file = pkg->files[j];
-			if (file->error_count != 0) {
-				if (file->last_error != ParseFile_None) {
-					return file->last_error;
-				}
-				return ParseFile_GeneralError;
-			}
-		}
+	// NOTE(bill): It only matters than error has occured, not which error
+	if (any_errors()) {
+		return ParseFile_GeneralError;
 	}
 
 	for (AstPackage *pkg : p->packages) {

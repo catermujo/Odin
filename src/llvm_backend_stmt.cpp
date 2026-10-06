@@ -1,6 +1,28 @@
 #define LB_ENABLE_BASIC_RVO    true
 #define LB_ENABLE_ADVANCED_RVO build_context.enable_rvo
 
+// NOTE(bill): Orders entities by their canonical type
+gb_internal i32 lb_entity_type_cmp(Entity *x, Entity *y) {
+	Type *xt = proc_entity_full_type(x);
+	Type *yt = proc_entity_full_type(y);
+	if (xt == yt || xt == nullptr || yt == nullptr) {
+		return 0;
+	}
+	u64 hx = type_hash_canonical_type(xt);
+	u64 hy = type_hash_canonical_type(yt);
+	if (hx != hy) {
+		return hx < hy ? -1 : +1;
+	}
+	// NOTE(bill): Polymorphic instances share their declaration's token, so this is what tells them apart deterministically
+	TEMPORARY_ALLOCATOR_GUARD();
+	return string_compare(type_to_canonical_string(temporary_allocator(), xt),
+	                      type_to_canonical_string(temporary_allocator(), yt));
+}
+
+gb_internal GB_COMPARE_PROC(lb_polymorphic_instance_cmp) {
+	return lb_entity_type_cmp(*cast(Entity **)a, *cast(Entity **)b);
+}
+
 gb_internal LLVMValueRef lb_coerce_fields_load(lbProcedure *p, lbValue x, lbArgType const *arg);
 
 // NOTE(bill): @RVO Check if a call expression returns by sret with a return type matching dst_type.
@@ -180,14 +202,18 @@ gb_internal void lb_build_constant_value_decl(lbProcedure *p, AstValueDecl *vd) 
 			GenProcsData *gpd = e->Procedure.gen_procs;
 			if (gpd) {
 				rw_mutex_shared_lock(&gpd->mutex);
-				for (Entity *e : gpd->procs) {
+				// NOTE)bill):: build the instances by type, not in the order they were instantiated, which varies
+				TEMPORARY_ALLOCATOR_GUARD();
+				auto procs = array_clone(temporary_allocator(), gpd->procs);
+				rw_mutex_shared_unlock(&gpd->mutex);
+				array_sort(procs, lb_polymorphic_instance_cmp);
+				for (Entity *e : procs) {
 					if (e->min_dep_count.load(std::memory_order_relaxed) == 0) {
 						continue;
 					}
 					DeclInfo *d = decl_info_of_entity(e);
 					lb_build_nested_proc(p, &d->proc_lit->ProcLit, e);
 				}
-				rw_mutex_shared_unlock(&gpd->mutex);
 			} else {
 				lb_build_nested_proc(p, pl, e);
 			}
@@ -208,7 +234,8 @@ gb_internal void lb_build_constant_value_decl(lbProcedure *p, AstValueDecl *vd) 
 			lbValue *prev_value = string_map_get(&p->module->members, name);
 			if (prev_value != nullptr) {
 				// NOTE(bill): Don't do mutliple declarations in the IR
-				return;
+				lb_add_entity(p->module, e, *prev_value);
+				continue;
 			}
 
 			e->Procedure.link_name = name;
@@ -308,7 +335,7 @@ gb_internal void lb_open_scope(lbProcedure *p, Scope *s, bool lifetime_scope=fal
 			LLVMMetadataRef file = nullptr;
 			AstFile *ast_file = s->node->file();
 			if (ast_file != nullptr) {
-				file = lb_get_llvm_metadata(m, ast_file);
+				file = lb_get_file_metadata(m, ast_file);
 			}
 			LLVMMetadataRef scope = nullptr;
 			if (p->scope_stack.count > 0) {
@@ -2200,7 +2227,7 @@ gb_internal lbAddr lb_store_range_stmt_val(lbProcedure *p, Ast *stmt_val, lbValu
 
 	if ((e->flags & EntityFlag_Value) == 0) {
 		if (LLVMIsALoadInst(value.value)) {
-			lbValue ptr = lb_address_from_load_or_generate_local(p, value);
+			lbValue ptr = lb_address_from_load(p, value);
 			lb_add_entity(p->module, e, ptr);
 			lb_add_debug_local_variable(p, ptr.value, e->type, e->token);
 			return lb_addr(ptr);
@@ -2473,14 +2500,15 @@ gb_internal void lb_build_static_variables(lbProcedure *p, AstValueDecl *vd) {
 			if (e->Variable.is_rodata) {
 				cc.is_rodata = true;
 			}
-			value = lb_const_value(p->module, e->type, ast_value->tav.value, ast_value->tav.type, cc, ast_value);
+			Type *init_type = is_type_any(e->type) ? default_type(ast_value->tav.type) : e->type;
+			value = lb_const_value(p->module, init_type, ast_value->tav.value, ast_value->tav.type, cc, ast_value);
 		}
 
 		String mangled_name = {};
 		{
 			gbString str = gb_string_make_length(permanent_allocator(), p->name.text, p->name.len);
 			str = gb_string_appendc(str, "-");
-			str = gb_string_append_fmt(str, ".%.*s-%llu", LIT(name), cast(long long)e->id);
+			str = gb_string_append_fmt(str, ".%.*s-%d", LIT(name), e->token.pos.offset);
 			mangled_name.text = cast(u8 *)str;
 			mangled_name.len = gb_string_length(str);
 		}
@@ -2979,6 +3007,9 @@ gb_internal void lb_build_if_stmt(lbProcedure *p, Ast *node) {
 			lb_start_block(p, then);
 
 			lb_build_stmt(p, is->body);
+			if (p->debug_info != nullptr) {
+				LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, is->body));
+			}
 			lb_emit_jump(p, done);
 		} else {
 			if (is->else_stmt != nullptr) {
@@ -2988,6 +3019,9 @@ gb_internal void lb_build_if_stmt(lbProcedure *p, Ast *node) {
 				lb_open_scope(p, scope_of_node(is->else_stmt));
 				lb_build_stmt(p, is->else_stmt);
 				lb_close_scope(p, lbDeferExit_Default, nullptr, is->else_stmt);
+				if (p->debug_info != nullptr) {
+					LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, is->else_stmt));
+				}
 			}
 			lb_emit_jump(p, done);
 
@@ -2996,6 +3030,9 @@ gb_internal void lb_build_if_stmt(lbProcedure *p, Ast *node) {
 		lb_start_block(p, then);
 
 		lb_build_stmt(p, is->body);
+		if (p->debug_info != nullptr) {
+			LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, is->body));
+		}
 
 		lb_emit_jump(p, done);
 
@@ -3005,6 +3042,9 @@ gb_internal void lb_build_if_stmt(lbProcedure *p, Ast *node) {
 			lb_open_scope(p, scope_of_node(is->else_stmt));
 			lb_build_stmt(p, is->else_stmt);
 			lb_close_scope(p, lbDeferExit_Default, nullptr, is->else_stmt);
+			if (p->debug_info != nullptr) {
+				LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, is->else_stmt));
+			}
 
 			lb_emit_jump(p, done);
 		}
@@ -3922,6 +3962,7 @@ gb_internal void lb_build_assign_stmt_array(lbProcedure *p, TokenKind op, lbAddr
 		}
 		return;
 	} else if (lhs.kind == lbAddr_SwizzleSoa) {
+		rhs = lb_emit_conv(p, value, lhs_type);
 		// the three cases largely mirror each other,
 		// perhaps unify them?
 		GB_ASSERT(is_type_array(lhs_type));

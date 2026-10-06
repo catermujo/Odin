@@ -178,7 +178,7 @@ gb_internal void override_entity_in_scope(Entity *original_entity, Entity *new_e
 	// has been "evaluated" and the variant data can be copied across
 
 	rw_mutex_lock(&found_scope->mutex);
-	scope_map_insert(&found_scope->elements, original_intern, hash, new_entity);
+	scope_map_replace(&found_scope->elements, original_intern, hash, new_entity);
 	rw_mutex_unlock(&found_scope->mutex);
 
 	original_entity->flags |= EntityFlag_Overridden;
@@ -655,6 +655,17 @@ gb_internal void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr
 
 	if (init != nullptr) {
 		Entity *entity = check_entity_from_ident_or_selector(ctx, init, false);
+		if (entity == nullptr && init->kind == Ast_CallExpr) {
+			Entity *callee = check_entity_from_ident_or_selector(ctx, init->CallExpr.proc, false);
+			if (callee != nullptr && callee->state == EntityState_Unresolved) {
+				check_entity_decl(ctx, callee, decl_info_of_entity(callee), nullptr);
+			}
+			// DUMBAI: Publish the type alias before its constructor arguments can refer back to it.
+			if (callee != nullptr && callee->kind == Entity_TypeName && base_type(callee->type) != nullptr &&
+			    is_type_polymorphic_record_unspecialized(callee->type)) {
+				entity = callee;
+			}
+		}
 		if (check_override_as_type_due_to_aliasing(ctx, e, entity, init, named_type)) {
 			return;
 		}
@@ -1009,6 +1020,9 @@ gb_internal Entity *init_entity_foreign_library(CheckerContext *ctx, Entity *e) 
 	} else {
 		String name = ident->Ident.token.string;
 		Entity *found = scope_lookup(ctx->scope, ident->Ident.interned, ident->Ident.hash);
+		if (found != nullptr) {
+			found = resolve_alias_entity(ctx, found, nullptr);
+		}
 
 		if (found == nullptr) {
 			if (is_blank_ident(name)) {
@@ -1267,41 +1281,95 @@ gb_internal void check_target_feature_attributes(AttributeContext &ac, Entity *e
 	}
 }
 
-gb_internal void check_foreign_procedure(CheckerContext *ctx, Entity *e, DeclInfo *d) {
-	GB_ASSERT(e != nullptr);
-	GB_ASSERT(e->kind == Entity_Procedure);
-	String name = e->Procedure.link_name;
+gb_internal void add_link_name_use(CheckerInfo *info, String name, Entity *e, DeclInfo *d, LinkNameUseKind kind) {
+	mutex_lock(&info->foreign_mutex);
+	array_add(&info->link_names, LinkNameUse{name, e, d, kind});
+	mutex_unlock(&info->foreign_mutex);
+}
 
-	mutex_lock(&ctx->info->foreign_mutex);
+gb_internal GB_COMPARE_PROC(link_name_use_cmp) {
+	LinkNameUse const *x = cast(LinkNameUse const *)a;
+	LinkNameUse const *y = cast(LinkNameUse const *)b;
+	i32 cmp = string_compare(x->name, y->name);
+	if (cmp != 0) {
+		return cmp;
+	}
+	if (x->entity != y->entity) {
+		return entity_source_order_cmp(x->entity, y->entity);
+	}
+	return i32_cmp(x->kind, y->kind);
+}
+gb_internal void check_link_name_uses(Checker *c) {
+	auto &uses = c->info.link_names;
+	array_sort(uses, link_name_use_cmp);
 
-	auto *fp = &ctx->info->foreigns;
-	StringHashKey key = string_hash_string(name);
-	Entity **found = string_map_get(fp, key);
-	if (found && e != *found) {
-		Entity *f = *found;
+	LinkNameUse *first = nullptr;
+	for (isize i = 0; i < uses.count; i++) {
+		LinkNameUse *u = &uses[i];
+		if (i > 0 && uses[i-1].name != u->name) {
+			first = nullptr;
+		} else if (i > 0 && uses[i-1].entity == u->entity) {
+			continue;
+		}
+		String name = u->name;
+		if (name == "main" && !build_context.no_entry_point && u->kind != LinkNameUse_Variable) {
+			if (u->kind == LinkNameUse_ForeignProcedure || u->entity->pkg->kind != Package_Runtime) {
+				error(u->decl->proc_lit, "The link name 'main' is reserved for internal use");
+			}
+			continue;
+		}
+		if (first == nullptr) {
+			first = u;
+			continue;
+		}
+
+		Entity *e = u->entity;
+		Entity *f = first->entity;
+
 		TokenPos pos = f->token.pos;
+
 		Type *this_type = base_type(e->type);
 		Type *other_type = base_type(f->type);
-		if (is_type_proc(this_type) && is_type_proc(other_type)) {
-			if (!are_signatures_similar_enough(this_type, other_type)) {
-				error(d->proc_lit,
-				      "Redeclaration of foreign procedure '%.*s' with different type signatures\n"
+
+		switch (u->kind) {
+		case LinkNameUse_ForeignProcedure:
+			if (is_type_proc(this_type) && is_type_proc(other_type)) {
+				if (!are_signatures_similar_enough(this_type, other_type)) {
+					error(u->decl->proc_lit,
+					      "Redeclaration of foreign procedure '%.*s' with different type signatures\n"
+					      "\tat %s",
+					      LIT(name), token_pos_to_string(pos));
+				}
+			} else if (!signature_parameter_similar_enough(this_type, other_type)) {
+				error(u->decl->proc_lit,
+				      "Foreign entity '%.*s' previously declared elsewhere with a different type\n"
 				      "\tat %s",
 				      LIT(name), token_pos_to_string(pos));
 			}
-		} else if (!signature_parameter_similar_enough(this_type, other_type)) {
-			error(d->proc_lit,
-			      "Foreign entity '%.*s' previously declared elsewhere with a different type\n"
-			      "\tat %s",
+			break;
+		case LinkNameUse_Procedure:
+			// TODO(bill): Better error message?
+			error(u->decl->proc_lit,
+			      "Non-unique linking name for procedure '%.*s'\n"
+			      "\tother at %s",
 			      LIT(name), token_pos_to_string(pos));
+			break;
+		case LinkNameUse_Variable:
+			if (e->type == nullptr || f->type == nullptr || !signature_parameter_similar_enough(this_type, other_type)) {
+				error(e->token,
+				      "Foreign entity '%.*s' previously declared elsewhere with a different type\n"
+				      "\tat %s",
+				      LIT(name), token_pos_to_string(pos));
+			}
+			break;
 		}
-	} else if (name == "main" && !build_context.no_entry_point) {
-		error(d->proc_lit, "The link name 'main' is reserved for internal use");
-	} else {
-		string_map_set(fp, key, e);
 	}
+}
 
-	mutex_unlock(&ctx->info->foreign_mutex);
+gb_internal void check_foreign_procedure(CheckerContext *ctx, Entity *e, DeclInfo *d) {
+	GB_ASSERT(e != nullptr);
+	GB_ASSERT(e->kind == Entity_Procedure);
+	add_link_name_use(ctx->info, e->Procedure.link_name, e, d, LinkNameUse_ForeignProcedure);
 }
 
 gb_internal bool proc_type_ast_has_results(Ast *proc_type_node) {
@@ -1920,14 +1988,17 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 			}
 
 			if (e->pkg->kind == Package_Init) {
-				if (ctx->info->entry_point != nullptr) {
+				mutex_lock(&ctx->info->entry_point_mutex);
+				Entity *prev_entry_point = ctx->info->entry_point;
+				if (prev_entry_point == nullptr) {
+					ctx->info->entry_point = e;
+				}
+				mutex_unlock(&ctx->info->entry_point_mutex);
+				if (prev_entry_point != nullptr) {
 					begin_error_block();
 					error(e->token, "Redeclaration of the entry point procedure 'main'");
 					error_line("\tSuggestion: Is this a single-file package? If so, try compiling using the `-file` flag.\n");
 					end_error_block();
-
-				} else {
-					ctx->info->entry_point = e;
 				}
 			}
 		}
@@ -2019,28 +2090,7 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 			name = e->Procedure.link_name;
 		}
 		if (e->Procedure.link_name.len > 0 || is_export) {
-			mutex_lock(&ctx->info->foreign_mutex);
-
-			auto *fp = &ctx->info->foreigns;
-			StringHashKey key = string_hash_string(name);
-			Entity **found = string_map_get(fp, key);
-			if (found) {
-				Entity *f = *found;
-				TokenPos pos = f->token.pos;
-				// TODO(bill): Better error message?
-				error(d->proc_lit,
-				      "Non unique linking name for procedure '%.*s'\n"
-				      "\tother at %s",
-				      LIT(name), token_pos_to_string(pos));
-			} else if (name == "main" && !build_context.no_entry_point) {
-				if (d->entity.load()->pkg->kind != Package_Runtime) {
-					error(d->proc_lit, "The link name 'main' is reserved for internal use");
-				}
-			} else {
-				string_map_set(fp, key, e);
-			}
-
-			mutex_unlock(&ctx->info->foreign_mutex);
+			add_link_name_use(ctx->info, name, e, d, LinkNameUse_Procedure);
 		}
 	}
 	
@@ -2165,24 +2215,7 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 			name = e->Variable.link_name;
 		}
 
-		auto *fp = &ctx->info->foreigns;
-		StringHashKey key = string_hash_string(name);
-		Entity **found = string_map_get(fp, key);
-		if (found) {
-			Entity *f = *found;
-			TokenPos pos = f->token.pos;
-			Type *this_type = base_type(e->type);
-			Type *other_type = base_type(f->type);
-			bool type_is_null = (e->type == nullptr || f->type == nullptr);
-			if (type_is_null || !signature_parameter_similar_enough(this_type, other_type)) {
-				error(e->token,
-				      "Foreign entity '%.*s' previously declared elsewhere with a different type\n"
-				      "\tat %s",
-				      LIT(name), token_pos_to_string(pos));
-			}
-		} else {
-			string_map_set(fp, key, e);
-		}
+		add_link_name_use(ctx->info, name, e, decl, LinkNameUse_Variable);
 		if (checker_global_variable_timing_state.enabled) {
 			foreign_and_links_ticks += time_stamp_time_now() - start;
 		}
@@ -2335,9 +2368,15 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 
 	ptr_set_destroy(&entity_set);
 
+	// NOTE(bill, 2026-10-01): an invalid overload is dropped from this group only, as others may be using that procedure
+	auto invalid = array_make<bool>(temporary_allocator(), pge->entities.count);
+	for (isize j = 0; j < pge->entities.count; j++) {
+		invalid[j] = false;
+	}
+
 	for (isize j = 0; j < pge->entities.count; j++) {
 		Entity *p = pge->entities[j];
-		if (p->type == t_invalid) {
+		if (p->type == t_invalid || invalid[j]) {
 			// NOTE(bill): This invalid overload has already been handled
 			continue;
 		}
@@ -2353,15 +2392,13 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 			GB_ASSERT(p != q);
 
 			bool is_invalid = false;
+			bool different_results = false;
 
 			TokenPos pos = q->token.pos;
 
-			if (q->type == nullptr || q->type == t_invalid) {
+			if (q->type == nullptr || q->type == t_invalid || invalid[k]) {
 				continue;
 			}
-
-
-			ERROR_BLOCK();
 
 			if (q->flags & EntityFlag_Disabled) {
 				continue;
@@ -2384,21 +2421,18 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 
 			if (!both_have_where_clauses) switch (kind) {
 			case ProcOverload_Identical:
-				error(p->token, "Overloaded procedure '%.*s' has the same type as another procedure in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
 				is_invalid = true;
 				break;
 			// case ProcOverload_CallingConvention:
-				// error(p->token, "Overloaded procedure '%.*s' has the same type as another procedure in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
 				// is_invalid = true;
 				// break;
 			case ProcOverload_ParamVariadic:
-				error(p->token, "Overloaded procedure '%.*s' has the same type as another procedure in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
 				is_invalid = true;
 				break;
 			case ProcOverload_ResultCount:
 			case ProcOverload_ResultTypes:
-				error(p->token, "Overloaded procedure '%.*s' has the same parameters but different results in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
 				is_invalid = true;
+				different_results = true;
 				break;
 			case ProcOverload_Polymorphic:
 				break;
@@ -2411,11 +2445,25 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 			}
 
 			if (is_invalid) {
+				// NOTE(bill): only now, as the error block is shared by every thread
+				ERROR_BLOCK();
+				if (different_results) {
+					error(p->token, "Overloaded procedure '%.*s' has the same parameters but different results in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
+				} else {
+					error(p->token, "Overloaded procedure '%.*s' has the same type as another procedure in the procedure group '%.*s'", LIT(name), LIT(proc_group_name));
+				}
 				error_line("\tprevious procedure at %s\n", token_pos_to_string(pos));
-				q->type = t_invalid;
+				invalid[k] = true;
 			}
 		}
 	}
+	isize valid_count = 0;
+	for (isize j = 0; j < pge->entities.count; j++) {
+		if (!invalid[j]) {
+			pge->entities[valid_count++] = pge->entities[j];
+		}
+	}
+	pge->entities.count = valid_count;
 
 	AttributeContext ac = {};
 	check_decl_attributes(ctx, d->attributes, proc_group_attribute, &ac);
@@ -2560,14 +2608,37 @@ gb_internal void check_asm_group_decl(CheckerContext *ctx, Entity *asm_entity, D
 
 #include "check_asm.cpp"
 
+gb_internal void add_deps_from_child_to_parent(DeclInfo *decl);
 
 gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, Type *named_type) {
 	if (e->state == EntityState_Resolved)  {
 		return;
 	}
-	if (e->flags & EntityFlag_Lazy) {
-		mutex_lock(&ctx->info->lazy_mutex);
+	GlobalWhenTrialEntityScope trial_scope = {};
+	if (global_when_trial != nullptr && !global_when_trial_begin_entity(e, &trial_scope)) {
+		return;
 	}
+	defer (global_when_trial_end_entity(&trial_scope));
+
+	// NOTE(bill): checked by whichever thread claims it first; any other that needs it meanwhile waits for it
+	i32 owner = 0;
+	if (!e->checking_thread.compare_exchange_strong(owner, cast(i32)current_thread_index() + 1)) {
+		if (thread_wait_for_owner(&e->checking_thread, owner, owner)) {
+			return;
+		}
+		// NOTE: this thread is checking it already, or the thread checking it waits for this one
+		error(e->token, "Illegal declaration cycle of `%.*s`", LIT(e->token.string));
+		return;
+	}
+	if (e->state == EntityState_Resolved) {
+		// NOTE: another thread finished it before this one claimed it
+		e->checking_thread.store(0);
+		futex_broadcast(&e->checking_thread);
+		return;
+	}
+
+	bool is_lazy = (e->flags & EntityFlag_Lazy) != 0;
+	GlobalEntityTimingFrame timing_frame = global_entity_timing_begin(e);
 
 	bool entity_timing_started = false;
 	if (checker_global_entity_timing_state.enabled) {
@@ -2599,20 +2670,37 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 		}
 
 		CheckerContext c = *ctx;
+		if (d->scope->flags & ScopeFlag_File) {
+			// NOTE(bill): a global is checked in a context of its own file, never in that of whatever needed it first,
+			// which may be in another file or package, or a procedure body.
+			// Only the cycle detection carries over.
+			CheckerTypePath *type_path = c.type_path;
+			UntypedExprInfoMap *untyped = c.untyped;
+			gb_zero_size(&c.pkg, gb_size_of(CheckerContext) - gb_offset_of(CheckerContext, pkg));
+			add_curr_ast_file(&c, d->scope->file);
+			c.type_path = type_path;
+			c.untyped = untyped;
+		}
 		c.scope = d->scope;
 		c.decl  = d;
 		c.type_level = 0;
 		c.curr_proc_calling_convention = ProcCC_Contextless;
 
-		auto prev_flags = c.scope->flags;
-		defer (c.scope->flags = prev_flags);
-
-		if (check_feature_flags(ctx, d->decl_node) & OptInFeatureFlag_GlobalContext) {
-			c.scope->flags |= ScopeFlag_ContextDefined;
-		} else {
-			c.scope->flags &= ~ScopeFlag_ContextDefined;
+		// NOTE: a file scope's is set from its own file and shared by every thread, see `create_scope_from_file`
+		bool set_context = (c.scope->flags & ScopeFlag_File) == 0;
+		u32 prev_flags = c.scope->flags;
+		defer (if (set_context) {
+			c.scope->flags = prev_flags;
+		});
+		if (set_context) {
+			if (check_feature_flags(ctx, d->decl_node) & OptInFeatureFlag_GlobalContext) {
+				c.scope->flags |= ScopeFlag_ContextDefined;
+			} else {
+				c.scope->flags &= ~cast(u32)ScopeFlag_ContextDefined;
+			}
 		}
 
+		global_group_check_edge(ctx, e);
 
 		e->parent_proc_decl = c.curr_proc_decl;
 		e->state = EntityState_InProgress;
@@ -2660,44 +2748,53 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 
 		e->state = EntityState_Resolved;
 
+		add_deps_from_child_to_parent(d);
 	}
 end:;
+	global_entity_timing_end(timing_frame, e);
 	// NOTE(bill): Add it to the list of checked entities
-	if (e->flags & EntityFlag_Lazy) {
+	if (is_lazy) {
+		mutex_lock(&ctx->info->lazy_mutex);
 		array_add(&ctx->info->entities, e);
 		mutex_unlock(&ctx->info->lazy_mutex);
+	}
+	e->checking_thread.store(0);
+	futex_broadcast(&e->checking_thread);
+}
+
+// An entity in progress on another thread is waited for, unless that thread waits for this one
+gb_internal void wait_for_entity(Entity *e) {
+	i32 owner = e->checking_thread.load();
+	if (owner != 0) {
+		thread_wait_for_owner(&e->checking_thread, owner, owner);
 	}
 }
 
 
 gb_internal void add_deps_from_child_to_parent(DeclInfo *decl) {
-	if (decl && decl->parent) {
-		Scope *ps = decl->parent->scope;
-		if (ps->flags & (ScopeFlag_File & ScopeFlag_Pkg & ScopeFlag_Global)) {
-			return;
-		} else {
-			// NOTE(bill): Add the dependencies from the procedure literal (lambda)
-			// But only at the procedure level
-			rw_mutex_shared_lock(&decl->deps_mutex);
-			rw_mutex_lock(&decl->parent->deps_mutex);
+	if (decl == nullptr) {
+		return;
+	}
+	for (DeclInfo *p = decl->parent; p != nullptr && (p->scope->flags & (ScopeFlag_Pkg | ScopeFlag_Global)) == 0; p = p->parent) {
+		rw_mutex_shared_lock(&decl->deps_mutex);
+		rw_mutex_lock(&p->deps_mutex);
 
-			FOR_PTR_SET(e, decl->deps) {
-				ptr_set_add(&decl->parent->deps, e);
-			}
-
-			rw_mutex_unlock(&decl->parent->deps_mutex);
-			rw_mutex_shared_unlock(&decl->deps_mutex);
-
-			rw_mutex_shared_lock(&decl->type_info_deps_mutex);
-			rw_mutex_lock(&decl->parent->type_info_deps_mutex);
-
-			for (auto const &tt : decl->type_info_deps) {
-				type_set_add(&decl->parent->type_info_deps, tt);
-			}
-
-			rw_mutex_unlock(&decl->parent->type_info_deps_mutex);
-			rw_mutex_shared_unlock(&decl->type_info_deps_mutex);
+		FOR_PTR_SET(e, decl->deps) {
+			ptr_set_add(&p->deps, e);
 		}
+
+		rw_mutex_unlock(&p->deps_mutex);
+		rw_mutex_shared_unlock(&decl->deps_mutex);
+
+		rw_mutex_shared_lock(&decl->type_info_deps_mutex);
+		rw_mutex_lock(&p->type_info_deps_mutex);
+
+		for (auto const &tt : decl->type_info_deps) {
+			type_set_add(&p->type_info_deps, tt);
+		}
+
+		rw_mutex_unlock(&p->type_info_deps_mutex);
+		rw_mutex_shared_unlock(&decl->type_info_deps_mutex);
 	}
 }
 
@@ -2779,7 +2876,7 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 					break;
 				}
 
-				bool is_value = (e->flags & EntityFlag_Value) != 0 && !is_type_pointer(e->type);
+				bool is_value = (e->flags & EntityFlag_Value) != 0 && !is_type_pointer(e->type) && !is_type_soa_pointer(e->type);
 				String name = e->token.string;
 				Type *t = base_type(type_deref(e->type));
 				if (t->kind == Type_Struct) {

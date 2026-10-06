@@ -3270,9 +3270,9 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 	if (is_type_array(dst) && is_type_array(src)) {
 		Type *dst_elem = base_array_type(dst);
 		Type *src_elem = base_array_type(src);
+		// NOTE: only arrays nested equally deep convert element by element, a shallower one is broadcast (See #6642)
 		if (dst->Array.count == src->Array.count &&
-		    !is_type_array_like(dst->Array.elem) &&
-		    !is_type_array_like(src->Array.elem)) {
+		    type_array_depth(dst) == type_array_depth(src)) {
 			if (are_types_identical(dst_elem, src_elem)) {
 				lbValue v = value;
 				v.type = t;
@@ -4680,7 +4680,9 @@ gb_internal lbValue lb_build_unary_and(lbProcedure *p, Ast *expr) {
 		Type *type = v.type;
 		lbAddr addr = {};
 		if (p->is_startup) {
-			addr = lb_add_global_generated_from_procedure(p, type, v);
+			// NOTE: only a constant can be the global's initializer, any other value is written by the store below
+			lbValue initializer = LLVMIsConstant(v.value) ? v : lbValue{};
+			addr = lb_add_global_generated_from_procedure(p, type, initializer);
 		} else {
 			addr = lb_add_local_generated(p, type, false);
 		}
@@ -5046,28 +5048,26 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 	case_ast_node(te, TernaryIfExpr, expr);
 		GB_ASSERT(te->y != nullptr);
 		Type *type = default_type(type_of_expr(expr));
-		// WebAssembly's SelectionDAG cannot lower large first-class aggregate PHIs.
-		// Materialize each branch into storage, then load the selected aggregate. This
-		// also lets aggregate stores use their existing memcpy lowering without
-		// requiring either branch to be addressable.
-		if (lb_is_type_aggregate(type) && type_size_of(type) > 64) {
-			lbAddr result = lb_add_local_generated(p, type, false);
+		if (lb_is_type_large_aggregate(p->module, type)) {
+			// NOTE(bill): A large aggregate needs to be selected through memory
+			// as instruction selection splits a `phi` or `select` of it per field
+			lbAddr res = lb_add_local_generated(p, type, false);
 
 			lbBlock *then  = lb_create_block(p, "if.then");
-			lbBlock *done  = lb_create_block(p, "if.done"); // NOTE(bill): Append later
+			lbBlock *done  = lb_create_block(p, "if.done");
 			lbBlock *else_ = lb_create_block(p, "if.else");
 
 			lb_build_cond(p, te->cond, then, else_);
 			lb_start_block(p, then);
-			lb_addr_store(p, result, lb_build_expr(p, te->x));
+			lb_addr_store(p, res, lb_emit_conv(p, lb_build_expr(p, te->x), type));
 			lb_emit_jump(p, done);
 
 			lb_start_block(p, else_);
-			lb_addr_store(p, result, lb_build_expr(p, te->y));
+			lb_addr_store(p, res, lb_emit_conv(p, lb_build_expr(p, te->y), type));
 			lb_emit_jump(p, done);
 
 			lb_start_block(p, done);
-			return lb_addr_load(p, result);
+			return lb_addr_load(p, res);
 		}
 		if (lb_is_expr_trivial(te->x) && lb_is_expr_trivial(te->y)) {
 			lbValue cond = lb_build_expr(p, te->cond);
@@ -5245,7 +5245,7 @@ gb_internal lbValue lb_build_expr_internal(lbProcedure *p, Ast *expr) {
 		if (is_type_closure(type_of_expr(expr))) {
 			return lb_build_closure_lit(p, expr);
 		}
-		return lb_generate_anonymous_proc_lit(p->module, p->name, expr, p);
+		return lb_generate_anonymous_proc_lit(p->module, expr, p);
 	case_end;
 
 	case_ast_node(cl, CompoundLit, expr);
@@ -5419,7 +5419,7 @@ gb_internal lbValue lb_build_closure_lit(lbProcedure *p, Ast *expr) {
 
 	// emit the underlying function. It is created from the closure type, so its signature already
 	// carries the implicit environment-pointer parameter (see lb_get_abi_info / lb_begin_procedure_body).
-	lbValue fn = lb_generate_anonymous_proc_lit(m, p->name, expr, p);
+	lbValue fn = lb_generate_anonymous_proc_lit(m, expr, p);
 
 	LLVMTypeRef i8ptr = LLVMPointerType(LLVMInt8TypeInContext(m->ctx), 0);
 	LLVMValueRef env_i8 = LLVMConstNull(i8ptr);
@@ -5840,7 +5840,7 @@ gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 	if (ie->expr->tav.mode == Addressing_SoaVariable) {
 		Type *soa_var_type = base_type(type_of_expr(ie->expr));
 		if (!is_type_multi_pointer(type_of_expr(ie->expr)) &&
-		    (soa_var_type->kind == Type_Array || soa_var_type->kind == Type_EnumeratedArray)) {
+		    soa_var_type->kind == Type_EnumeratedArray) {
 			// Indexing into a single #soa element component, e.g. `soa[i][k]`.
 			lbAddr base_addr = lb_build_addr(p, ie->expr);
 			GB_ASSERT(base_addr.kind == lbAddr_SoaVariable);
@@ -6928,14 +6928,14 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 						GB_ASSERT(mask_width > 0);
 						bits_to_set -= mask_width;
 
-						LLVMValueRef mask = lb_const_low_bits_mask(vt, mask_width);
+						LLVMValueRef mask = lb_const_low_bits_mask(lit, mask_width);
 
-						LLVMValueRef to_set = LLVMBuildAnd(p->builder, val, mask, "");
+						LLVMValueRef to_set = LLVMBuildIntCast2(p->builder, val, lit, false, "");
+						to_set = LLVMBuildAnd(p->builder, to_set, mask, "");
 
 						if (elem_bit_offset != 0) {
-							to_set = LLVMBuildShl(p->builder, to_set, LLVMConstInt(vt, elem_bit_offset, false), "");
+							to_set = LLVMBuildShl(p->builder, to_set, LLVMConstInt(lit, elem_bit_offset, false), "");
 						}
-						to_set = LLVMBuildTrunc(p->builder, to_set, lit, "");
 
 						if (LLVMIsNull(elems[elem_idx])) {
 							elems[elem_idx] = to_set; // don't even bother doing `0 | to_set`
@@ -7096,13 +7096,16 @@ gb_internal lbAddr lb_build_addr_compound_lit(lbProcedure *p, Ast *expr) {
 
 	case Type_FixedCapacityDynamicArray: {
 		if (cl->elems.count > 0) {
-			lb_addr_store(p, v, lb_const_value(p->module, type, exact_value_compound(expr)));
+			// NOTE: the length isn't taken from the literal's constant, which is nil when its elements can't be constant
+			lbValue dst_ptr = lb_addr_get_ptr(p, v);
+			lbValue value = lb_const_value(p->module, type, exact_value_compound(expr));
+			lb_emit_store(p, lb_emit_struct_ep(p, dst_ptr, 0), lb_emit_struct_ev(p, value, 0));
+			lb_emit_store(p, lb_emit_struct_ep(p, dst_ptr, 1), lb_const_int(p->module, t_int, cl->max_count));
 
 			auto temp_data = array_make<lbCompoundLitElemTempData>(temporary_allocator(), 0, cl->elems.count);
 
 			lb_build_addr_compound_lit_populate(p, cl->elems, &temp_data, type);
 
-			lbValue dst_ptr = lb_addr_get_ptr(p, v);
 			for_array(i, temp_data) {
 				i32 index = cast(i32)(temp_data[i].elem_index);
 				temp_data[i].gep = lb_emit_array_epi(p, dst_ptr, index);
@@ -7417,7 +7420,15 @@ gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr) {
 				return lb_addr(lb_find_value_from_entity(p->module, e));
 			}
 
-			lbAddr addr = lb_build_addr(p, se->expr);
+			lbAddr addr = {};
+			if (is_type_soa_pointer(tav.type)) {
+				// auto-deref p.bar, where p is an #soa pointer;
+				// same lowering as an explicit p^.bar so `using` paths
+				// go through lbAddr_SoaVariable instead of deep-GEP on the fat pointer
+				addr = lb_addr_soa_variable_from_soa_ptr(p, lb_build_expr(p, se->expr));
+			} else {
+				addr = lb_build_addr(p, se->expr);
+			}
 
 			// NOTE(harold): Only allow ivar pseudo field access on indirect selectors.
 			//				 It is incoherent otherwise as Objective-C objects are zero-sized.
