@@ -15127,7 +15127,13 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 
 	case_ast_node(bl, BasicLit, node);
 		Type *t = t_invalid;
-		switch (node->tav.value.kind) {
+		// DUMBAI: Union promotion stores a variant wrapper in the literal's checked value. Rechecking
+		// a surrounding compound literal still needs the scalar payload to infer this literal's type.
+		ExactValue value = node->tav.value;
+		while (value.kind == ExactValue_Variant) {
+			value = value.value_variant->tav.value;
+		}
+		switch (value.kind) {
 		case ExactValue_String:     t = t_untyped_string;     break;
 		case ExactValue_String16:   t = t_string16;           break; // TODO(bill): determine this correctly
 		case ExactValue_Float:      t = t_untyped_float;      break;
@@ -15151,7 +15157,7 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 
 		o->mode  = Addressing_Constant;
 		o->type  = t;
-		o->value = node->tav.value;
+		o->value = value;
 	case_end;
 
 	case_ast_node(bd, BasicDirective, node);
