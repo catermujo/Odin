@@ -735,9 +735,37 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 		if (a == 0) {
 			break;
 		}
+		// DUMBAI: Windows launchers escape quotes with backslashes; only pairs before a quote remain backslashes.
+		if (a == '\\') {
+			in_text = true;
+			if (in_space) {
+				check_double_dash();
+				argv[argc++] = _argv + j;
+			}
+			in_space = false;
+			u32 backslashes = 0;
+			while (cmd_line[i] == '\\') {
+				backslashes++;
+				i++;
+			}
+			a = cmd_line[i];
+			u32 literal_backslashes = a == '\"' ? backslashes / 2 : backslashes;
+			for (u32 k = 0; k < literal_backslashes; k++) _argv[j++] = '\\';
+			if (a == '\"' && backslashes % 2 != 0) {
+				_argv[j++] = '\"';
+				i++;
+				continue;
+			}
+			if (a == 0) break;
+		}
 		if (in_quote) {
 			if (a == '\"') {
-				in_quote = false;
+				if (cmd_line[i+1] == '\"') {
+					_argv[j++] = '\"';
+					i++;
+				} else {
+					in_quote = false;
+				}
 			} else {
 				_argv[j++] = a;
 			}
