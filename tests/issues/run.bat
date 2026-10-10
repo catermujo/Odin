@@ -11,6 +11,10 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+REM DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
+%ODIN% build ..\test_duplicate_nested_proc_modules -o:minimal -out:duplicate_nested_proc_modules.exe || exit /b
+duplicate_nested_proc_modules.exe || exit /b
+
 %ODIN% check ..\test_inferred_array_literal_len_cycle.odin -file -no-entry-point %COMMON% || exit /b
 
 %ODIN% test ..\test_issue_proc_group_cached_signature.odin -file %COMMON% || exit /b

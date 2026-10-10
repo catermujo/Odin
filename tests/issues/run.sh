@@ -11,6 +11,10 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+# DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
+$ODIN build ../test_duplicate_nested_proc_modules -o:minimal -out:duplicate_nested_proc_modules
+./duplicate_nested_proc_modules
+
 if [[ $($ODIN check ../test_issue_union_operator_type_hint_reject.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
