@@ -11,6 +11,10 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+if [[ "$(uname -s)" == Darwin ]]; then
+	$ODIN test ../test_issue_objc_message_dependencies.odin -file $COMMON
+fi
+
 $ODIN check ../test_issue_deferred_build_tag_import_order/entry -collection:deferred_backend=../test_issue_deferred_build_tag_import_order/backend -no-entry-point $COMMON_NO_FILE
 
 # DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
