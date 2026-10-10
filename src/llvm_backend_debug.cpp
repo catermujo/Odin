@@ -610,6 +610,21 @@ gb_internal LLVMMetadataRef lb_debug_bitset(lbModule *m, Type *type, String name
 	u32 align_in_bits = 8*cast(u32)type_align_of(bt);
 
 	LLVMMetadataRef bit_set_field_type = lb_debug_type(m, t_bool);
+	// DUMBAI: Anonymous flag records let union members overlap without forcing a sequential bit-field layout.
+	auto create_flag = [&](char const *field_name, size_t field_name_len, u64 offset_in_bits) {
+		LLVMMetadataRef flag = LLVMDIBuilderCreateBitFieldMemberType(
+			m->debug_builder, scope, field_name, field_name_len, file, line,
+			1, offset_in_bits, 0, LLVMDIFlagZero, bit_set_field_type
+		);
+		LLVMMetadataRef record = LLVMDIBuilderCreateStructType(
+			m->debug_builder, scope, "", 0, file, line, size_in_bits, align_in_bits,
+			LLVMDIFlagZero, nullptr, &flag, 1, 0, nullptr, "", 0
+		);
+		return LLVMDIBuilderCreateMemberType(
+			m->debug_builder, scope, "", 0, file, line, size_in_bits, align_in_bits,
+			0, LLVMDIFlagZero, record
+		);
+	};
 
 	unsigned element_count = 0;
 	LLVMMetadataRef *elements = nullptr;
@@ -625,17 +640,7 @@ gb_internal LLVMMetadataRef lb_debug_bitset(lbModule *m, Type *type, String name
 			i64 val = exact_value_to_i64(f->Constant.value);
 			String field_name = f->token.string;
 			u64 offset_in_bits = cast(u64)(val - bt->BitSet.lower);
-			elements[i] = LLVMDIBuilderCreateBitFieldMemberType(
-				m->debug_builder,
-				scope,
-				cast(char const *)field_name.text, field_name.len,
-			 	file, line,
-			 	1,
-			 	offset_in_bits,
-			 	0,
-			 	LLVMDIFlagZero,
-			 	bit_set_field_type
-			);
+			elements[i] = create_flag(cast(char const *)field_name.text, field_name.len, offset_in_bits);
 		}
 	} else {
 		char name[32] = {};
@@ -651,17 +656,7 @@ gb_internal LLVMMetadataRef lb_debug_bitset(lbModule *m, Type *type, String name
 			u64 offset_in_bits = i;
 			i64 val = bt->BitSet.lower + cast(i64)i;
 			gb_snprintf(name, gb_count_of(name), "%lld", cast(long long)val);
-			elements[i] = LLVMDIBuilderCreateBitFieldMemberType(
-				m->debug_builder,
-				scope,
-				name, gb_strlen(name),
-				file, line,
-				1,
-				offset_in_bits,
-				0,
-				LLVMDIFlagZero,
-				bit_set_field_type
-			);
+			elements[i] = create_flag(name, gb_strlen(name), offset_in_bits);
 		}
 	}
 

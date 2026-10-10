@@ -112,6 +112,9 @@ jobs:
         run: ./odin version
       - name: Odin report
         run: ./odin report
+      - name: LLDB bit-set debug info
+        if: matrix.os == 'macos-latest'
+        run: python3 tests/debug_bit_set.py
       - name: Get needed vendor libs
         if: matrix.os == 'ubuntu-24.04-arm'
         run: sudo apt-get install -y liblua5.4-dev
