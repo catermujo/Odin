@@ -62,6 +62,7 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 ..\..\..\odin check ..\test_issue_deferred_build_tag_imported_constant\entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false %COMMON_NO_FILE% || exit /b
 ..\..\..\odin check ..\test_issue_build_tag_define_pkg_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 ..\..\..\odin check ..\test_issue_deferred_when_import -no-entry-point %COMMON_NO_FILE% || exit /b
+..\..\..\odin check ..\test_issue_deferred_build_tag_import_order\entry -collection:deferred_backend=..\test_issue_deferred_build_tag_import_order\backend -no-entry-point %COMMON_NO_FILE% || exit /b
 ..\..\..\odin test ..\test_pr_6476.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_6484.odin -no-entry-point %COMMON%  || exit /b
 ..\..\..\odin test ..\test_issue_6753.odin %COMMON%  || exit /b

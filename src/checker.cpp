@@ -7893,6 +7893,10 @@ gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> cons
 	}
 	thread_pool_wait();
 	check_prepare_new_packages(c, first_package_index);
+	// DUMBAI: Deferred tags may depend on constants from packages added by these imports.
+	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
+		check_export_entities_in_pkg(ctx, c->parser->packages[i], untyped);
+	}
 
 	for (AstFile *f : files) {
 		f->flags &= ~AstFile_HasDeferredBuildTags;

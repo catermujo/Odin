@@ -1,0 +1,3 @@
+package test_issue_deferred_build_tag_import_order
+
+ENABLE_DEFERRED_BACKEND :: true
