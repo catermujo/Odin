@@ -9,6 +9,8 @@ set ODIN=..\..\..\odin
 
 @echo on
 
+%ODIN% run ..\test_issue_reference_range_alias.odin -file %COMMON% -debug || exit /b
+
 @rem #########################################################################################################
 
 @rem CONTRIBUTORS:

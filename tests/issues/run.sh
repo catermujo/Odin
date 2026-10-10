@@ -9,6 +9,8 @@ COMMON_CHECK="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-de
 
 set -x
 
+$ODIN run ../test_issue_reference_range_alias.odin -file $COMMON -debug
+
 #########################################################################################################
 
 # CONTRIBUTORS:
