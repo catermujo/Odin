@@ -5658,21 +5658,21 @@ gb_internal void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d, 
 	}
 	GB_ASSERT(d != nullptr);
 
-	if (d->scope != e->scope) {
+	Scope *scope = e->scope;
+	if (scope == nullptr || (scope->flags & ScopeFlag_File) == 0) {
 		return;
 	}
 
 	CheckerContext *ctx = create_checker_context(c);
 
-	GB_ASSERT(d->scope->flags&ScopeFlag_File);
-	AstFile *file = d->scope->file;
+	AstFile *file = scope->file;
 	add_curr_ast_file(ctx, file);
 	AstPackage *pkg = file->pkg;
 
 	GB_ASSERT(ctx->pkg != nullptr);
 	GB_ASSERT(e->pkg != nullptr);
 	ctx->decl = d;
-	ctx->scope = d->scope;
+	ctx->scope = scope;
 	ctx->untyped = untyped;
 
 	if (pkg->kind == Package_Init) {
