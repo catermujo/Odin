@@ -178,6 +178,9 @@ jobs:
         run: ./odin version
       - name: Odin report
         run: ./odin report
+      - name: LLDB bit-set debug info
+        if: matrix.os == 'macos-latest'
+        run: python3 tests/debug_bit_set.py
       - name: Compile needed Vendor
         run: |
           export ODIN_ROOT="$(pwd)"
