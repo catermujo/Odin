@@ -382,6 +382,8 @@ $ODIN test ../test_lifetime_markers.odin $COMMON -o:size -lifetime-markers
 $ODIN test ../test_lifetime_markers.odin $COMMON -o:speed -lifetime-markers
 $ODIN test ../test_issue_7547.odin $COMMON
 $ODIN test ../test_issue_7490.odin $COMMON
+$ODIN test ../test_map_value_range.odin $COMMON -o:none
+$ODIN test ../test_map_value_range.odin $COMMON -o:speed
 
 set +x
 
