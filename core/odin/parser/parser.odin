@@ -1374,12 +1374,13 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 }
 
 parse_with_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
+	tok := expect_token(p, .With)
 	if p.curr_proc == nil {
-		error(p, p.curr_tok.pos, "you cannot use a with statement in the file scope")
-		return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+		// DUMBAI: Consume the rejected keyword so file-scope recovery cannot append bad statements forever.
+		error(p, tok.pos, "you cannot use a with statement in the file scope")
+		return ast.new(ast.Bad_Stmt, tok.pos, end_pos(tok))
 	}
 
-	tok := expect_token(p, .With)
 	prev_level := p.expr_level
 	p.expr_level = -1
 	first := parse_simple_stmt(p, {})
