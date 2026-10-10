@@ -11,6 +11,8 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+%ODIN% check ..\test_issue_deferred_build_tag_import_order\entry -collection:deferred_backend=..\test_issue_deferred_build_tag_import_order\backend -no-entry-point %COMMON_NO_FILE% || exit /b
+
 REM DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
 %ODIN% build ..\test_duplicate_nested_proc_modules -o:minimal -out:duplicate_nested_proc_modules.exe || exit /b
 duplicate_nested_proc_modules.exe || exit /b
