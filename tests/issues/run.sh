@@ -11,6 +11,16 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+
+case "$(uname -s)" in
+	Darwin) SHARED_RUNTIME_EXT=dylib ;;
+	*) SHARED_RUNTIME_EXT=so ;;
+esac
+$ODIN build ../test_issue_shared_runtime/library.odin -file $COMMON -debug -o:minimal -build-mode:dll -out:"$PWD/shared_runtime.$SHARED_RUNTIME_EXT"
+$ODIN build ../test_issue_shared_runtime/host.odin -file $COMMON -debug -o:minimal -out:shared_runtime_host
+./shared_runtime_host "$PWD/shared_runtime.$SHARED_RUNTIME_EXT"
+
+
 $ODIN check ../test_issue_soa_pointer_return.odin -file $COMMON_CHECK
 if [[ $($ODIN check ../test_issue_soa_pointer_return_reject.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"

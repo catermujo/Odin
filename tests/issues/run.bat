@@ -11,6 +11,12 @@ set COMMON_NO_FILE=-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unus
 
 @echo on
 
+
+%ODIN% build ..\test_issue_shared_runtime\library.odin -file %COMMON% -debug -o:minimal -build-mode:dll -out:shared_runtime.dll || exit /b
+%ODIN% build ..\test_issue_shared_runtime\host.odin -file %COMMON% -debug -o:minimal -out:shared_runtime_host.exe || exit /b
+shared_runtime_host.exe "%CD%\shared_runtime.dll" || exit /b
+
+
 %ODIN% test ..\test_issue_recursive_poly_alias.odin -file %COMMON%  || exit /b
 
 %ODIN% check ..\test_issue_retired_build_define.odin -file -no-entry-point %COMMON% 2>&1 | find /c "Syntax Error:" | findstr /x "1" || exit /b
