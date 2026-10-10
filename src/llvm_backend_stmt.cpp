@@ -1207,6 +1207,15 @@ gb_internal void lb_build_range_tuple(lbProcedure *p, AstRangeStmt *rs, Scope *s
 	lb_start_block(p, done);
 }
 
+gb_internal lbAddr lb_build_range_addr(lbProcedure *p, Ast *expr) {
+	lbAddr addr = lb_build_addr(p, expr);
+	if (addr.kind == lbAddr_Map) {
+		// DUMBAI: range over the map lookup value, including its zero value for an absent key, not a nullable entry.
+		return lb_addr(lb_address_from_load_or_generate_local(p, lb_addr_load(p, addr)));
+	}
+	return addr;
+}
+
 gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs, Scope *scope) {
 	Ast *expr = unparen_expr(rs->expr);
 	TypeAndValue tav = type_and_value_of_expr(expr);
@@ -1235,7 +1244,7 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 
 
 
-	lbAddr array = lb_build_addr(p, expr);
+	lbAddr array = lb_build_range_addr(p, expr);
 	if (is_type_pointer(lb_addr_type(array))) {
 		array = lb_addr(lb_addr_load(p, array));
 	}
@@ -1414,7 +1423,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 		switch (et->kind) {
 		case Type_Map: {
 			is_map = true;
-			lbValue map = lb_build_addr_ptr(p, expr);
+			lbValue map = lb_addr_get_ptr(p, lb_build_range_addr(p, expr));
 			if (is_type_pointer(type_deref(map.type))) {
 				map = lb_emit_load(p, map);
 			}
@@ -1425,7 +1434,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 			lbValue array = {};
 			lbAddr const *soa_elem = nullptr;
 			attach_full_unroll_metadata = lb_small_constant_trip_count(et->Array.count);
-			lbAddr addr = lb_build_addr(p, expr);
+			lbAddr addr = lb_build_range_addr(p, expr);
 			switch (addr.kind) {
 			case lbAddr_Swizzle:
 			case lbAddr_SwizzleLarge:
@@ -1467,7 +1476,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 		}
 		case Type_EnumeratedArray: {
 			attach_full_unroll_metadata = lb_small_constant_trip_count(et->EnumeratedArray.count);
-			lbValue array = lb_build_addr_ptr(p, expr);
+			lbValue array = lb_addr_get_ptr(p, lb_build_range_addr(p, expr));
 			if (is_type_pointer(type_deref(array.type))) {
 				array = lb_emit_load(p, array);
 			}
@@ -1477,7 +1486,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 			break;
 		}
 		case Type_FixedCapacityDynamicArray: {
-			lbValue array = lb_build_addr_ptr(p, expr);
+			lbValue array = lb_addr_get_ptr(p, lb_build_range_addr(p, expr));
 			if (is_type_pointer(type_deref(array.type))) {
 				array = lb_emit_load(p, array);
 			}
@@ -1487,7 +1496,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 		}
 		case Type_DynamicArray: {
 			lbValue count_ptr = {};
-			lbValue array = lb_build_addr_ptr(p, expr);
+			lbValue array = lb_addr_get_ptr(p, lb_build_range_addr(p, expr));
 			if (is_type_pointer(type_deref(array.type))) {
 				array = lb_emit_load(p, array);
 			}
