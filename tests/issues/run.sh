@@ -33,6 +33,7 @@ $ODIN run ../test_issue_soa_scalar_swizzle_assign.odin $COMMON
 
 if [[ "$(uname -s)" == Darwin ]]; then
 	$ODIN run ../test_issue_objc_register_class_name.odin $COMMON
+	$ODIN test ../test_issue_objc_message_dependencies.odin $COMMON
 fi
 
 $ODIN test ../test_issue_829.odin $COMMON
