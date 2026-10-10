@@ -2482,6 +2482,7 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 		LLVMSetDLLStorageClass(g.value, LLVMDLLExportStorageClass);
 	} else if (!is_foreign) {
 		LLVM_SET_INTERNAL_WEAK_LINKAGE(g.value);
+		LLVMSetVisibility(g.value, LLVMHiddenVisibility);
 	}
 	lb_set_linkage_from_entity_flags(m, g.value, e->flags);
 	LLVMSetAlignment(g.value, cast(u32)type_align_of(e->type));

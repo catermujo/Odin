@@ -198,6 +198,15 @@ $ODIN test ../test_issue_bool_comparison_truthiness.odin $COMMON
 $ODIN test ../test_issue_const_array_broadcast.odin $COMMON
 $ODIN test ../test_issue_decl_order.odin $COMMON
 $ODIN test ../test_issue_recursive_poly_alias.odin $COMMON
+
+case "$(uname -s)" in
+	Darwin) SHARED_RUNTIME_EXT=dylib ;;
+	*) SHARED_RUNTIME_EXT=so ;;
+esac
+$ODIN build ../test_issue_shared_runtime/library.odin $COMMON -debug -o:minimal -build-mode:dll -out:"$PWD/shared_runtime.$SHARED_RUNTIME_EXT"
+$ODIN build ../test_issue_shared_runtime/host.odin $COMMON -debug -o:minimal -out:shared_runtime_host
+./shared_runtime_host "$PWD/shared_runtime.$SHARED_RUNTIME_EXT"
+
 $ODIN test ../test_issue_distinct_constraint.odin $COMMON
 if [[ $($ODIN check ../test_issue_ambiguous_union_literal.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
