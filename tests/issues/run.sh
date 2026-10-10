@@ -11,6 +11,10 @@ set -x
 
 $ODIN run ../test_issue_reference_range_alias.odin $COMMON -debug
 
+if [[ "$(uname -s)" == Darwin ]]; then
+	$ODIN run ../test_issue_objc_register_class_name.odin $COMMON
+fi
+
 $ODIN test ../test_issue_829.odin $COMMON
 $ODIN test ../test_issue_1592.odin $COMMON
 $ODIN test ../test_issue_1730.odin $COMMON
