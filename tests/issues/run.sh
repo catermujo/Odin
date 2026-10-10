@@ -222,6 +222,12 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+if [[ $($ODIN check ../test_issue_union_operator_type_hint_reject.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 $ODIN test ../test_issue_proc_constant_instantiation.odin $COMMON
 $ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON
 $ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON -no-threaded-checker

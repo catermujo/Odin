@@ -4921,6 +4921,22 @@ gb_internal bool can_use_other_type_as_type_hint(bool use_lhs_as_type_hint, Type
 	return false;
 }
 
+gb_internal Type *type_hint_for_operator_expression(Type *type_hint) {
+	while (type_hint != nullptr) {
+		Type *type = base_type(type_hint);
+		if (!is_type_union(type)) {
+			return type_hint;
+		}
+
+		wait_for_record_signal(&type->Union.variants_wait_signal, &type->Union.checking_thread);
+		if (type->Union.variants.count != 1) {
+			return nullptr;
+		}
+		type_hint = type->Union.variants[0];
+	}
+	return nullptr;
+}
+
 gb_internal Type *check_matrix_type_hint(Type *matrix, Type *type_hint) {
 	Type *xt = base_type(matrix);
 	if (type_hint != nullptr) {
@@ -5201,6 +5217,7 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 	});
 
 	Token op = be->op;
+	Type *operand_type_hint = token_is_comparison(op.kind) ? nullptr : type_hint_for_operator_expression(type_hint);
 	switch (op.kind) {
 	case Token_CmpEq:
 	case Token_NotEq: {
@@ -5338,19 +5355,19 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 	default:
 		if (is_ise_expr(be->left)) {
 			// Evalute the right before the left for an '.X' expression
-			check_expr_or_type(c, y, be->right, token_is_comparison(op.kind) ? nullptr : type_hint);
+			check_expr_or_type(c, y, be->right, token_is_comparison(op.kind) ? nullptr : operand_type_hint);
 
 			if (can_use_other_type_as_type_hint(use_lhs_as_type_hint, y->type)) { // RHS in this case
 				check_expr_or_type(c, x, be->left, y->type);
 			} else {
-				check_expr_with_type_hint(c, x, be->left, type_hint);
+				check_expr_with_type_hint(c, x, be->left, operand_type_hint);
 			}
 		} else {
-			check_expr_with_type_hint(c, x, be->left, type_hint);
+			check_expr_with_type_hint(c, x, be->left, operand_type_hint);
 			if (can_use_other_type_as_type_hint(use_lhs_as_type_hint, x->type)) {
 				check_expr_with_type_hint(c, y, be->right, x->type);
 			} else {
-				check_expr_with_type_hint(c, y, be->right, token_is_comparison(op.kind) ? nullptr : type_hint);
+				check_expr_with_type_hint(c, y, be->right, token_is_comparison(op.kind) ? nullptr : operand_type_hint);
 			}
 		}
 		break;
@@ -5400,7 +5417,7 @@ gb_internal void check_binary_expr(CheckerContext *c, Operand *x, Ast *node, Typ
 	check_binary_expr_dependency(c, op, bty, REQUIRE);
 
 	if (token_is_shift(op.kind)) {
-		check_shift(c, x, y, node, type_hint);
+		check_shift(c, x, y, node, operand_type_hint);
 		return;
 	}
 
@@ -15384,7 +15401,7 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 	case_end;
 
 	case_ast_node(ue, UnaryExpr, node);
-		Type *th = type_hint;
+		Type *th = type_hint_for_operator_expression(type_hint);
 		if (ue->op.kind == Token_And) {
 			th = type_deref(th);
 			if (check_unary_address_index_expr_custom_overload(c, o, node)) {
