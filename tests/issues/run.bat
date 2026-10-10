@@ -7,6 +7,8 @@ set COMMON=-define:ODIN_TEST_FANCY=false -file -vet -strict-style -ignore-unused
 
 @echo on
 
+..\..\..\odin run ..\test_issue_reference_range_alias.odin %COMMON% -debug || exit /b
+
 ..\..\..\odin test ..\test_issue_829.odin  %COMMON%   || exit /b
 ..\..\..\odin test ..\test_issue_1592.odin %COMMON%  || exit /b
 ..\..\..\odin test ..\test_issue_1730.odin %COMMON% || exit /b

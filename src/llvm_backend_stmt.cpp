@@ -2194,7 +2194,7 @@ gb_internal lbAddr lb_store_range_stmt_val(lbProcedure *p, Ast *stmt_val, lbValu
 
 	if ((e->flags & EntityFlag_Value) == 0) {
 		if (LLVMIsALoadInst(value.value)) {
-			lbValue ptr = lb_address_from_load_or_generate_local(p, value);
+			lbValue ptr = lb_address_from_load(p, value);
 			lb_add_entity(p->module, e, ptr);
 			lb_add_debug_local_variable(p, ptr.value, e->type, e->token);
 			return lb_addr(ptr);
