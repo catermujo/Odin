@@ -1316,7 +1316,7 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 
 
 
-	lbAddr array = lb_build_addr(p, expr);
+	lbAddr array = lb_addr(lb_range_addr_get_ptr(p, lb_build_addr(p, expr)));
 	if (is_type_pointer(lb_addr_type(array))) {
 		array = lb_addr(lb_addr_load(p, array));
 	}

@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN test ../test_map_value_range.odin -file $COMMON -o:none
+$ODIN test ../test_map_value_range.odin -file $COMMON -o:speed
+
 # A package can have no active files for a target. Debug object generation must handle that case.
 $ODIN build ../test_issue_debug_empty_package.odin -file -no-entry-point -target:js_wasm32 -build-mode:obj -debug -out:debug_empty_package.wasm.o
 
