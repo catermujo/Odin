@@ -990,6 +990,11 @@ gb_internal void lb_build_nested_proc(lbProcedure *p, AstProcLit *pd, Entity *e)
 		// NOTE(tf2spi): Code may already be generated (i.e. loop unrolling), don't regen it
 		return;
 	}
+	// DUMBAI: Keep nested definitions in their inherited module and import them elsewhere.
+	if (lb_module_of_entity(m->gen, e, m) != m) {
+		(void)lb_find_procedure_value_from_entity(m, e);
+		return;
+	}
 
 	// NOTE(bil): Nested procedures are named by `lb_get_entity_name` from its enclosing declarations
 	lbProcedure *nested_proc = lb_create_procedure(p->module, e);

@@ -88,6 +88,9 @@ shared_runtime_host.exe "%CD%\shared_runtime.dll" || exit /b
 ..\..\..\odin test ..\test_issue_proc_constant_instantiation.odin %COMMON%  || exit /b
 ..\..\..\odin test ..\test_issue_proc_group_cached_signature.odin %COMMON% || exit /b
 ..\..\..\odin test ..\test_issue_proc_group_cached_signature.odin %COMMON% -no-threaded-checker || exit /b
+REM DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
+..\..\..\odin build ..\test_duplicate_nested_proc_modules -o:minimal -out:duplicate_nested_proc_modules.exe || exit /b
+duplicate_nested_proc_modules.exe || exit /b
 ..\..\..\odin test ..\test_issue_global_when_order.odin %COMMON%  || exit /b
 ..\..\..\odin check ..\test_issue_global_when_cycle.odin -no-entry-point %COMMON% 2>&1 | find /c "Contradictory global" | findstr /x "4" || exit /b
 ..\..\..\odin test ..\test_issue_global_when_cycle_accepted.odin %COMMON%  || exit /b

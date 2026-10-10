@@ -231,6 +231,9 @@ fi
 $ODIN test ../test_issue_proc_constant_instantiation.odin $COMMON
 $ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON
 $ODIN test ../test_issue_proc_group_cached_signature.odin $COMMON -no-threaded-checker
+# DUMBAI: Keep the byte-sensitive package split intact; COMMON's -file and style flags change this repro.
+$ODIN build ../test_duplicate_nested_proc_modules -o:minimal -out:duplicate_nested_proc_modules
+./duplicate_nested_proc_modules
 $ODIN test ../test_issue_swizzle_multi_assign.odin $COMMON
 $ODIN test ../test_issue_global_when_order.odin $COMMON
 if [[ $($ODIN check ../test_issue_global_when_cycle.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Contradictory global 'when'") -eq 4 ]]; then

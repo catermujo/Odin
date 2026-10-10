@@ -869,6 +869,16 @@ gb_internal lbModule *lb_module_of_entity_internal(lbGenerator *gen, Entity *e, 
 		if (mod) {
 			return mod;
 		}
+		// DUMBAI: A nested procedure is emitted with its enclosing procedure, so inherit its module owner.
+		for (DeclInfo *parent = e->decl_info->parent; parent != nullptr; parent = parent->parent) {
+			if (parent->proc_lit == nullptr) {
+				continue;
+			}
+			Entity *parent_entity = parent->entity.load(std::memory_order_relaxed);
+			if (parent_entity != nullptr) {
+				return lb_module_of_entity_internal(gen, parent_entity, curr_module);
+			}
+		}
 	}
 	if (e->file) {
 		found = map_get(&gen->modules, cast(void *)e->file);
