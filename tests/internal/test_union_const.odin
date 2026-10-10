@@ -1,6 +1,7 @@
 package test_internal
 
 import "core:testing"
+import "core:time"
 
 // `U(3)` records the union as the constant's type, so the backend has to peel it back to the variant
 // the checker resolved. It could not, and panicked in lb_const_value. The variant cannot be guessed
@@ -73,6 +74,69 @@ nested_union_implicit_cast :: proc(t: ^testing.T) {
 	Bv: B: Cv
 	Cv: C: {}
 	testing.expect_value(t, Av, A(B(C{})))
+}
+
+@(test)
+union_operator_type_hints :: proc(t: ^testing.T) {
+	maybe_negative: Maybe(int) = -1
+	negative, negative_ok := maybe_negative.(int)
+	testing.expect(t, negative_ok, "negative value did not select the Maybe(int) variant")
+	testing.expect_value(t, negative, -1)
+
+	cast_negative := Maybe(int)(-1)
+	cast_negative_value, cast_negative_ok := cast_negative.(int)
+	testing.expect(t, cast_negative_ok, "negative cast did not select the Maybe(int) variant")
+	testing.expect_value(t, cast_negative_value, -1)
+
+	nested_negative: Maybe(Maybe(int)) = -1
+	nested_value, nested_ok := nested_negative.(Maybe(int))
+	testing.expect(t, nested_ok, "nested Maybe did not select its payload variant")
+	nested_int, nested_int_ok := nested_value.(int)
+	testing.expect(t, nested_int_ok, "nested Maybe did not select its integer variant")
+	testing.expect_value(t, nested_int, -1)
+
+	pointee := 42
+	maybe_pointer: Maybe(^int) = &pointee
+	pointer, pointer_ok := maybe_pointer.(^int)
+	testing.expect(t, pointer_ok, "address expression did not select the Maybe(pointer) variant")
+	testing.expect_value(t, pointer, &pointee)
+
+	left, right: i64 = 1, 2
+	maybe_less: Maybe(bool) = left < right
+	less, less_ok := maybe_less.(bool)
+	testing.expect(t, less_ok, "ordering comparison did not select the Maybe(bool) variant")
+	testing.expect(t, less, "ordering comparison returned false")
+
+	maybe_duration: Maybe(time.Duration) = 3 * time.Second
+	duration, duration_ok := maybe_duration.(time.Duration)
+	testing.expect(t, duration_ok, "duration expression did not select the Maybe(Duration) variant")
+	testing.expect_value(t, duration, 3 * time.Second)
+
+	cast_duration := Maybe(time.Duration)(3 * time.Second)
+	cast_value, cast_ok := cast_duration.(time.Duration)
+	testing.expect(t, cast_ok, "duration cast did not select the Maybe(Duration) variant")
+	testing.expect_value(t, cast_value, 3 * time.Second)
+
+	Number :: union #no_nil { i128, f64 }
+	price: f64 = 2.5
+	percent: Number = 0.01 * price
+	percent_value, percent_ok := percent.(f64)
+	testing.expect(t, percent_ok, "typed operand did not select the f64 union variant")
+	testing.expect_value(t, percent_value, 0.025)
+
+	Integer_Width :: union #no_nil { i8, i16 }
+	wide: Integer_Width = 200 + 100
+	wide_value, wide_ok := wide.(i16)
+	testing.expect(t, wide_ok, "integer expression did not select the representable i16 variant")
+	testing.expect_value(t, wide_value, 300)
+
+	wide_shift: Integer_Width = 200 << 1
+	wide_shift_value, wide_shift_ok := wide_shift.(i16)
+	testing.expect(t, wide_shift_ok, "shift did not select the representable i16 variant")
+	testing.expect_value(t, wide_shift_value, 400)
+
+	scalar_width: i8 = 100 + 20
+	testing.expect_value(t, scalar_width, 120)
 }
 
 @(test)
