@@ -11,6 +11,8 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 set -x
 
 $ODIN run ../test_issue_reference_range_alias.odin $COMMON -debug
+$ODIN run ../test_issue_reference_union_storage.odin $COMMON -debug -o:none
+$ODIN run ../test_issue_reference_union_storage.odin $COMMON -debug -o:speed
 
 $ODIN run ../test_issue_polymorphic_rejected_cache.odin $COMMON -no-threaded-checker
 

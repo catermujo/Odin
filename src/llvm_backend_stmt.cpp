@@ -2269,19 +2269,25 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 	GB_ASSERT(as->lhs.count == 1);
 	GB_ASSERT(as->rhs.count == 1);
 
-	lbValue parent = lb_build_expr(p, as->rhs[0]);
-	bool is_parent_ptr = is_type_pointer(parent.type);
+	Ast *lhs = unparen_expr(as->lhs[0]);
+	bool is_addressed = lhs->kind == Ast_UnaryExpr && lhs->UnaryExpr.op.kind == Token_And;
+	lbValue parent = {};
+	lbValue parent_ptr = {};
+	if (is_addressed && !is_type_pointer(type_of_expr(as->rhs[0]))) {
+		lbAddr addr = lb_build_addr(p, as->rhs[0]);
+		parent = lb_addr_load(p, addr);
+		// DUMBAI: Reference cases borrow the original union, even when an under-aligned load is scalarized.
+		parent_ptr = addr.kind == lbAddr_Default ? addr.addr : lb_address_from_load_or_generate_local(p, parent);
+	} else {
+		parent = lb_build_expr(p, as->rhs[0]);
+		parent_ptr = is_type_pointer(parent.type) ? parent : lb_address_from_load_or_generate_local(p, parent);
+	}
 	Type *parent_base_type = type_deref(parent.type);
 
 	TypeSwitchKind switch_kind = check_valid_type_switch_type(parent.type);
 	GB_ASSERT(switch_kind != TypeSwitch_Invalid);
 
 	lbValue parent_value = parent;
-
-	lbValue parent_ptr = parent;
-	if (!is_parent_ptr) {
-		parent_ptr = lb_address_from_load_or_generate_local(p, parent);
-	}
 
 	lbValue tag = {};
 	lbValue union_data = {};
