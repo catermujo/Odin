@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN run ../test_issue_reference_union_storage.odin -file $COMMON -debug -o:none
+$ODIN run ../test_issue_reference_union_storage.odin -file $COMMON -debug -o:speed
+
 if [[ "$(uname -s)" == Darwin ]]; then
 	$ODIN test ../test_issue_objc_message_dependencies.odin -file $COMMON
 fi
