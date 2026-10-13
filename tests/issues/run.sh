@@ -11,6 +11,14 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+case "$(uname -s)" in
+	Darwin|Linux)
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE -o:speed
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE -use-separate-modules
+		;;
+esac
+
 $ODIN run ../test_issue_reference_union_storage.odin -file $COMMON -debug -o:none
 $ODIN run ../test_issue_reference_union_storage.odin -file $COMMON -debug -o:speed
 
