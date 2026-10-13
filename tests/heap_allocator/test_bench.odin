@@ -5,7 +5,7 @@ package tests_heap_allocator
 
 import "base:intrinsics"
 import "base:runtime"
-import "base:sanitizer"
+@(require) import "base:sanitizer"
 import "core:flags"
 import "core:fmt"
 import "core:log"
@@ -643,6 +643,94 @@ test_orphaned_huge_segment_with_remote_free :: proc() {
 	log.info("Orphaned huge segment with remote free test succeeded.")
 }
 
+/*
+Workers free memory from the main thread just before they exit, and some of
+them also free their own `Thread` as they exit. Other threads allocate Huge
+buffers at the same time.
+
+This test found three faults. A remote free could touch a Segment that its
+owner had already released. An exiting heap could merge remote frees into
+Segments that another thread had adopted. A remote free could also push onto
+a heap that had already been freed.
+*/
+test_cross_thread_free_at_thread_exit :: proc(rounds: int) {
+	context.allocator = runtime.heap_allocator()
+
+	Job :: struct {
+		huge:  []byte,
+		large: []byte,
+		small: []byte,
+		done:  ^int,
+	}
+
+	worker :: proc(job: ^Job) {
+		own := make([]byte, runtime.Megabyte)
+		for i := 0; i < len(own); i += 4096 {
+			own[i] = 1
+		}
+		delete(own)
+		delete(job.huge)
+		delete(job.large)
+		delete(job.small)
+		done := job.done
+		free(job)
+		sync.atomic_add(done, 1)
+	}
+
+	stop: bool
+	huge_allocator :: proc(stop: ^bool) {
+		for !sync.atomic_load(stop) {
+			huge := make([]byte, 4 * runtime.Megabyte + 100)
+			for i := 0; i < len(huge); i += 4096 {
+				huge[i] = 2
+			}
+			small := make([]byte, 200)
+			delete(huge)
+			delete(small)
+		}
+	}
+
+	allocators: [4]^thread.Thread
+	for &t in allocators {
+		t = thread.create_and_start_with_poly_data(&stop, huge_allocator, context)
+		expect(t != nil)
+	}
+
+	// Self-cleaning workers may still run in the next round, as in a real program.
+	done: int
+	for _ in 0..<rounds {
+		joined: [4]^thread.Thread
+		for i in 0..<8 {
+			job := new(Job)
+			job.huge = make([]byte, 2 * runtime.Megabyte)
+			job.large = make([]byte, 300 * runtime.Kilobyte)
+			job.small = make([]byte, 64)
+			job.done = &done
+			if i < len(joined) {
+				joined[i] = thread.create_and_start_with_poly_data(job, worker, context)
+				expect(joined[i] != nil)
+			} else {
+				t := thread.create_and_start_with_poly_data(job, worker, context, self_cleanup = true)
+				expect(t != nil)
+			}
+		}
+		for t in joined {
+			thread.join(t)
+			thread.destroy(t)
+		}
+	}
+	for sync.atomic_load(&done) != rounds * 8 {
+		time.sleep(time.Millisecond)
+	}
+
+	sync.atomic_store(&stop, true)
+	for t in allocators {
+		thread.join(t)
+		thread.destroy(t)
+	}
+	log.info("Cross-thread free at thread exit test succeeded.")
+}
+
 test_adopted_huge_segment_freed_before_larger_request :: proc() {
 	bytes: []byte
 	worker := thread.create_and_start_with_data(&bytes, proc(data: rawptr) {
@@ -1054,6 +1142,7 @@ main :: proc() {
 			test_orphaned_segment_with_remote_frees()
 			test_orphaned_huge_segment_with_remote_free()
 			test_adopted_huge_segment_freed_before_larger_request()
+			test_cross_thread_free_at_thread_exit(10_000 if opt.long else (300 when ODIN_DEBUG else 2_000))
 
 			// Reset the heap, removing any of the dirty slabs before the next tests.
 			runtime.compact_local_heap()

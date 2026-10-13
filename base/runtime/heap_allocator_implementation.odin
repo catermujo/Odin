@@ -1035,14 +1035,21 @@ heap_take_free_list :: proc "contextless" (list: ^Tagged_Pointer) -> ^uintptr {
 // pushed to the remote free list that is on the heap that owns `segment`.
 @(private="file", no_sanitize_address)
 push_onto_remote_free_list :: proc "contextless" (segment: ^Heap_Segment, list: ^Tagged_Pointer, ptr: rawptr) {
-	intrinsics.atomic_add_explicit(&segment.remote_operations, 1, .Acquire)
+	// The owner may merge `ptr` and release `segment` as soon as `ptr` is
+	// published. `heap_free_segment` waits for this count to reach zero, so
+	// the decrement below never touches released memory.
+	//
+	// Sequential consistency pairs this increment and the `segment.heap` load
+	// with the store and load in `heap_local_cleanup`. Either the exiting
+	// thread waits for this free, or this free sees the detached heap.
+	intrinsics.atomic_add_explicit(&segment.remote_operations, 1, .Seq_Cst)
 	defer intrinsics.atomic_sub_explicit(&segment.remote_operations, 1, .Release)
 
 	old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)list, .Relaxed)
 	for {
 		if is_free_list_closed(old_head) {
 			// The list is closed; we must redirect the pointer to the heap.
-			target_heap := intrinsics.atomic_load_explicit(&segment.heap, .Acquire)
+			target_heap := intrinsics.atomic_load_explicit(&segment.heap, .Seq_Cst)
 			if target_heap != nil {
 				atomic_pop_push_pointer(&target_heap.remote_free_list, ptr, cast(^uintptr)ptr)
 				return
@@ -1103,6 +1110,12 @@ heap_merge_remote_free_list :: proc "contextless" () {
 
 @(no_sanitize_address)
 heap_free_segment :: proc "contextless" (segment: ^Heap_Segment) {
+	// A remote free publishes its bin before it leaves `remote_operations`.
+	// Keep the metadata alive until every such free is done with it.
+	for intrinsics.atomic_load_explicit(&segment.remote_operations, .Acquire) != 0 {
+		intrinsics.cpu_relax()
+	}
+
 	// Remove all slabs belonging to this segment from the heap.
 	for &slab in segment.slabs {
 		assert_contextless(slab.bin_size == 0, "The heap allocator found a slab which is not free while freeing a segment.")
@@ -1422,37 +1435,45 @@ when VIRTUAL_MEMORY_SUPPORTED {
 			return
 		}
 
-		for segment := local_heap.segments; segment != nil; /**/ {
-			next_segment := segment.next_segment
-			segment.prev_segment = nil
-			segment.next_segment = nil
-
-			// Open all the remote free lists on every Slab, so that they can
-			// hold them until the Segment is claimed by another thread.
+		// Open all the remote free lists on every Slab, so that they can hold
+		// remote frees until the Segment is claimed by another thread. Then
+		// detach the heap so that no new remote free targets it.
+		for segment := local_heap.segments; segment != nil; segment = segment.next_segment {
 			for &slab in segment.slabs {
 				assert_contextless(slab.bin_size == 0 || is_free_list_closed(transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&slab.remote_free_list, .Acquire)),
 					"The heap allocator found an open free list on a slab as the heap's thread was exiting.")
 				open_free_list(&slab.remote_free_list)
 			}
-			intrinsics.atomic_store_explicit(&segment.heap, nil, .Release)
-			for intrinsics.atomic_load_explicit(&segment.remote_operations, .Acquire) != 0 {
+			intrinsics.atomic_store_explicit(&segment.heap, nil, .Seq_Cst)
+		}
+
+		// Wait for the remote frees that already chose this heap. After this,
+		// the heap's remote free list is complete.
+		for segment := local_heap.segments; segment != nil; segment = segment.next_segment {
+			for intrinsics.atomic_load_explicit(&segment.remote_operations, .Seq_Cst) != 0 {
 				intrinsics.cpu_relax()
 			}
+		}
+
+		// Merge while this thread still owns every Segment. After a Segment
+		// is orphaned, another thread may adopt it and change its Slabs.
+		// This merge may also free Segments and remove them from the heap.
+		heap_merge_remote_free_list()
+
+		for segment := local_heap.segments; segment != nil; /**/ {
+			next_segment := segment.next_segment
+			segment.prev_segment = nil
+			segment.next_segment = nil
 
 			heap_orphan_segment(segment)
 
 			segment = next_segment
 		}
 
-		// Now that all of the slabs have had their remote free lists opened,
-		// we should receive no more remote frees on our heap.
-		//
-		// It's time to merge all of the heap's remote frees, free it, then exit.
-		heap_merge_remote_free_list()
-
 		// The heap itself is an allocation brought about by the very first
 		// allocation in a thread, thus we free it at the thread's exit.
 		free_virtual_memory(local_heap, size_of(Heap))
+		local_heap = nil
 	}
 
 	@(init, private="file")
