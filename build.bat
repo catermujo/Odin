@@ -139,3 +139,4 @@ if %release_mode% EQU 0 echo: & echo Debug compiler built. Note: run "build.bat 
 del *.obj > NUL 2> NUL
 
 :end_of_build
+exit /b %errorlevel%
