@@ -2430,6 +2430,20 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 
 	lbValue g = {};
 	g.type = alloc_type_pointer(e->type);
+
+	if (is_foreign) {
+		LLVMValueRef found = LLVMGetNamedGlobal(m->mod, alloc_cstring(permanent_allocator(), name));
+		if (found != nullptr) {
+			// NOTE: Another foreign block already imported this symbol; share its declaration.
+			lb_add_foreign_library_path(m, e->Variable.foreign_library);
+			g.value = found;
+			var->var = g;
+			lb_add_entity(m, e, g);
+			lb_add_member(m, name, g);
+			return;
+		}
+	}
+
 	g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
 
 	if (decl->init_expr != nullptr) {

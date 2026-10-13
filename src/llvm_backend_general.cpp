@@ -3791,6 +3791,16 @@ gb_internal void lb_add_member(lbModule *m, String const &name, lbValue val) {
 		rw_mutex_unlock(&m->values_mutex);
 	}
 }
+// NOTE: An external global's name is its symbol. Several entities (e.g. two foreign blocks that import
+// the same C global) can share it, and a second LLVMAddGlobal would rename it to an undefined "name.1".
+gb_internal LLVMValueRef lb_get_or_add_external_global(lbModule *m, LLVMTypeRef type, String const &name) {
+	char const *cname = alloc_cstring(permanent_allocator(), name);
+	LLVMValueRef found = LLVMGetNamedGlobal(m->mod, cname);
+	if (found != nullptr) {
+		return found;
+	}
+	return LLVMAddGlobal(m->mod, type, cname);
+}
 gb_internal void lb_add_procedure_value(lbModule *m, lbProcedure *p) {
 	rw_mutex_lock(&m->values_mutex);
 	if (p->entity != nullptr) {
@@ -4423,7 +4433,7 @@ gb_internal lbValue lb_find_ident(lbProcedure *p, lbModule *m, Entity *e, Ast *e
 			lb_set_entity_from_other_modules_linkage_correctly(other_module, e, name);
 
 			lbValue g = {};
-			g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
+			g.value = lb_get_or_add_external_global(m, lb_type(m, e->type), name);
 			g.type = alloc_type_pointer(e->type);
 			LLVMSetLinkage(g.value, LLVMExternalLinkage);
 
@@ -4702,7 +4712,7 @@ gb_internal lbValue lb_find_value_from_entity(lbModule *m, Entity *e) {
 			String name = lb_get_entity_name(other_module, e);
 
 			lbValue g = {};
-			g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
+			g.value = lb_get_or_add_external_global(m, lb_type(m, e->type), name);
 			g.type = alloc_type_pointer(e->type);
 			lb_add_entity(m, e, g);
 			lb_add_member(m, name, g);

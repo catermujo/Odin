@@ -291,6 +291,13 @@ else
 	echo "SUCCESSFUL 0/1"
 	exit 1
 fi
+case "$(uname -s)" in
+	Darwin|Linux)
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE -o:speed
+		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE -use-separate-modules
+		;;
+esac
 
 if [[ $($ODIN check ../test_issue_ellipsis_type_call.odin -no-entry-point $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 10 ]]; then
 	echo "SUCCESSFUL 1/1"
