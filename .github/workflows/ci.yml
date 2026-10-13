@@ -108,6 +108,8 @@ jobs:
           echo "/usr/lib/llvm-22/bin" >> $GITHUB_PATH
       - name: Build Odin
         run: ./build_odin.sh release
+      - name: LLVM pass error cleanup
+        run: python3 tests/llvm_error_cleanup.py
       - name: Odin version
         run: ./odin version
       - name: Odin report
@@ -225,6 +227,17 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           ./build.bat 1
+      - name: LLVM pass error cleanup
+        run: python tests/llvm_error_cleanup.py
+      - name: Upload Windows compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: odin-windows-compiler
+          path: |
+            odin.exe
+            odin.pdb
+            LLVM-C.dll
+          retention-days: 7
       - name: Odin version
         run: ./odin version
       - name: Odin report

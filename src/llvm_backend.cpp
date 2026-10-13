@@ -18,6 +18,7 @@
 #define LLVM_SET_INTERNAL_WEAK_LINKAGE(value) LLVMSetLinkage(value, USE_SEPARATE_MODULES ? LLVMWeakAnyLinkage : LLVMInternalLinkage);
 
 #include "llvm_backend.hpp"
+#include "llvm_error.hpp"
 
 gb_internal bool lb_environment_flag_enabled(char const *name) {
 		gbAllocator a = heap_allocator();
@@ -3028,11 +3029,8 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 		// AlwaysInliner creates lifetime markers for escaping trace frames. Remove
 		// those hints before later optimization passes can elide the frame fields.
 		LLVMErrorRef always_inline_err = LLVMRunPasses(wd->m->mod, "always-inline", wd->target_machine, pb_options);
-		defer (LLVMConsumeError(always_inline_err));
 		if (always_inline_err != nullptr) {
-			char *llvm_error = LLVMGetErrorMessage(always_inline_err);
-			gb_printf_err("LLVM Error:\n%s\n", llvm_error);
-			LLVMDisposeErrorMessage(llvm_error);
+			lb_llvm_print_pass_error(always_inline_err);
 			lb_record_worker_failure();
 			return 1;
 		}
@@ -3095,14 +3093,11 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 
 	LLVMErrorRef llvm_err = LLVMRunPasses(wd->m->mod, passes_str, wd->target_machine, pb_options);
 
-	defer (LLVMConsumeError(llvm_err));
 	if (llvm_err != nullptr) {
-		char *llvm_error = LLVMGetErrorMessage(llvm_err);
-		gb_printf_err("LLVM Error:\n%s\n", llvm_error);
-		LLVMDisposeErrorMessage(llvm_error);
-		llvm_error = nullptr;
+		lb_llvm_print_pass_error(llvm_err);
 
 		if (build_context.keep_temp_files) {
+			char *llvm_error = nullptr;
 			TIME_SECTION("LLVM Print Module to File");
 			String filepath_ll = lb_filepath_ll_for_module(wd->m);
 			if (LLVMPrintModuleToFile(wd->m->mod, cast(char const *)filepath_ll.text, &llvm_error)) {
