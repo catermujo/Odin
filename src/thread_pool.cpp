@@ -1,4 +1,5 @@
 // thread_pool.cpp
+#include "thread_pool_publication.hpp"
 
 // TODO(bill): make work on MSVC
 // #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
@@ -111,10 +112,7 @@ void thread_pool_queue_push(Thread *thread, WorkerTask task) {
 
 	cur_ring->buffer[bot % cur_ring->size] = task;
 	TSAN_RELEASE(cur_ring->buffer[bot % cur_ring->size]);
-	std::atomic_thread_fence(std::memory_order_release);
-	thread->queue.bottom.store(bot + 1, std::memory_order_relaxed);
-
-	thread->pool->tasks_left.fetch_add(1, std::memory_order_release);
+	thread_pool_publish_task(thread->pool->tasks_left, thread->queue.bottom, bot + 1);
 
 	// NOTE(bill): one sleeping worker per task; waking them all made a loop adding small tasks mostly
 	// wake-ups, as they were back asleep before the next. The fence pairs with the one in the worker loop.

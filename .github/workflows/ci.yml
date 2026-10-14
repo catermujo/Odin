@@ -110,6 +110,8 @@ jobs:
         run: ./build_odin.sh release
       - name: LLVM pass error cleanup
         run: python3 tests/llvm_error_cleanup.py
+      - name: Thread pool publication accounting
+        run: python3 tests/thread_pool_publication.py
       - name: LLVM IR visibility
         run: python3 tests/llvm_ir_visibility.py
       - name: Test ordinary range loop costing
@@ -233,6 +235,8 @@ jobs:
           ./build.bat 1
       - name: LLVM pass error cleanup
         run: python tests/llvm_error_cleanup.py
+      - name: Thread pool publication accounting
+        run: python tests/thread_pool_publication.py
       - name: LLVM IR visibility
         run: python tests/llvm_ir_visibility.py
       - name: Test ordinary range loop costing
