@@ -3610,26 +3610,12 @@ gb_inline void gb_str_to_upper(char *str) {
 }
 
 
-gb_no_asan isize gb_strlen(char const *str) {
-	char const *begin = str;
-	isize const *w;
+isize gb_strlen(char const *str) {
+	// DUMBAI: The CRT length routine respects string objects without a sanitizer exemption for word overreads.
 	if (str == NULL)  {
 		return 0;
 	}
-	while (cast(uintptr)str % sizeof(usize)) {
-		if (!*str)
-			return str - begin;
-		str++;
-	}
-	w = cast(isize const *)str;
-	while (!GB__HAS_ZERO(*w)) {
-		w++;
-	}
-	str = cast(char const *)w;
-	while (*str) {
-		str++;
-	}
-	return str - begin;
+	return cast(isize)strlen(str);
 }
 
 gb_inline isize gb_strnlen(char const *str, isize max_len) {

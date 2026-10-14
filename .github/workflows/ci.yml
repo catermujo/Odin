@@ -112,6 +112,8 @@ jobs:
         run: python3 tests/llvm_error_cleanup.py
       - name: Thread pool publication accounting
         run: python3 tests/thread_pool_publication.py
+      - name: String object length bounds
+        run: python3 tests/gb_strlen.py
       - name: LLVM IR visibility
         run: python3 tests/llvm_ir_visibility.py
       - name: Test ordinary range loop costing
@@ -237,6 +239,8 @@ jobs:
         run: python tests/llvm_error_cleanup.py
       - name: Thread pool publication accounting
         run: python tests/thread_pool_publication.py
+      - name: String object length bounds
+        run: python tests/gb_strlen.py
       - name: LLVM IR visibility
         run: python tests/llvm_ir_visibility.py
       - name: Test ordinary range loop costing
