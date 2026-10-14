@@ -1,3 +1,5 @@
+// DUMBAI: Contract checks must run even when llvm-config supplies release flags with NDEBUG.
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include "llvm-c/Core.h"
