@@ -4,6 +4,8 @@
 #include <cstdio>
 #define GB_STATIC
 #define GB_IMPLEMENTATION
+// DUMBAI: The standalone header includes varargs helpers that GCC cannot always-inline under AddressSanitizer.
+#define gb_inline inline
 #include "gb/gb.h"
 
 // DUMBAI: The monolithic header requires this provider; string length never allocates through it.
