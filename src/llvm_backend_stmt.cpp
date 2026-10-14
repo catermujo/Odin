@@ -920,28 +920,6 @@ gb_internal void lb_build_range_string16(lbProcedure *p, lbValue expr, Type *val
 	if (done_) *done_ = done;
 }
 
-gb_internal void lb_try_attach_full_unroll_loop_metadata(lbProcedure *p, LLVMValueRef branch_instr) {
-	if (branch_instr == nullptr || LLVMGetInstructionOpcode(branch_instr) != LLVMBr) {
-		return;
-	}
-
-	LLVMContextRef ctx = p->module->ctx;
-	LLVMMetadataRef unroll_name = LLVMMDStringInContext2(ctx, "llvm.loop.unroll.full", gb_strlen("llvm.loop.unroll.full"));
-	LLVMMetadataRef unroll_node = LLVMMDNodeInContext2(ctx, &unroll_name, 1);
-
-	// LLVM loop metadata is self-referential in operand 0: !{!0, !{!"llvm.loop.unroll.full"}}
-	LLVMMetadataRef loop_ops[2] = {unroll_node, unroll_node};
-	LLVMMetadataRef loop_id = LLVMMDNodeInContext2(ctx, loop_ops, gb_count_of(loop_ops));
-	LLVMValueRef loop_id_value = LLVMMetadataAsValue(ctx, loop_id);
-	LLVMReplaceMDNodeOperandWith(loop_id_value, 0, loop_id);
-
-	unsigned kind_id = LLVMGetMDKindIDInContext(ctx, "llvm.loop", cast(unsigned)gb_strlen("llvm.loop"));
-	LLVMSetMetadata(branch_instr, kind_id, loop_id_value);
-}
-
-gb_internal bool lb_small_constant_trip_count(i64 trip_count) {
-	return trip_count > 0 && trip_count <= 16;
-}
 
 gb_internal Ast *lb_strip_and_prefix(Ast *ident) {
 	if (ident != nullptr) {
@@ -1402,7 +1380,6 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	lbBlock *loop = nullptr;
 	lbBlock *done = nullptr;
 	bool is_map = false;
-	bool attach_full_unroll_metadata = false;
 	if (rs->label != nullptr && p->debug_info != nullptr) {
 		lbBlock *label = lb_create_block(p, "for.range.label");
 		lb_emit_jump(p, label);
@@ -1415,7 +1392,6 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	if (tav.mode == Addressing_Type) {
 		Type *enum_type = base_type(type_deref(tav.type));
 		GB_ASSERT(is_type_enum(enum_type));
-		attach_full_unroll_metadata = lb_small_constant_trip_count(enum_type->Enum.fields.count);
 		lb_build_range_enum(p, type_deref(tav.type), val0_type, &val, &key, &loop, &done);
 	} else {
 		Type *expr_type = type_of_expr(expr);
@@ -1433,7 +1409,6 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 		case Type_Array: {
 			lbValue array = {};
 			lbAddr const *soa_elem = nullptr;
-			attach_full_unroll_metadata = lb_small_constant_trip_count(et->Array.count);
 			lbAddr addr = lb_build_range_addr(p, expr);
 			switch (addr.kind) {
 			case lbAddr_Swizzle:
@@ -1475,7 +1450,6 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 			break;
 		}
 		case Type_EnumeratedArray: {
-			attach_full_unroll_metadata = lb_small_constant_trip_count(et->EnumeratedArray.count);
 			lbValue array = lb_addr_get_ptr(p, lb_build_range_addr(p, expr));
 			if (is_type_pointer(type_deref(array.type))) {
 				array = lb_emit_load(p, array);
@@ -1611,12 +1585,8 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	if (p->debug_info != nullptr) {
 		LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, rs->body));
 	}
-	lbBlock *backedge_block = p->curr_block;
+	// DUMBAI: Let LLVM cost ordinary range loops; forced unrolling multiplies nested search loops and SCEV work.
 	lb_emit_jump(p, loop);
-	if (attach_full_unroll_metadata && backedge_block != nullptr) {
-		LLVMValueRef br = LLVMGetLastInstruction(backedge_block->block);
-		lb_try_attach_full_unroll_loop_metadata(p, br);
-	}
 	lb_start_block(p, done);
 }
 

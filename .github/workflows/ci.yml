@@ -112,6 +112,8 @@ jobs:
         run: python3 tests/llvm_error_cleanup.py
       - name: LLVM IR visibility
         run: python3 tests/llvm_ir_visibility.py
+      - name: Test ordinary range loop costing
+        run: python3 tests/llvm_range_unroll.py
       - name: Odin version
         run: ./odin version
       - name: Odin report
@@ -233,6 +235,8 @@ jobs:
         run: python tests/llvm_error_cleanup.py
       - name: LLVM IR visibility
         run: python tests/llvm_ir_visibility.py
+      - name: Test ordinary range loop costing
+        run: python tests/llvm_range_unroll.py
       - name: Upload Windows compiler
         uses: actions/upload-artifact@v4
         with:
