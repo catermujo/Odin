@@ -21,3 +21,6 @@
 # Ignore documentation-related files.
 /documentation/verify/
 /documentation/all.odin-doc
+
+# DUMBAI: Harness imports create bytecode; ignore it here after the extension-wide source inclusion rule.
+__pycache__/
