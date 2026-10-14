@@ -19,6 +19,7 @@
 
 #include "llvm_backend.hpp"
 #include "llvm_error.hpp"
+#include "llvm_visibility.hpp"
 
 gb_internal bool lb_environment_flag_enabled(char const *name) {
 		gbAllocator a = heap_allocator();
@@ -255,7 +256,7 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 			    (LLVMGetInitializer(other_global) != nullptr || LLVMIsExternallyInitialized(other_global))) {
 				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Variable.is_export) {
-					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
+					lb_llvm_set_hidden_visibility(other_global);
 				}
 			}
 		} else if (ec.e->kind == Entity_Procedure) {
@@ -263,7 +264,7 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 			if (other_global && LLVMCountBasicBlocks(other_global) != 0) {
 				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Procedure.is_export && !ec.e->Procedure.is_foreign) {
-					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
+					lb_llvm_set_hidden_visibility(other_global);
 				}
 			}
 		}
@@ -2497,7 +2498,7 @@ gb_internal void lb_create_global_variable(lbModule *m, lbGlobalVariable *var) {
 		LLVMSetDLLStorageClass(g.value, LLVMDLLExportStorageClass);
 	} else if (!is_foreign) {
 		LLVM_SET_INTERNAL_WEAK_LINKAGE(g.value);
-		LLVMSetVisibility(g.value, LLVMHiddenVisibility);
+		lb_llvm_set_hidden_visibility(g.value);
 	}
 	lb_set_linkage_from_entity_flags(m, g.value, e->flags);
 	LLVMSetAlignment(g.value, cast(u32)type_align_of(e->type));
@@ -2559,8 +2560,8 @@ gb_internal lbProcedure *lb_create_startup_procedure(lbModule *m, String const &
 	lb_add_attribute_to_proc(p->module, p->value, "noinline");
 
 	// Make sure shared libraries call their own runtime startup on Linux.
-	LLVMSetVisibility(p->value, LLVMHiddenVisibility);
 	LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
+	lb_llvm_set_hidden_visibility(p->value);
 	return p;
 }
 
@@ -2613,8 +2614,8 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 		startup_guard = LLVMAddGlobal(main_module->mod, startup_guard_type, "__$startup_runtime_has_run");
 		LLVMSetInitializer(startup_guard, LLVMConstInt(startup_guard_type, 0, false));
 		LLVMSetAlignment(startup_guard, 1);
-		LLVMSetVisibility(startup_guard, LLVMHiddenVisibility);
 		LLVM_SET_INTERNAL_WEAK_LINKAGE(startup_guard);
+		lb_llvm_set_hidden_visibility(startup_guard);
 	}
 
 	lbBlock *startup_run_block  = lb_create_block(p, "startup.run");
@@ -2663,8 +2664,8 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 	lb_add_attribute_to_proc(p->module, p->value, "noinline");
 
 	// Make sure shared libraries call their own runtime cleanup on Linux.
-	LLVMSetVisibility(p->value, LLVMHiddenVisibility);
 	LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
+	lb_llvm_set_hidden_visibility(p->value);
 
 	lb_begin_procedure_body(p);
 

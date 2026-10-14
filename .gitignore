@@ -326,3 +326,6 @@ sandbox/
 
 /plans
 .codegraph
+
+# DUMBAI: Native LLVM harness imports create bytecode alongside test sources.
+tests/__pycache__/

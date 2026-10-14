@@ -5056,6 +5056,8 @@ gb_internal lbAddr lb_add_local_generated_temp(lbProcedure *p, Type *type, i64 m
 gb_internal void lb_set_linkage_from_entity_flags(lbModule *m, LLVMValueRef value, u64 flags) {
 	if (flags & EntityFlag_CustomLinkage_Internal) {
 		LLVMSetLinkage(value, LLVMInternalLinkage);
+		// DUMBAI: An explicit local-linkage override must also discard visibility from a former weak definition.
+		LLVMSetVisibility(value, LLVMDefaultVisibility);
 	} else if (flags & EntityFlag_CustomLinkage_Strong) {
 		LLVMSetLinkage(value, LLVMExternalLinkage);
 	} else if (flags & EntityFlag_CustomLinkage_Weak) {
