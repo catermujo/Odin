@@ -859,10 +859,11 @@ gb_internal void check_struct_type(CheckerContext *ctx, Type *struct_type, Ast *
 				struct_type->Struct.is_simple = true;
 			}
 		}
-
-		wait_signal_set(&struct_type->Struct.fields_wait_signal);
 	}
 
+	// DUMBAI: Publish even when the record stays polymorphic, as unions do. An instantiation whose operands failed
+	// stays polymorphic, and its waiters in wait_for_struct_fields would otherwise block forever and hide the error.
+	wait_signal_set(&struct_type->Struct.fields_wait_signal);
 }
 gb_internal void check_union_type(CheckerContext *ctx, Type *union_type, Ast *node, Array<Operand> *poly_operands, Type *named_type, Type *original_type_for_poly, GenTypesData *poly_gen_types_to_unlock) {
 	GB_ASSERT(is_type_union(union_type));
