@@ -80,6 +80,7 @@ enum EntityFlag : u64 {
 	EntityFlag_Subtype       = 1ull<<32,
 	EntityFlag_Fini          = 1ull<<33,
 	EntityFlag_PolyConstArg  = 1ull<<34, // passed to a `$` parameter, so a local procedure may be called outside its parent
+	EntityFlag_PolyTypeUnbound = 1ull<<36, // `$T: typeid` parameter of a signature checked without operands
 
 	EntityFlag_CustomLinkName = 1ull<<40,
 	EntityFlag_CustomLinkage_Internal = 1ull<<41,

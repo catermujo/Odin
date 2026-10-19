@@ -11,6 +11,10 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN run ../test_issue_typeid_record_param.odin -file $COMMON
+$ODIN run ../test_issue_typeid_record_param.odin -file $COMMON -o:speed
+
+
 case "$(uname -s)" in
 	Darwin|Linux)
 		$ODIN test ../test_issue_shared_foreign_global $COMMON_NO_FILE
