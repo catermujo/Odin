@@ -18,6 +18,9 @@ $ODIN run ../test_issue_polymorphic_rejected_cache.odin $COMMON -no-threaded-che
 
 $ODIN run ../test_issue_polymorphic_proc_identity.odin $COMMON
 
+$ODIN run ../test_issue_typeid_record_param.odin $COMMON
+$ODIN run ../test_issue_typeid_record_param.odin $COMMON -o:speed
+
 $ODIN run ../test_issue_nonconstant_global_broadcast.odin $COMMON
 $ODIN run ../test_issue_nonconstant_global_union.odin $COMMON
 

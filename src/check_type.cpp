@@ -618,9 +618,12 @@ gb_internal bool check_record_poly_operand_specialization(CheckerContext *ctx, T
 			// NOTE(bill): ANNOYING EDGE CASE FOR `where` clauses
 			// TODO(bill, 2021-03-27): Is this even a valid HACK?!
 			Entity *entity = entity_of_node(o.expr);
+			// DUMBAI: A parameter bound to `typeid` itself (`map[typeid]V` keys) is specialized; only an unbound
+			// `$T: typeid` makes the record polymorphic.
 			if (entity != nullptr &&
 			    entity->kind == Entity_TypeName &&
-			    entity->type == t_typeid) {
+			    entity->type == t_typeid &&
+			    (entity->flags & EntityFlag_PolyTypeUnbound) != 0) {
 			    	*is_polymorphic_ = true;
 				return false;
 			}
@@ -3383,6 +3386,11 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 				INTERNAL_ENTITY_INIT(param, Entity_TypeName, scope, name->Ident.token, type);
 				param->state = EntityState_Resolved;
 				param->flags |= EntityFlag_PolyConst;
+				// DUMBAI: Without operands an unspecialized `$T: typeid` keeps type `typeid`, which a parameter bound
+				// to the type `typeid` also has. Only this flag tells record instantiations the parameter is unbound.
+				if (operands == nullptr && type == t_typeid) {
+					param->flags |= EntityFlag_PolyTypeUnbound;
+				}
 				param->interned_name.store(name->Ident.interned);
 				param->interned_name_hash.store(name->Ident.hash);
 
