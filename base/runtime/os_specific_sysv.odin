@@ -38,10 +38,24 @@ auxv_t :: struct {
 
 auxv__: [^]auxv_t
 
+LIBC_AUXV :: ODIN_OS == .Linux && ODIN_BUILD_MODE == .Dynamic && !ODIN_NO_CRT
+
+when LIBC_AUXV {
+	foreign import auxv_libc "system:c"
+	foreign auxv_libc {
+		@(link_name="getauxval")
+		_libc_auxiliary_value :: proc(tag: uint) -> uint ---
+		@(link_name="__errno_location")
+		_libc_auxiliary_errno :: proc() -> ^i32 ---
+	}
+}
+
 // Mind the alphanumeric sorted naming of the files in `base:runtime`, as this
 // init needs to run before the virtual memory init.
 @(init)
 init_auxv :: proc "contextless" () {
+	// DUMBAI: Shared libraries have no initial argv stack, so libc supplies their auxiliary vector.
+	when LIBC_AUXV do return
 	// This is similar to how we get the environment on Linux.
 	#no_bounds_check auxv := cast([^]rawptr)&args__[len(args__) + 1]
 	for auxv[0] != nil {
@@ -52,6 +66,17 @@ init_auxv :: proc "contextless" () {
 
 // Get a value from the auxiliary vector.
 _get_auxiliary :: proc "contextless" (at: Auxiliary_Vector_Type) -> (value: auxv_t, found: bool) {
+	when LIBC_AUXV {
+		// DUMBAI: Zero can be a valid value. Use errno to detect a missing tag and preserve host errno.
+		errno := _libc_auxiliary_errno()
+		saved_errno := errno^
+		errno^ = 0
+		value.a_type = at
+		value.a_val = c_long(_libc_auxiliary_value(uint(at)))
+		found = errno^ == 0
+		errno^ = saved_errno
+		return
+	}
 	for ap := auxv__; ap != nil && ap[0].a_type != .AT_NULL; ap = ap[1:] {
 		if ap[0].a_type == at {
 			return ap[0], true
