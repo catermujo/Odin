@@ -420,7 +420,9 @@ when ODIN_OS == .Darwin {
 
 	@(private)
 	_WIFSIGNALED :: #force_inline proc "contextless" (x: c.int) -> bool {
-		return (x & 0xffff) - 1 < 0xff
+		// DUMBAI: Zero means normal exit; 0x7f marks stopped or continued children, not terminating signals.
+		signal := x & 0x7f
+		return signal > 0 && signal < 0x7f
 	}
 
 	@(private)
