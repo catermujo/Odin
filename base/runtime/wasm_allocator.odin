@@ -5,10 +5,10 @@ package runtime
 import "base:intrinsics"
 
 when ODIN_OS == .JS {
-	foreign import emscripten "env"
-
-	foreign emscripten {
-		emscripten_notify_memory_growth :: proc "contextless" (memory_index: u32) ---
+	// DUMBAI: Bound without an import module so the linker resolves emscripten's libc sbrk, not a JS import.
+	foreign _ {
+		@(link_name="sbrk")
+		emscripten_sbrk :: proc "c" (increment: int) -> rawptr ---
 	}
 }
 
@@ -490,14 +490,18 @@ claim_more_memory :: proc(a: ^WASM_Allocator, num_bytes: uint) -> bool {
 	PAGE_SIZE :: 64 * 1024
 
 	page_alloc :: proc(page_count: int) -> []byte {
-		prev_page_count := intrinsics.wasm_memory_grow(0, uintptr(page_count))
-		if prev_page_count < 0 { return nil }
 		when ODIN_OS == .JS {
-			emscripten_notify_memory_growth(0)
+			// DUMBAI: emscripten's sbrk treats every byte above its break as free, so pages grown behind its back
+			// were later handed to dlmalloc as well. Taking pages through sbrk keeps the two heaps disjoint.
+			ptr := emscripten_sbrk(page_count * PAGE_SIZE)
+			if uintptr(ptr) == max(uintptr) { return nil }
+			return ([^]byte)(ptr)[:page_count * PAGE_SIZE]
+		} else {
+			prev_page_count := intrinsics.wasm_memory_grow(0, uintptr(page_count))
+			if prev_page_count < 0 { return nil }
+			ptr := ([^]byte)(uintptr(prev_page_count) * PAGE_SIZE)
+			return ptr[:page_count * PAGE_SIZE]
 		}
-
-		ptr := ([^]byte)(uintptr(prev_page_count) * PAGE_SIZE)
-		return ptr[:page_count * PAGE_SIZE]
 	}
 
 	alloc :: proc(a: ^WASM_Allocator, num_bytes: uint) -> (bytes: [^]byte) #no_bounds_check {
