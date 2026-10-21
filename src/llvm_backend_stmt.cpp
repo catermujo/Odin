@@ -4538,9 +4538,18 @@ gb_internal void lb_build_defer_stmt(lbProcedure *p, lbDefer const &d) {
 		return;
 	}
 
-	isize prev_context_stack_count = p->context_stack.count;
-	GB_ASSERT(prev_context_stack_count <= p->context_stack.capacity);
-	defer (p->context_stack.count = prev_context_stack_count);
+	TEMPORARY_ALLOCATOR_GUARD();
+	auto prev_context_stack = array_make<lbContextData>(temporary_allocator(), p->context_stack.count);
+	for_array(i, prev_context_stack) {
+		prev_context_stack[i] = p->context_stack[i];
+	}
+	// DUMBAI: Deferred context assignments can overwrite entries used by return paths emitted afterward.
+	defer ({
+		p->context_stack.count = prev_context_stack.count;
+		for_array(i, prev_context_stack) {
+			p->context_stack[i] = prev_context_stack[i];
+		}
+	});
 	p->context_stack.count = d.context_stack_count;
 
 	if (p->debug_info == nullptr &&
