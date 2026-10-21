@@ -47,7 +47,18 @@ _locations_destroy :: proc(locations: []Location, allocator: runtime.Allocator) 
 }
 
 @(private="package")
-_resolve :: proc(bt: Capture, allocator, temp_allocator: runtime.Allocator) -> (locations: []Location, err: Resolve_Error) {
+_resolve :: proc(bt: Capture, allocator, temp_allocator: runtime.Allocator) -> ([]Location, Resolve_Error) {
+	// DUMBAI: Clean partial results after resolution returns so callers never receive an already-freed slice.
+	locations, err := resolve_linux(bt, allocator, temp_allocator)
+	if err != nil {
+		_locations_destroy(locations, allocator)
+		return nil, err
+	}
+	return locations, nil
+}
+
+@(private="file")
+resolve_linux :: proc(bt: Capture, allocator, temp_allocator: runtime.Allocator) -> (locations: []Location, err: Resolve_Error) {
 	foreign lib {
 		backtrace_symbols :: proc(buffer: [^]rawptr, size: c.int) -> [^]cstring ---
 		@(link_name="free")
@@ -64,10 +75,6 @@ _resolve :: proc(bt: Capture, allocator, temp_allocator: runtime.Allocator) -> (
 		if mem_err != nil {
 			return nil, .Allocator_Error
 		}
-	}
-
-	defer if err != nil {
-		_locations_destroy(locations, allocator)
 	}
 
 	// Debug info is needed.
