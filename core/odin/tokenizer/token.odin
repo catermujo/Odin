@@ -1,6 +1,8 @@
 package odin_tokenizer
 
+import "base:runtime"
 import "core:strings"
+import "core:sync"
 
 Token :: struct {
 	kind: Token_Kind,
@@ -8,11 +10,50 @@ Token :: struct {
 	pos:  Pos,
 }
 
+// DUMBAI: Every AST node stores two positions. An interned id keeps the file without a string per position.
+File_Id :: distinct u32
+
 Pos :: struct {
-	file:   string,
-	offset: int, // starting at 0
-	line:   int, // starting at 1
-	column: int, // starting at 1
+	file:   File_Id, // zero means no file
+	offset: i32, // starting at 0
+	line:   i32, // starting at 1
+	column: i32, // starting at 1
+}
+
+@(private = "file")
+file_table: struct {
+	mutex: sync.Mutex,
+	ids:   map[string]File_Id,
+	paths: [dynamic]string,
+}
+
+// DUMBAI: The table owns heap copies of the paths, so ids stay valid after the caller frees its source buffers.
+file_id :: proc(path: string) -> File_Id {
+	if path == "" {
+		return 0
+	}
+	sync.guard(&file_table.mutex)
+	if id, found := file_table.ids[path]; found {
+		return id
+	}
+	allocator := runtime.heap_allocator()
+	if file_table.paths == nil {
+		file_table.ids = make(map[string]File_Id, allocator)
+		file_table.paths = make([dynamic]string, 1, allocator)
+	}
+	owned := strings.clone(path, allocator)
+	id := File_Id(len(file_table.paths))
+	append(&file_table.paths, owned)
+	file_table.ids[owned] = id
+	return id
+}
+
+file_path :: proc(id: File_Id) -> string {
+	if id == 0 {
+		return ""
+	}
+	sync.guard(&file_table.mutex)
+	return file_table.paths[id]
 }
 
 pos_compare :: proc(lhs, rhs: Pos) -> int {
@@ -25,7 +66,10 @@ pos_compare :: proc(lhs, rhs: Pos) -> int {
 	if lhs.column != rhs.column {
 		return -1 if (lhs.column < rhs.column) else +1
 	}
-	return strings.compare(lhs.file, rhs.file)
+	if lhs.file == rhs.file {
+		return 0
+	}
+	return strings.compare(file_path(lhs.file), file_path(rhs.file))
 }
 
 Token_Kind :: enum u32 {

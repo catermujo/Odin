@@ -16,6 +16,7 @@ Flags :: distinct bit_set[Flag; u32]
 Tokenizer :: struct {
 	// Immutable data
 	path: string,
+	file: File_Id,
 	src:  string,
 	err:  Error_Handler,
 
@@ -106,6 +107,7 @@ init :: proc(t: ^Tokenizer, src: string, path: string, err: Error_Handler = defa
 	t.insert_semicolon = false
 	t.error_count = 0
 	t.path = path
+	t.file = file_id(path)
 
 	if !intrinsics.atomic_load(&_global_keyword_lut_initialized) {
 		_global_keyword_spin_lock()
@@ -128,15 +130,15 @@ offset_to_pos :: proc(t: ^Tokenizer, offset: int) -> Pos {
 	column := offset - t.line_offset + 1
 
 	return Pos {
-		file = t.path,
-		offset = offset,
-		line = line,
-		column = column,
+		file = t.file,
+		offset = i32(offset),
+		line = i32(line),
+		column = i32(column),
 	}
 }
 
 default_error_handler :: proc(pos: Pos, msg: string, args: ..any) {
-	fmt.eprintf("%s(%d:%d) ", pos.file, pos.line, pos.column)
+	fmt.eprintf("%s(%d:%d) ", file_path(pos.file), pos.line, pos.column)
 	fmt.eprintf(msg, ..args)
 	fmt.eprintf("\n")
 }
@@ -713,7 +715,7 @@ scan :: proc(t: ^Tokenizer) -> Token {
 			}
 			token := scan(t)
 			if token.pos.line == pos.line {
-				error(t, token.pos.offset, "expected a newline after \\")
+				error(t, int(token.pos.offset), "expected a newline after \\")
 			}
 			return token
 
