@@ -70,12 +70,12 @@ Import_Decl_Kind :: enum {
 
 
 default_warning_handler :: proc(pos: tokenizer.Pos, msg: string, args: ..any) {
-	fmt.eprintf("%s(%d:%d): Warning: ", pos.file, pos.line, pos.column)
+	fmt.eprintf("%s(%d:%d): Warning: ", tokenizer.file_path(pos.file), pos.line, pos.column)
 	fmt.eprintf(msg, ..args)
 	fmt.eprintf("\n")
 }
 default_error_handler :: proc(pos: tokenizer.Pos, msg: string, args: ..any) {
-	fmt.eprintf("%s(%d:%d): ", pos.file, pos.line, pos.column)
+	fmt.eprintf("%s(%d:%d): ", tokenizer.file_path(pos.file), pos.line, pos.column)
 	fmt.eprintf(msg, ..args)
 	fmt.eprintf("\n")
 }
@@ -98,7 +98,7 @@ error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 
 end_pos :: proc(tok: tokenizer.Token) -> tokenizer.Pos {
 	pos := tok.pos
-	pos.offset += len(tok.text)
+	pos.offset += i32(len(tok.text))
 
 	if (tok.kind == .Comment && tok.text[:2] == "/*") || (tok.kind == .String && tok.text[:1] == "`") {
 		for i := 0; i < len(tok.text); i += 1 {
@@ -111,7 +111,7 @@ end_pos :: proc(tok: tokenizer.Token) -> tokenizer.Pos {
 			}
 		}
 	} else {
-		pos.column += len(tok.text)
+		pos.column += i32(len(tok.text))
 	}
 	return pos
 }
@@ -304,7 +304,7 @@ next_token0 :: proc(p: ^Parser) -> bool {
 consume_comment :: proc(p: ^Parser) -> (tok: tokenizer.Token, end_line: int) {
 	tok = p.curr_tok
 	assert(tok.kind == .Comment)
-	end_line = tok.pos.line
+	end_line = int(tok.pos.line)
 
 	if tok.text[1] == '*' {
 		for c in tok.text {
@@ -321,9 +321,9 @@ consume_comment :: proc(p: ^Parser) -> (tok: tokenizer.Token, end_line: int) {
 
 consume_comment_group :: proc(p: ^Parser, n: int) -> (comments: ^ast.Comment_Group, end_line: int) {
 	list: [dynamic]tokenizer.Token
-	end_line = p.curr_tok.pos.line
+	end_line = int(p.curr_tok.pos.line)
 	for p.curr_tok.kind == .Comment &&
-	    p.curr_tok.pos.line <= end_line+n {
+	    int(p.curr_tok.pos.line) <= end_line+n {
 		comment: tokenizer.Token
 		comment, end_line = consume_comment(p)
 		append(&list, comment)
@@ -352,7 +352,7 @@ consume_comment_groups :: proc(p: ^Parser, prev: tokenizer.Token) {
 	for p.curr_tok.kind == .Comment {
 		comment, end_line = consume_comment_group(p, 1)
 	}
-	if end_line+1 >= p.curr_tok.pos.line || end_line < 0 {
+	if end_line+1 >= int(p.curr_tok.pos.line) || end_line < 0 {
 		p.lead_comment = comment
 	}
 
@@ -427,7 +427,7 @@ allow_token :: proc(p: ^Parser, kind: tokenizer.Token_Kind) -> bool {
 }
 
 end_of_line_pos :: proc(p: ^Parser, tok: tokenizer.Token) -> tokenizer.Pos {
-	offset := clamp(tok.pos.offset, 0, len(p.tok.src)-1)
+	offset := clamp(int(tok.pos.offset), 0, len(p.tok.src)-1)
 	s := p.tok.src[offset:]
 	pos := tok.pos
 	pos.column -= 1
@@ -1807,7 +1807,7 @@ parse_body :: proc(p: ^Parser, header := tokenizer.Pos{}) -> ^ast.Block_Stmt {
 		if tokenizer.is_newline(next) {
 			next = peek_token(p)
 		}
-		header_start := header.offset if header.line != 0 else p.prev_tok.pos.offset
+		header_start := int(header.offset if header.line != 0 else p.prev_tok.pos.offset)
 		for header_start > 0 && p.tok.src[header_start-1] != '\n' {
 			header_start -= 1
 		}
@@ -1815,7 +1815,7 @@ parse_body :: proc(p: ^Parser, header := tokenizer.Pos{}) -> ^ast.Block_Stmt {
 		for header_start+indent < len(p.tok.src) && (p.tok.src[header_start+indent] == ' ' || p.tok.src[header_start+indent] == '\t') {
 			indent += 1
 		}
-		next_indent := next.pos.column-1
+		next_indent := int(next.pos.column)-1
 		body_follows := next.pos.line > p.prev_tok.pos.line && (next_indent > indent || (next_indent == indent && next.kind == .Close_Brace))
 		if !body_follows {
 			bs := ast.new(ast.Block_Stmt, open.pos, open.pos)
@@ -3461,7 +3461,7 @@ parse_elem_list :: proc(p: ^Parser) -> []^ast.Expr {
 }
 
 is_literal_missing_open_brace :: proc(p: ^Parser, type: ^ast.Expr) -> bool {
-	line_start := type.pos.offset
+	line_start := int(type.pos.offset)
 	for line_start > 0 && p.tok.src[line_start-1] != '\n' {
 		line_start -= 1
 	}
@@ -3472,7 +3472,7 @@ is_literal_missing_open_brace :: proc(p: ^Parser, type: ^ast.Expr) -> bool {
 	}
 
 	first := peek_token(p)
-	if first.pos.column-1 <= indent {
+	if int(first.pos.column)-1 <= indent {
 		return false
 	}
 	last := first
@@ -3482,7 +3482,7 @@ is_literal_missing_open_brace :: proc(p: ^Parser, type: ^ast.Expr) -> bool {
 			if last.kind == .Comma {
 				return true
 			}
-			return tok.kind == .Close_Brace && tok.pos.column-1 == indent
+			return tok.kind == .Close_Brace && int(tok.pos.column)-1 == indent
 		}
 		if !tokenizer.is_newline(tok) {
 			last = tok

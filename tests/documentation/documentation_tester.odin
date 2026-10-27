@@ -399,7 +399,7 @@ main :: proc() {
 			if this_procedure_name != enforced_name {
 				continue
 			}
-			index_of_proc_name = value_decl.names[0].pos.offset
+			index_of_proc_name = int(value_decl.names[0].pos.offset)
 			code_test_name = this_procedure_name
 			break
 		}
