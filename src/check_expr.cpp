@@ -6605,6 +6605,29 @@ gb_internal ExactValue get_constant_soa_field(Type *soa, ExactValue value, Selec
 	return result->tav.value;
 }
 
+gb_internal ExactValue exact_value_zero_of_type(Type *type) {
+	if (is_type_boolean(type)) {
+		return exact_value_bool(false);
+	} else if (is_type_integer(type) || is_type_rune(type) || is_type_enum(type) || is_type_bit_set(type)) {
+		return exact_value_i64(0);
+	} else if (is_type_float(type)) {
+		return exact_value_float(0.0);
+	} else if (is_type_complex(type)) {
+		return exact_value_complex(0.0, 0.0);
+	} else if (is_type_quaternion(type)) {
+		return exact_value_quaternion(0.0, 0.0, 0.0, 0.0);
+	} else if (is_type_string(type)) {
+		return exact_value_string({});
+	} else if (is_type_pointer(type)) {
+		return exact_value_pointer(0);
+	} else if (is_type_typeid(type)) {
+		return exact_value_typeid(nullptr);
+	} else if (is_type_proc(type)) {
+		return exact_value_procedure(nullptr);
+	}
+	return empty_exact_value;
+}
+
 gb_internal ExactValue get_constant_field(CheckerContext *c, Operand const *operand, Selection sel, bool *success_) {
 	if (operand->mode != Addressing_Constant) {
 		if (success_) *success_ = false;
@@ -6623,6 +6646,41 @@ gb_internal ExactValue get_constant_field(CheckerContext *c, Operand const *oper
 
 
 	ExactValue value = operand->value;
+	if (sel.index.count > 1 && value.kind == ExactValue_Compound &&
+	    value.value_compound->kind == Ast_CompoundLit) {
+		ast_node(cl, CompoundLit, value.value_compound);
+		bool found_direct_field = false;
+		for (Ast *elem : cl->elems) {
+			if (elem->kind != Ast_FieldValue) {
+				continue;
+			}
+			ast_node(fv, FieldValue, elem);
+			Selection field_sel = lookup_field(value.value_compound->tav.type, fv->field->Ident.interned, false);
+			if (field_sel.index.count == sel.index.count) {
+				bool same_field = true;
+				for_array(i, sel.index) {
+					if (field_sel.index[i] != sel.index[i]) {
+						same_field = false;
+						break;
+					}
+				}
+				if (same_field) {
+					if (success_) *success_ = fv->value->tav.mode == Addressing_Constant;
+					return fv->value->tav.value;
+				}
+			}
+			if (field_sel.index.count == 1 && field_sel.index[0] == sel.index[0]) {
+				value = fv->value->tav.value;
+				sel = sub_selection(sel, 1);
+				found_direct_field = true;
+				break;
+			}
+		}
+		if (!found_direct_field) {
+			if (success_) *success_ = true;
+			return exact_value_zero_of_type(sel.entity->type);
+		}
+	}
 	if (value.kind == ExactValue_Compound && is_type_soa_struct(operand->type)) {
 		return get_constant_soa_field(base_type(operand->type), value, sel, success_);
 	}

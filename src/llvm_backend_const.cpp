@@ -873,6 +873,9 @@ gb_internal bool lb_is_nested_possibly_constant(Type *ft, Selection const &sel, 
 		case Type_Array:
 			ft = bt->Array.elem;
 			break;
+		case Type_BitField:
+			ft = bt->BitField.fields[index]->type;
+			break;
 		default:
 			return false;
 		}
@@ -1064,7 +1067,7 @@ gb_internal LLVMValueRef lb_fill_fixed_capacity_dynamic_array(lbModule *m, i64 e
 // built from one has to be peeled back to the variant the checker resolved it to
 gb_internal Type *lb_build_expr_original_const_type(Ast *expr);
 
-gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value_compound) {
+gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value_compound, Type *lookup_type=nullptr, Selection const *selection_prefix=nullptr) {
 	ast_node(cl, CompoundLit, value_compound);
 
 	TEMPORARY_ALLOCATOR_GUARD();
@@ -1084,13 +1087,28 @@ gb_internal lbValue lb_const_value_bit_field(lbModule *m, Type *type, Ast *value
 	for (Ast *elem : cl->elems) {
 		ast_node(fv, FieldValue, elem);
 		InternedString interned = fv->field->Ident.interned;
-		Selection sel = lookup_field(bt, interned, false);
+		Selection sel = lookup_field(lookup_type != nullptr ? lookup_type : bt, interned, false);
+		if (selection_prefix != nullptr) {
+			if (!sel.is_bit_field || sel.index.count != selection_prefix->index.count+1) {
+				continue;
+			}
+			bool matches_prefix = true;
+			for_array(i, selection_prefix->index) {
+				if (sel.index[i] != selection_prefix->index[i]) {
+					matches_prefix = false;
+					break;
+				}
+			}
+			if (!matches_prefix) {
+				continue;
+			}
+		}
 		GB_ASSERT(sel.is_bit_field);
 		GB_ASSERT(!sel.indirect);
-		GB_ASSERT(sel.index.count == 1);
+		GB_ASSERT(selection_prefix != nullptr || sel.index.count == 1);
 		GB_ASSERT(sel.entity != nullptr);
 
-		i64 index = sel.index[0];
+		i64 index = sel.index[sel.index.count-1];
 		Entity *f = bt->BitField.fields[index];
 		GB_ASSERT(f == sel.entity);
 		i64 bit_offset = bt->BitField.bit_offsets[index];
@@ -2499,6 +2517,7 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 							if (lb_is_nested_possibly_constant(type, sel, fv->value)) {
 								bool is_constant = true;
 								Type *cv_type = f->type;
+								bool is_nested_bit_field = false;
 								for (isize j = 1; j < sel.index.count; j++) {
 									i32 index = sel.index[j];
 									Type *cvt = base_type(cv_type);
@@ -2523,17 +2542,32 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Ty
 										cv_type = cvt->Array.elem;
 
 										idx_list[j-1] = cast(unsigned)index;
+									} else if (cvt->kind == Type_BitField) {
+										cv_type = cvt;
+										idx_list_len = cast(unsigned)j-1;
+										is_nested_bit_field = true;
+										break;
 									} else {
 										GB_PANIC("UNKNOWN TYPE: %s", type_to_string(cv_type));
 									}
 								}
 								if (is_constant) {
-									LLVMValueRef elem_value = lb_const_value(m, cv_type, tav.value, tav.type, cc, fv->value).value;
+									lbValue nested_value = {};
+									if (is_nested_bit_field) {
+										Selection prefix = sel;
+										prefix.index.count = cast(isize)idx_list_len+1;
+										nested_value = lb_const_value_bit_field(m, cv_type, value.value_compound, type, &prefix);
+									} else {
+										nested_value = lb_const_value(m, cv_type, tav.value, tav.type, cc, fv->value);
+									}
+									LLVMValueRef elem_value = nested_value.value;
 									if (LLVMIsConstant(elem_value) && LLVMIsConstant(values[index])) {
 										if (is_type_union(cv_type) || is_type_raw_union(cv_type)) {
 											force_non_named = true;
 											values[index] = lb_const_aggregate_take(m, &nested[index], values[index]);
 											values[index] = llvm_const_insert_value_with_rebuild(m, values[index], elem_value, idx_list, idx_list_len);
+										} else if (is_nested_bit_field && idx_list_len == 0) {
+											values[index] = llvm_const_bin_expr(m, LLVMOr, values[index], elem_value);
 										} else {
 											lb_const_aggregate_insert(m, &nested[index], values[index], elem_value, idx_list, idx_list_len);
 										}
