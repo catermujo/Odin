@@ -32,34 +32,49 @@ gb_internal bool is_diverging_stmt(Ast *stmt) {
 	return is_diverging_expr(stmt->ExprStmt.expr);
 }
 
-gb_internal bool contains_deferred_call(Ast *node) {
-	if (node->viral_state_flags & ViralStateFlag_ContainsDeferredProcedure) {
+gb_internal bool contains_viral_state(Ast *node, u8 flags) {
+	if (node->viral_state_flags & flags) {
 		return true;
 	}
 	switch (node->kind) {
 	case Ast_ExprStmt:
-		return contains_deferred_call(node->ExprStmt.expr);
+		return contains_viral_state(node->ExprStmt.expr, flags);
 	case Ast_AssignStmt:
 		for_array(i, node->AssignStmt.rhs) {
-			if (contains_deferred_call(node->AssignStmt.rhs[i])) {
+			if (contains_viral_state(node->AssignStmt.rhs[i], flags)) {
 				return true;
 			}
 		}
 		for_array(i, node->AssignStmt.lhs) {
-			if (contains_deferred_call(node->AssignStmt.lhs[i])) {
+			if (contains_viral_state(node->AssignStmt.lhs[i], flags)) {
 				return true;
 			}
 		}
 		break;
 	case Ast_ValueDecl:
 		for_array(i, node->ValueDecl.values) {
-			if (contains_deferred_call(node->ValueDecl.values[i])) {
+			if (contains_viral_state(node->ValueDecl.values[i], flags)) {
 				return true;
 			}
 		}
 		break;
 	}
 
+	return false;
+}
+
+gb_internal bool is_straight_line_stmt(Ast *stmt) {
+	if (contains_viral_state(stmt, ViralStateFlag_ContainsOrReturn | ViralStateFlag_ContainsOrBreak)) {
+		return false;
+	}
+	switch (stmt->kind) {
+	case Ast_EmptyStmt:
+	case Ast_ExprStmt:
+	case Ast_AssignStmt:
+	case Ast_ValueDecl:
+	case Ast_DeferStmt:
+		return true;
+	}
 	return false;
 }
 
@@ -128,14 +143,18 @@ gb_internal void check_stmt_list(CheckerContext *ctx, Slice<Ast *> const &stmts,
 				break;
 			}
 		} else if (i+1 == max_non_constant_declaration) {
-			if (is_diverging_stmt(n)) {
-				for (isize j = 0; j < i; j++) {
+			if (is_diverging_stmt(n) && is_straight_line_stmt(n)) {
+				// DUMBAI: Only a straight-line suffix proves that no earlier scope exit can execute the defer.
+				for (isize j = i-1; j >= 0; j--) {
 					Ast *stmt = stmts[j];
+					if (!is_straight_line_stmt(stmt)) {
+						break;
+					}
 					if (stmt->kind == Ast_ValueDecl && !stmt->ValueDecl.is_mutable) {
 
 					} else if (stmt->kind == Ast_DeferStmt) {
 						error(stmt, "Unreachable defer statement due to diverging procedure call at the end of the current scope");
-					} else if (contains_deferred_call(stmt)) {
+					} else if (contains_viral_state(stmt, ViralStateFlag_ContainsDeferredProcedure)) {
 						error(stmt, "Unreachable deferred procedure call due to a diverging procedure call at the end of the current scope");
 					}
 				}

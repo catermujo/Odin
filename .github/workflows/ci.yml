@@ -116,6 +116,8 @@ jobs:
         run: python3 tests/gb_strlen.py
       - name: LLVM IR visibility
         run: python3 tests/llvm_ir_visibility.py
+      - name: Defer exits before diverging calls
+        run: python3 tests/defer_diverging_exit.py
       - name: Test ordinary range loop costing
         run: python3 tests/llvm_range_unroll.py
       - name: Odin version
@@ -245,6 +247,8 @@ jobs:
         run: python tests/llvm_ir_visibility.py
       - name: Test ordinary range loop costing
         run: python tests/llvm_range_unroll.py
+      - name: Defer exits before diverging calls
+        run: python tests/defer_diverging_exit.py
       - name: Upload Windows compiler
         uses: actions/upload-artifact@v4
         with:
