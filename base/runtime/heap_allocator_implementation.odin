@@ -1196,6 +1196,16 @@ Tagged_Pointer :: bit_field u64 {
 	version: u8 | 7,
 }
 
+// DUMBAI: A versioned CAS prevents ABA but cannot keep a node mapped while a competing consumer reads its link.
+@(no_sanitize_address)
+heap_orphanage_lock :: proc "contextless" (lock: ^u32) {
+	for intrinsics.atomic_exchange_explicit(lock, 1, .Acquire) != 0 {
+		for intrinsics.atomic_load_explicit(lock, .Relaxed) != 0 {
+			intrinsics.cpu_relax()
+		}
+	}
+}
+
 /*
 Push an empty Segment into the global orphanage.
 */
@@ -1311,25 +1321,29 @@ If the first one available happens to be an in-use segment, the request for
 heap_adopt_orphan :: proc "contextless" (bin_size: int, class: Heap_Slab_Class) -> (segment: ^Heap_Segment) {
 	// First try to get an in-use segment.
 	{
-		old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.in_use, .Relaxed)
-		for {
-			segment = cast(^Heap_Segment)uintptr(old_head.pointer)
-			if segment == nil {
-				break
-			}
+		{
+			heap_orphanage_lock(&heap_orphanage.in_use_pop_lock)
+			defer intrinsics.atomic_store_explicit(&heap_orphanage.in_use_pop_lock, 0, .Release)
+			old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.in_use, .Relaxed)
+			for {
+				segment = cast(^Heap_Segment)uintptr(old_head.pointer)
+				if segment == nil {
+					break
+				}
 
-			next := intrinsics.atomic_load_explicit(&segment.next_segment, .Acquire)
-			new_head := Tagged_Pointer{
-				pointer = i64(uintptr(next)),
-				version = old_head.version + 1,
-			}
+				next := intrinsics.atomic_load_explicit(&segment.next_segment, .Acquire)
+				new_head := Tagged_Pointer{
+					pointer = i64(uintptr(next)),
+					version = old_head.version + 1,
+				}
 
-			old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.in_use, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
-			if swapped {
-				intrinsics.atomic_store_explicit(&segment.next_segment, nil, .Release)
-				break
+				old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.in_use, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
+				if swapped {
+					intrinsics.atomic_store_explicit(&segment.next_segment, nil, .Release)
+					break
+				}
+				old_head = transmute(Tagged_Pointer)old_head_
 			}
-			old_head = transmute(Tagged_Pointer)old_head_
 		}
 		if segment != nil {
 			heap_add_segment(segment)
@@ -1372,29 +1386,33 @@ heap_adopt_orphan :: proc "contextless" (bin_size: int, class: Heap_Slab_Class) 
 	}
 	// Next try to get an empty segment if that failed.
 	if segment == nil && class != .Huge {
-		old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.empty, .Relaxed)
-		for {
-			count         := old_head.pointer & ODIN_HEAP_ORPHANAGE_COUNT_BITS
-			untagged_head := uintptr(old_head.pointer) & ~uintptr(ODIN_HEAP_ORPHANAGE_COUNT_BITS)
+		{
+			heap_orphanage_lock(&heap_orphanage.empty_pop_lock)
+			defer intrinsics.atomic_store_explicit(&heap_orphanage.empty_pop_lock, 0, .Release)
+			old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.empty, .Relaxed)
+			for {
+				count         := old_head.pointer & ODIN_HEAP_ORPHANAGE_COUNT_BITS
+				untagged_head := uintptr(old_head.pointer) & ~uintptr(ODIN_HEAP_ORPHANAGE_COUNT_BITS)
 
-			segment = cast(^Heap_Segment)uintptr(untagged_head)
-			if segment == nil {
-				assert_contextless(count == 0, "The heap allocator saw a nil pointer on the orphanage for empty segments but the count was not zero.")
-				break
-			}
+				segment = cast(^Heap_Segment)uintptr(untagged_head)
+				if segment == nil {
+					assert_contextless(count == 0, "The heap allocator saw a nil pointer on the orphanage for empty segments but the count was not zero.")
+					break
+				}
 
-			next := intrinsics.atomic_load_explicit(&segment.next_segment, .Acquire)
-			new_head := Tagged_Pointer{
-				pointer = i64(uintptr(next)) | (count - 1),
-				version = old_head.version + 1,
-			}
+				next := intrinsics.atomic_load_explicit(&segment.next_segment, .Acquire)
+				new_head := Tagged_Pointer{
+					pointer = i64(uintptr(next)) | (count - 1),
+					version = old_head.version + 1,
+				}
 
-			old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.empty, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
-			if swapped {
-				intrinsics.atomic_store_explicit(&segment.next_segment, nil, .Release)
-				break
+				old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.empty, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
+				if swapped {
+					intrinsics.atomic_store_explicit(&segment.next_segment, nil, .Release)
+					break
+				}
+				old_head = transmute(Tagged_Pointer)old_head_
 			}
-			old_head = transmute(Tagged_Pointer)old_head_
 		}
 		if segment != nil {
 			if segment.slab_size_class == class {
@@ -1484,7 +1502,8 @@ when VIRTUAL_MEMORY_SUPPORTED {
 
 /*
 This is the global heap orphanage where Segments which are no longer in use by
-a specific heap are pushed to. The two fields are lock-free linked lists.
+a specific heap are pushed to. Pushes use tagged CAS; consumers serialize removal
+so an adopted segment cannot be unmapped while another consumer reads its link.
 
 `in_use` contains Segments that are either partially or fully allocated
 and have been orphaned by their owning heaps.
@@ -1497,6 +1516,7 @@ system.
 heap_orphanage: struct {
 	in_use: Tagged_Pointer,
 	empty:  Tagged_Pointer,
+	in_use_pop_lock, empty_pop_lock: u32,
 }
 
 // This is the Heap for the current thread.

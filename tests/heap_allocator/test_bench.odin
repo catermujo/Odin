@@ -731,6 +731,55 @@ test_cross_thread_free_at_thread_exit :: proc(rounds: int) {
 	log.info("Cross-thread free at thread exit test succeeded.")
 }
 
+// DUMBAI: Concurrent consumers must not read a segment after another consumer adopts and releases it.
+test_parallel_orphan_adoption :: proc(rounds: int) {
+	context.allocator = runtime.heap_allocator()
+	Output :: struct {
+		small, huge: []byte,
+	}
+	worker :: proc(t: ^thread.Thread) {
+		output := cast(^Output)t.data
+		output.small = make([]byte, 64)
+		output.huge = make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE + runtime.Kilobyte)
+		output.small[0] = 42
+		output.huge[0] = 71
+	}
+	stop: bool
+	release_empty :: proc(t: ^thread.Thread) {
+		stop := cast(^bool)t.data
+		for !sync.atomic_load(stop) {
+			runtime.heap_release_empty_orphans()
+			intrinsics.cpu_relax()
+		}
+	}
+	reclaimer := thread.create(release_empty, name = "orphan reclaimer")
+	reclaimer.data = &stop
+	thread.start(reclaimer)
+	for _ in 0..<rounds {
+		outputs: [16]Output
+		workers: [16]^thread.Thread
+		for &t, i in workers {
+			t = thread.create(worker, name = "orphan adopter")
+			t.data = &outputs[i]
+			thread.start(t)
+		}
+		for t in workers {
+			thread.join(t)
+			thread.destroy(t)
+		}
+		for output in outputs {
+			expect(output.small[0] == 42)
+			expect(output.huge[0] == 71)
+			delete(output.small)
+			delete(output.huge)
+		}
+	}
+	sync.atomic_store(&stop, true)
+	thread.join(reclaimer)
+	thread.destroy(reclaimer)
+	log.info("Parallel orphan adoption and reclamation test succeeded.")
+}
+
 test_adopted_huge_segment_freed_before_larger_request :: proc() {
 	bytes: []byte
 	worker := thread.create_and_start_with_data(&bytes, proc(data: rawptr) {
@@ -1143,6 +1192,7 @@ main :: proc() {
 			test_orphaned_huge_segment_with_remote_free()
 			test_adopted_huge_segment_freed_before_larger_request()
 			test_cross_thread_free_at_thread_exit(10_000 if opt.long else (300 when ODIN_DEBUG else 2_000))
+			test_parallel_orphan_adoption(5_000 if opt.long else 1_000)
 
 			// Reset the heap, removing any of the dirty slabs before the next tests.
 			runtime.compact_local_heap()
