@@ -53,30 +53,34 @@ Adopt all empty segments in the orphanage and release them back to the operating
 heap_release_empty_orphans :: proc "contextless" () {
 	segment: ^Heap_Segment
 
-	// First, take control of the linked list by replacing it with a nil
-	// pointer and a zero count.
-	old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.empty, .Relaxed)
-	for {
-		count         := old_head.pointer & ODIN_HEAP_ORPHANAGE_COUNT_BITS
-		untagged_head := uintptr(old_head.pointer) & ~uintptr(ODIN_HEAP_ORPHANAGE_COUNT_BITS)
+	{
+		// DUMBAI: Wait for list readers before detaching nodes that will immediately be unmapped.
+		heap_orphanage_lock(&heap_orphanage.empty_pop_lock)
+		defer intrinsics.atomic_store_explicit(&heap_orphanage.empty_pop_lock, 0, .Release)
+		// First, take control of the linked list by replacing it with a nil
+		// pointer and a zero count.
+		old_head := transmute(Tagged_Pointer)intrinsics.atomic_load_explicit(cast(^u64)&heap_orphanage.empty, .Relaxed)
+		for {
+			count         := old_head.pointer & ODIN_HEAP_ORPHANAGE_COUNT_BITS
+			untagged_head := uintptr(old_head.pointer) & ~uintptr(ODIN_HEAP_ORPHANAGE_COUNT_BITS)
 
-		segment = cast(^Heap_Segment)uintptr(untagged_head)
-		if segment == nil {
-			assert_contextless(count == 0, "The heap allocator saw a nil pointer on the orphanage for empty segments but the count was not zero.")
-			break
-		}
+			segment = cast(^Heap_Segment)uintptr(untagged_head)
+			if segment == nil {
+				assert_contextless(count == 0, "The heap allocator saw a nil pointer on the orphanage for empty segments but the count was not zero.")
+				break
+			}
 
-		new_head := Tagged_Pointer{
-			pointer = 0, // nil pointer with zero count
-			version = old_head.version + 1,
-		}
+			new_head := Tagged_Pointer{
+				pointer = 0, // nil pointer with zero count
+				version = old_head.version + 1,
+			}
 
-		old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.empty, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
-		if swapped {
-			intrinsics.atomic_store_explicit(&segment.next_segment, nil, .Release)
-			break
+			old_head_, swapped := intrinsics.atomic_compare_exchange_weak_explicit(cast(^u64)&heap_orphanage.empty, transmute(u64)old_head, transmute(u64)new_head, .Acq_Rel, .Relaxed)
+			if swapped {
+				break
+			}
+			old_head = transmute(Tagged_Pointer)old_head_
 		}
-		old_head = transmute(Tagged_Pointer)old_head_
 	}
 
 	// Now walk the list of segments and release them.
