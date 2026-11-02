@@ -644,7 +644,8 @@ gb_internal Array<GlobalDeclScan> start_global_decl_scans(Checker *c, TaskGroup 
 	return scans;
 }
 
-gb_internal void resolve_global_decl_sources(Checker *c, Array<ImportGraphNode *> const &package_order, Array<GlobalDeclScan> scans) {
+// Returns whether deferred file tags activated or excluded any file
+gb_internal bool resolve_global_decl_sources(Checker *c, Array<ImportGraphNode *> const &package_order, Array<GlobalDeclScan> scans) {
 	array_init(&global_decl_sources,       heap_allocator());
 	array_init(&global_decl_source_stack,  heap_allocator());
 	array_init(&global_placeholder_scopes, heap_allocator());
@@ -665,6 +666,9 @@ gb_internal void resolve_global_decl_sources(Checker *c, Array<ImportGraphNode *
 	global_import_stage_end(GlobalImportStage_Placeholders, stage_start);
 
 	stage_start = global_import_stage_begin();
+	// DUMBAI: Evaluate deferred file tags before any 'when', so a 'when' sees the constants of files the tags activate.
+	// Placeholders are live here, so a tag still forces only the 'when' blocks that declare the names it reads.
+	bool deferred_changed = check_prepare_deferred_build_tag_files(c);
 	for (GlobalDeclSource *src : global_decl_sources) {
 		resolve_global_decl_source(src, {});
 	}
@@ -680,6 +684,7 @@ gb_internal void resolve_global_decl_sources(Checker *c, Array<ImportGraphNode *
 	global_import_stage_end(GlobalImportStage_DeclSources, stage_start);
 
 	map_destroy(&global_decl_source_export_untyped);
+	return deferred_changed;
 }
 
 

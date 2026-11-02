@@ -19,6 +19,7 @@ gb_internal void check_expr_or_type(CheckerContext *c, Operand *operand, Ast *ex
 gb_internal void add_comparison_procedures_for_fields(CheckerContext *c, Type *t);
 gb_internal bool ast_file_is_excluded_by_build_tags(AstFile *f);
 gb_internal bool ast_file_has_deferred_build_tags(AstFile *f);
+gb_internal bool check_prepare_deferred_build_tag_files(Checker *c);
 gb_internal Type *check_type(CheckerContext *ctx, Ast *e);
 gb_internal void check_procedure_later(Checker *c, ProcInfo *info);
 gb_internal void check_escapes(Checker *c);
@@ -8034,14 +8035,15 @@ gb_internal bool ast_file_has_deferred_build_tags(AstFile *f) {
 
 gb_internal BuildTagConditionValue checker_when_expr_resolver(void *user_data, TokenPos pos, String name, ExactValue *value) {
 	auto *data = cast(DeferredBuildTagResolverData *)user_data;
-	char const *key = string_intern_cstring(name);
-	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
-		map_set(&build_context.used_defined_values, key, true);
-		*value = *v;
-		return BuildTagCondition_True;
-	}
-
 	Entity *e = scope_lookup_current(data->pkg->scope, string_interner_insert(name));
+	if (e == nullptr || e->kind != Entity_Constant) {
+		char const *key = string_intern_cstring(name);
+		if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
+			map_set(&build_context.used_defined_values, key, true);
+			*value = *v;
+			return BuildTagCondition_True;
+		}
+	}
 	if (e == nullptr) {
 		if (data->missing_is_false) {
 			*value = exact_value_bool(false);
@@ -8133,6 +8135,12 @@ gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> cons
 	for (AstFile *f : files) {
 		if (!ast_file_is_excluded_by_build_tags(f)) {
 			check_export_entities_in_pkg(ctx, f->pkg, untyped);
+		}
+	}
+	// DUMBAI: Files activate while global 'when's resolve, and their constants may name their own imports.
+	for (AstFile *f : files) {
+		if (!ast_file_is_excluded_by_build_tags(f)) {
+			check_add_imports_worker_proc(f);
 		}
 	}
 }
@@ -8302,8 +8310,7 @@ gb_internal void check_import_entities(Checker *c) {
 	global_import_stage_end(GlobalImportStage_Imports, stage_start);
 
 	TIME_SECTION("check_import_entities - resolve 'when' and 'foreign' blocks");
-	resolve_global_decl_sources(c, package_order, scans);
-	if (check_prepare_deferred_build_tag_files(c)) {
+	if (resolve_global_decl_sources(c, package_order, scans)) {
 		check_import_entities(c);
 		return;
 	}

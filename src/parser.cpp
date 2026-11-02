@@ -7729,17 +7729,6 @@ gb_internal BuildTagConditionValue evaluate_when_tag_expr(WhenExpr *expr, WhenEx
 	return BuildTagCondition_Unknown;
 }
 
-gb_internal BuildTagConditionValue parser_when_expr_resolver(void *user_data, TokenPos pos, String name, ExactValue *value) {
-	GB_ASSERT(user_data == nullptr);
-	char const *key = string_intern_cstring(name);
-	if (ExactValue const *v = map_get(&build_context.defined_values, key)) {
-		map_set(&build_context.used_defined_values, key, true);
-		*value = *v;
-		return BuildTagCondition_True;
-	}
-	return BuildTagCondition_Unknown;
-}
-
 gb_internal String build_tag_get_token(String s, String *out) {
 	s = string_trim_whitespace(s);
 	isize n = 0;
@@ -8344,7 +8333,9 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 		}
 
 		ExactValue when_val = {};
-		BuildTagConditionValue result = evaluate_when_tag_expr(expr, parser_when_expr_resolver, nullptr, &when_val);
+		// DUMBAI: Identifiers stay unknown here; a package constant must win over a define of the same name, and only the
+		// checker can see package constants.
+		BuildTagConditionValue result = evaluate_when_tag_expr(expr, nullptr, nullptr, &when_val);
 		if (result == BuildTagCondition_False) {
 			return false;
 		}

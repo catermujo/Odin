@@ -11,6 +11,9 @@ COMMON_NO_FILE="-define:ODIN_TEST_FANCY=false -vet -strict-style -ignore-unused-
 
 set -x
 
+$ODIN check ../test_issue_when_constant_over_define -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_WHEN_GATE=true -define:ODIN_TEST_WHEN_DEFINE_ONLY=true
+$ODIN check ../test_issue_deferred_gate_when_constant -no-entry-point $COMMON_NO_FILE
+
 $ODIN run ../test_issue_typeid_record_param.odin -file $COMMON
 $ODIN run ../test_issue_typeid_record_param.odin -file $COMMON -o:speed
 
