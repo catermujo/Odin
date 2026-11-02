@@ -139,6 +139,8 @@ else
 fi
 $ODIN check ../test_issue_deferred_when_import -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_import_order/entry -collection:deferred_backend=../test_issue_deferred_build_tag_import_order/backend -no-entry-point $COMMON_NO_FILE
+$ODIN check ../test_issue_when_constant_over_define -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_WHEN_GATE=true -define:ODIN_TEST_WHEN_DEFINE_ONLY=true
+$ODIN check ../test_issue_deferred_gate_when_constant -no-entry-point $COMMON_NO_FILE
 if [[ $($ODIN check ../test_issue_6874.odin $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
