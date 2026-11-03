@@ -192,6 +192,14 @@ else
 fi
 
 $ODIN run ../test_issue_soa_scalar_swizzle_assign.odin -file $COMMON
+$ODIN test ../test_issue_soa_enumerated_array_field_projection.odin -file $COMMON -o:none
+$ODIN test ../test_issue_soa_enumerated_array_field_projection.odin -file $COMMON -o:speed
+if [[ $($ODIN test ../test_issue_soa_enum_index_reject.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
+	echo "SUCCESSFUL 1/1"
+else
+	echo "SUCCESSFUL 0/1"
+	exit 1
+fi
 
 
 if [[ $($ODIN check ../test_type_switch_alias.odin -file $COMMON_CHECK 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then

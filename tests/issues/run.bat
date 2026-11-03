@@ -59,6 +59,9 @@ shared_runtime_host.exe "%CD%\shared_runtime.dll" || exit /b
 %ODIN% check ..\test_issue_build_tag_define_pkg_order -no-entry-point %COMMON_NO_FILE% -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 
 %ODIN% run ..\test_issue_soa_scalar_swizzle_assign.odin -file %COMMON%  || exit /b
+%ODIN% test ..\test_issue_soa_enumerated_array_field_projection.odin -file %COMMON% -o:none || exit /b
+%ODIN% test ..\test_issue_soa_enumerated_array_field_projection.odin -file %COMMON% -o:speed || exit /b
+%ODIN% test ..\test_issue_soa_enum_index_reject.odin -file %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b
 
 
 %ODIN% check ..\test_type_switch_alias.odin -file %COMMON% 2>&1 | find /c "Error:" | findstr /x "1" || exit /b

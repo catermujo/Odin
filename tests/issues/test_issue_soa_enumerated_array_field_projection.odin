@@ -1,3 +1,4 @@
+#+test
 package test_issues
 
 import "core:testing"
@@ -151,4 +152,79 @@ test_soa_inner_outer_same_index_type_keeps_outer_semantics :: proc(t: ^testing.T
 	testing.expect_value(t, m[.Dry][.Wet], 200)
 	testing.expect_value(t, m[.Wet][.Dry], 10)
 	testing.expect_value(t, m[.Wet][.Wet], 20)
+}
+
+@(test)
+test_soa_enum_slice_row_index_and_components :: proc(t: ^testing.T) {
+	Layer :: enum {Dry, Wet}
+	m: #soa[Layer][]i32
+	dry := [5]i32{1, 2, 3, 4, 5}
+	wet := [5]i32{10, 20, 30, 40, 50}
+	m[.Dry] = dry[:]
+	m[.Wet] = wet[:]
+
+	row: [Layer]i32 = m[4]
+	testing.expect_value(t, row[.Dry], 5)
+	testing.expect_value(t, row[.Wet], 50)
+	m[4][.Wet] = 70
+	testing.expect_value(t, wet[4], 70)
+
+	index_calls := 0
+	index :: proc(calls: ^int) -> int {
+		calls^ += 1
+		return 3
+	}
+	m[index(&index_calls)] = [Layer]i32{.Dry = 8, .Wet = 80}
+	testing.expect_value(t, index_calls, 1)
+	testing.expect_value(t, dry[3], 8)
+	testing.expect_value(t, wet[3], 80)
+}
+
+@(test)
+test_soa_enum_slice_row_read_checks_each_column :: proc(t: ^testing.T) {
+	Layer :: enum {Dry, Wet}
+	m: #soa[Layer][]i32
+	dry := [3]i32{1, 2, 3}
+	wet := [2]i32{10, 20}
+	m[.Dry] = dry[:]
+	m[.Wet] = wet[:]
+
+	testing.expect_assert(t, "2 is out of range 0..<2")
+	row: [Layer]i32 = m[2]
+	_ = row
+}
+
+@(test)
+test_soa_enum_slice_row_write_checks_each_column :: proc(t: ^testing.T) {
+	Layer :: enum {Dry, Wet}
+	m: #soa[Layer][]i32
+	dry := [3]i32{1, 2, 3}
+	wet := [2]i32{10, 20}
+	m[.Dry] = dry[:]
+	m[.Wet] = wet[:]
+
+	testing.expect_assert(t, "2 is out of range 0..<2")
+	m[2] = [Layer]i32{.Dry = 8, .Wet = 80}
+}
+
+@(test)
+test_soa_enum_indices_use_storage_offsets :: proc(t: ^testing.T) {
+	Layer :: enum {Dry = -1, Wet}
+	m: #soa[Layer]Enum_Record = {
+		.Dry = Enum_Record{field = 10, other = 100},
+		.Wet = Enum_Record{field = 20, other = 200},
+	}
+	testing.expect_value(t, m[.Dry].field, 10)
+	layer: Layer = .Wet
+	m.field[layer] = 30
+	testing.expect_value(t, m.field[.Wet], 30)
+	testing.expect_value(t, m[0].other, 100)
+
+	Positive :: enum {First = 3, Last}
+	p: #soa[Positive]Enum_Record
+	p[.First].field = 40
+	last: Positive = .Last
+	p[last].field = 50
+	testing.expect_value(t, p.field[.First], 40)
+	testing.expect_value(t, p[last].field, 50)
 }

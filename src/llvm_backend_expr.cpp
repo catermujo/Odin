@@ -5848,6 +5848,18 @@ gb_internal void lb_build_addr_compound_lit_assign_soa(lbProcedure *p, lbValue s
 	}
 }
 
+gb_internal lbValue lb_build_soa_index_expr(lbProcedure *p, AstIndexExpr *ie) {
+	lbValue index = lb_build_expr(p, ie->index);
+	Type *hint = get_soa_index_type_hint(type_of_expr(ie->expr), ie->expr);
+	if (hint != nullptr && are_types_identical(type_of_expr(ie->index), hint)) {
+		ExactValue const &minimum = *base_type(hint)->Enum.min_value;
+		if (compare_exact_values(Token_NotEq, minimum, exact_value_i64(0))) {
+			index = lb_emit_arith(p, Token_Sub, index, lb_const_value(p->module, hint, minimum), hint);
+		}
+	}
+	return index;
+}
+
 gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 	ast_node(ie, IndexExpr, expr);
 	bool proven = (expr->state_flags & StateFlag_bounds_check_proven) != 0; // see check_escape.cpp
@@ -5873,7 +5885,7 @@ gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 			val = lb_emit_load(p, val);
 		}
 
-		lbValue index = lb_build_expr(p, ie->index);
+		lbValue index = lb_build_soa_index_expr(p, ie);
 		Type *result_type = type_of_expr(expr);
 		lbSoaVariableMode soa_mode = lbSoaVariable_OuterIndex;
 
@@ -6037,7 +6049,7 @@ gb_internal lbAddr lb_build_addr_index_expr(lbProcedure *p, Ast *expr) {
 		if (deref) {
 			array = lb_emit_load(p, array);
 		}
-		lbValue index = lb_build_expr(p, ie->index);
+		lbValue index = lb_build_soa_index_expr(p, ie);
 		index = lb_emit_conv(p, index, t_int);
 		lbValue elem = lb_emit_array_ep(p, array, index);
 

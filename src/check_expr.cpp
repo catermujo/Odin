@@ -6328,9 +6328,13 @@ gb_internal void convert_to_typed(CheckerContext *c, Operand *operand, Type *tar
 	operand->type = target_type;
 }
 
-gb_internal bool check_index_value(CheckerContext *c, Operand *indexable_operand, Type *main_type, bool open_range, Ast *index_value, i64 max_count, i64 *value, Type *type_hint=nullptr) {
+gb_internal bool check_index_value(CheckerContext *c, Operand *indexable_operand, Type *main_type, bool open_range, Ast *index_value, i64 max_count, i64 *value, Type *type_hint=nullptr, Operand const *checked_index=nullptr) {
 	Operand operand = {Addressing_Invalid};
-	check_expr_with_type_hint(c, &operand, index_value, type_hint);
+	if (checked_index != nullptr) {
+		operand = *checked_index;
+	} else {
+		check_expr_with_type_hint(c, &operand, index_value, type_hint);
+	}
 	if (operand.mode == Addressing_Invalid) {
 		if (value) *value = 0;
 		// NOTE(bill): return true here to propagate the errors better
@@ -9052,6 +9056,20 @@ gb_internal bool maybe_has_binary_expr_custom_overload_candidate(CheckerContext 
 	return false;
 }
 
+gb_internal Type *get_soa_index_type_hint(Type *container_type, Ast *container_expr) {
+	Type *t = base_type(type_deref(container_type));
+	if (t->kind == Type_Array && container_expr != nullptr) {
+		Ast *base = unparen_expr(container_expr);
+		if (base->kind == Ast_SelectorExpr) {
+			t = base_type(type_deref(type_of_expr(base->SelectorExpr.expr)));
+		}
+	}
+	if (is_type_soa_struct(t) && t->Struct.soa_kind == StructSoa_Fixed) {
+		return t->Struct.soa_index;
+	}
+	return nullptr;
+}
+
 gb_internal Type *get_custom_index_expr_type_hint(Type *container_type) {
 	Type *t = base_type(type_deref(container_type));
 	if (t == nullptr || t == t_invalid) {
@@ -9063,6 +9081,9 @@ gb_internal Type *get_custom_index_expr_type_hint(Type *container_type) {
 	}
 	if (is_type_enumerated_array(t)) {
 		return t->EnumeratedArray.index;
+	}
+	if (is_type_soa_struct(t) && t->Struct.soa_kind == StructSoa_Fixed) {
+		return t->Struct.soa_index;
 	}
 
 	return nullptr;
@@ -9619,17 +9640,6 @@ gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand
 		return false;
 	}
 
-	Operand index_operand = {};
-	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type);
-	if (index_type_hint != nullptr) {
-		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
-	} else {
-		check_expr(c, &index_operand, ie->index);
-	}
-	if (index_operand.mode == Addressing_Invalid) {
-		return false;
-	}
-
 	Token proc_token = make_token_ident(str_lit("[]="));
 	proc_token.pos = ie->open.pos;
 
@@ -9689,6 +9699,18 @@ gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand
 	}
 
 	if (!can_use_direct && !can_use_address) {
+		return false;
+	}
+
+	// DUMBAI: Unrelated setters must not type-check a built-in index before its container supplies the hint.
+	Operand index_operand = {};
+	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type);
+	if (index_type_hint != nullptr) {
+		check_expr_with_type_hint(c, &index_operand, ie->index, index_type_hint);
+	} else {
+		check_expr(c, &index_operand, ie->index);
+	}
+	if (index_operand.mode == Addressing_Invalid) {
 		return false;
 	}
 
@@ -12064,6 +12086,7 @@ gb_internal bool check_set_index_data(Operand *o, Type *t, bool indirection, i64
 		if (indirection) {
 			o->mode = Addressing_Variable;
 		} else if (o->mode != Addressing_Variable &&
+		           o->mode != Addressing_SoaVariable &&
 		           o->mode != Addressing_Constant) {
 			o->mode = Addressing_Value;
 		}
@@ -13961,6 +13984,15 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 			break;
 		}
 
+		Type *literal_index_hint = t->kind == Type_Struct ? t->Struct.soa_index : nullptr;
+		auto normalize_literal_index = [&](Operand *index) {
+			if (literal_index_hint != nullptr && are_types_identical(index->type, literal_index_hint)) {
+				// DUMBAI: SOA literal slots use storage offsets even when enum values start above or below zero.
+				index->value = exact_value_sub(index->value, *base_type(literal_index_hint)->Enum.min_value);
+				index->type = t_int;
+				add_type_and_value(c, index->expr, index->mode, index->type, index->value);
+			}
+		};
 		if (cl->elems.count > 0 && cl->elems[0]->kind == Ast_FieldValue) {
 			RangeCache rc = range_cache_make(heap_allocator());
 			defer (range_cache_destroy(&rc));
@@ -13977,7 +14009,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 
 					Operand x = {};
 					Operand y = {};
-					bool ok = check_range(c, fv->field, false, &x, &y, nullptr);
+					bool ok = check_range(c, fv->field, false, &x, &y, nullptr, literal_index_hint);
 					if (!ok) {
 						continue;
 					}
@@ -13991,6 +14023,8 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 						continue;
 					}
 
+					normalize_literal_index(&x);
+					normalize_literal_index(&y);
 					i64 lo = exact_value_to_i64(x.value);
 					i64 hi = exact_value_to_i64(y.value);
 					i64 max_index = hi;
@@ -14029,7 +14063,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 					}
 				} else {
 					Operand op_index = {};
-					check_expr(c, &op_index, fv->field);
+					check_expr_with_type_hint(c, &op_index, fv->field, literal_index_hint);
 
 					if (op_index.mode != Addressing_Constant || !is_type_integer(core_type(op_index.type))) {
 						error(elem, "Expected a constant integer as an array field");
@@ -14037,6 +14071,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 					}
 					// add_type_and_value(c, op_index.expr, op_index.mode, op_index.type, op_index.value);
 
+					normalize_literal_index(&op_index);
 					i64 index = exact_value_to_i64(op_index.value);
 
 					if (max_type_count >= 0 && (index < 0 || index >= max_type_count)) {
@@ -15209,8 +15244,32 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 		index_type_hint = bt->EnumeratedArray.index;
 	}
 
+	Type *soa_index_hint = get_soa_index_type_hint(type_of_expr(ie->expr), ie->expr);
+
+	Operand checked_index = {};
+	Operand const *index_operand = nullptr;
+	bool slice_row = false;
+	if (soa_index_hint != nullptr) {
+		// DUMBAI: Enum indices select columns. Integers select rows only for enum-count SOA slices.
+		check_expr_with_type_hint(c, &checked_index, ie->index, soa_index_hint);
+		index_operand = &checked_index;
+		bool integer_index = is_type_integer(checked_index.type);
+		index_type_hint = integer_index ? nullptr : soa_index_hint;
+		slice_row = integer_index && is_type_soa_struct(t) && is_type_slice(t->Struct.soa_elem);
+		if (slice_row) {
+			// DUMBAI: Each column's slice length is checked when the row is loaded or stored.
+			max_count = -1;
+		}
+	}
+
 	i64 index = 0;
-	bool ok = check_index_value(c, o, t, false, ie->index, max_count, &index, index_type_hint);
+	bool ok = check_index_value(c, o, t, false, ie->index, max_count, &index, index_type_hint, index_operand);
+	if (ok && slice_row) {
+		Type *index_enum = base_type(soa_index_hint);
+		Type *elem = base_type(t->Struct.soa_elem)->Slice.elem;
+		o->type = alloc_type_enumerated_array(elem, soa_index_hint, index_enum->Enum.min_value,
+		                                      index_enum->Enum.max_value, t->Struct.soa_count, Token_Invalid);
+	}
 	if (is_const) {
 		if (index < 0) {
 			ERROR_BLOCK();
