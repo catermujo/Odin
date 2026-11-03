@@ -57,7 +57,9 @@ init_auxv :: proc "contextless" () {
 	// DUMBAI: Shared libraries have no initial argv stack, so libc supplies their auxiliary vector.
 	when LIBC_AUXV do return
 	// This is similar to how we get the environment on Linux.
-	#no_bounds_check auxv := cast([^]rawptr)&args__[len(args__) + 1]
+	// DUMBAI: Unix entry points store byte-string argv in the platform command-line union.
+	args := args__.([]cstring)
+	#no_bounds_check auxv := cast([^]rawptr)&args[len(args) + 1]
 	for auxv[0] != nil {
 		auxv = auxv[1:]
 	}
