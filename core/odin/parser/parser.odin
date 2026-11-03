@@ -3475,6 +3475,24 @@ is_literal_missing_open_brace :: proc(p: ^Parser, type: ^ast.Expr) -> bool {
 	if int(first.pos.column)-1 <= indent {
 		return false
 	}
+
+	// DUMBAI: a block or case body opened earlier on the line, as in `proc() { x := f()` or `case 1: x := f()`, is what
+	// indents the next line
+	t: tokenizer.Tokenizer
+	tokenizer.init(&t, p.tok.src[line_start:int(type.pos.offset)], "", nil)
+	depth := 0
+	for tok := tokenizer.scan(&t); tok.kind != .EOF; tok = tokenizer.scan(&t) {
+		#partial switch tok.kind {
+		case .Open_Brace, .Case:
+			depth += 1
+		case .Close_Brace:
+			depth = max(depth-1, 0)
+		}
+	}
+	if depth > 0 {
+		return false
+	}
+
 	last := first
 	for i := 1; ; i += 1 {
 		tok := peek_token(p, i)

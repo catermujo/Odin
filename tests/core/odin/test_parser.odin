@@ -301,6 +301,44 @@ test_parse_error_recovery_unclosed_block :: proc(t: ^testing.T) {
 }
 
 @test
+test_parse_block_opened_on_statement_line :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	// a block opened on the line of its first statement indents the lines after it; they are not the elements of a
+	// literal whose `{` was deleted, so the compiler accepts every one of these
+	Case :: struct {
+		name, src: string,
+	}
+	cases := []Case{
+		{"literal field, `}` and `,` on the next line", "e := Entry{\n\tcount = proc() -> int { value := compute()\n\t\treturn value },\n}"},
+		{"literal field, `}` on its own line",          "e := Entry{\n\tcount = proc() -> int { value := compute()\n\t\treturn value\n\t},\n}"},
+		{"literal field, local",                        "f :: proc() {\n\te := Entry{\n\t\tcount = proc() -> int { value := compute()\n\t\t\treturn value },\n\t}\n}"},
+		{"call argument",                               "f :: proc() {\n\tv := take(\n\t\tproc() -> int { value := compute()\n\t\t\treturn value },\n\t)\n}"},
+		{"array literal",                               "a := [?]proc() -> int{\n\tproc() -> int { value := compute()\n\t\treturn value },\n}"},
+		{"`+=` before the line break",                  "e := Entry{\n\tcount = proc() -> int { x := 0; x += compute()\n\t\treturn x },\n}"},
+		{"`+= 1` after the line break",                 "e := Entry{\n\tcount = proc() -> int { x := compute()\n\t\tx += 1; return x },\n}"},
+		{"call after the line break",                   "h := Hook{\n\trun = proc() { value := compute()\n\t\tuse(value) },\n}"},
+		{"`break` after the line break",                "h := Hook{\n\trun = proc() { for { value := compute()\n\t\tbreak } },\n}"},
+		{"selector before the line break",              "e := Entry{\n\tcount = proc() -> int { value := s.v\n\t\treturn value },\n}"},
+		{"identifier before the line break",            "e := Entry{\n\tcount = proc() -> int { value := 1; other := value\n\t\treturn other },\n}"},
+		{"`}` in a comment before the statement",       "e := Entry{\n\tcount = proc() -> int { /* } */ value := compute()\n\t\treturn value },\n}"},
+		{"if block",                                    "f :: proc() {\n\tif c { value := compute()\n\t\tuse(value)\n\t}\n}"},
+		{"else block",                                  "f :: proc() {\n\tif c {\n\t} else { value := compute()\n\t\tuse(value)\n\t}\n}"},
+		{"case clause, first statement",                "f :: proc() {\n\tswitch v {\n\tcase 1: a := compute()\n\t\tuse(a)\n\t}\n}"},
+		{"case clause, last clause",                    "f :: proc() -> int {\n\tswitch v {\n\tcase 0: return 0\n\tcase 1: a := compute()\n\t\treturn a\n\t}\n\treturn 0\n}"},
+	}
+
+	for c in cases {
+		file := ast.File{src = strings.concatenate({"package p\n\n", c.src, "\n"}), fullpath = c.name}
+		p := parser.default_parser()
+		p.err = nil
+		parser.parse_file(&p, &file)
+		testing.expectf(t, file.syntax_error_count == 0, "%s: expected 0 errors, got %d", c.name, file.syntax_error_count)
+	}
+}
+
+@test
 test_parse_unindented_decls :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
