@@ -31,6 +31,9 @@ import win32 "core:sys/windows"
 @(private="file") stop_test_passed: bool
 @(private="file") stop_test_alert:  int
 
+// DUMBAI: The runner owns one process-wide filter until all test workers have joined.
+@(private="file") previous_exception_filter: win32.LPTOP_LEVEL_EXCEPTION_FILTER
+
 
 @(private="file", thread_local)
 local_test_index: int
@@ -60,21 +63,13 @@ stop_runner_callback :: proc "system" (ctrl_type: win32.DWORD) -> win32.BOOL  {
 @(private)
 stop_test_callback :: proc "system" (info: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
 	if !local_test_index_set {
-		// We're a thread created by a test thread.
-		//
-		// There's nothing we can do to inform the test runner about who
-		// signalled, so hopefully the test will handle their own sub-threads.
+		// DUMBAI: Unregistered helper threads retain the process filter that preceded the test runner.
+		if previous_exception_filter != nil do return previous_exception_filter(info)
 		return win32.EXCEPTION_CONTINUE_SEARCH
 	}
 
 	context = runtime.default_context()
 	code := info.ExceptionRecord.ExceptionCode
-	if code < 0x8000_0000 {
-		// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/87fba13e-bf06-450e-83b1-9241dc81e781
-		// Ignore informational status codes
-		return win32.EXCEPTION_CONTINUE_SEARCH
-	}
-
 
 	if local_test_index == -1 {
 		// We're the test runner, and we ourselves have caught a signal from
@@ -174,13 +169,15 @@ _setup_signal_handler :: proc() {
 	// Catch user interrupt / CTRL-C.
 	win32.SetConsoleCtrlHandler(stop_runner_callback, win32.TRUE)
 
-	// For tests:
-	// Catch the following:
-	// - Asserts and panics;
-	// - Out of Bounds exeptions;
-	// - Arithmetic errors; and
-	// - Segmentation faults (illegal memory access).
-	win32.AddVectoredExceptionHandler(0, stop_test_callback)
+	// DUMBAI: First-chance vectored interception steals exceptions from foreign C++/SEH catches.
+	// Publish only faults that reach the last-chance filter, after ordinary frame handlers declined them.
+	previous_exception_filter = win32.SetUnhandledExceptionFilter(stop_test_callback)
+}
+
+_teardown_signal_handler :: proc() {
+	// DUMBAI: Restore once after pool_join, never from individual tasks that finish in parallel.
+	// Keep the saved pointer available to an unregistered callback already in flight during restoration.
+	win32.SetUnhandledExceptionFilter(previous_exception_filter)
 }
 
 _setup_task_signal_handler :: proc(test_index: int) {

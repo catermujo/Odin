@@ -919,6 +919,8 @@ runner :: proc(internal_tests: []Internal_Test) -> bool {
 	// At the time of writing, the thread library is undergoing a rewrite that
 	// should solve this problem; it is not an issue with the test runner itself.
 	thread.pool_join(&pool)
+	// DUMBAI: A process-wide Windows exception filter cannot be restored until every worker is quiescent.
+	when ODIN_OS == .Windows do _teardown_signal_handler()
 
 	finished_in := time.since(start_time)
 
