@@ -116,16 +116,20 @@ _read_directory_iterator_init :: proc(it: ^Read_Directory_Iterator, f: ^File) {
 		return
 	}
 
-	wpath := string16(impl.wname)
 	temp_allocator := TEMP_ALLOCATOR_GUARD({})
+	// DUMBAI: Directory enumeration must use the same native long-path spelling as the successful open.
+	search_path, allocation_error := concatenate({impl.name, `\*`}, temp_allocator)
+	if allocation_error != nil {
+		read_directory_iterator_set_error(it, impl.name, allocation_error)
+		return
+	}
+	wpath_search, path_error := _fix_long_path(search_path, temp_allocator)
+	if path_error != nil {
+		read_directory_iterator_set_error(it, impl.name, path_error)
+		return
+	}
 
-	wpath_search := make([]u16, len(wpath)+3, temp_allocator)
-	copy(wpath_search, wpath)
-	wpath_search[len(wpath)+0] = '\\'
-	wpath_search[len(wpath)+1] = '*'
-	wpath_search[len(wpath)+2] = 0
-
-	it.impl.find_handle = win32.FindFirstFileW(cstring16(raw_data(wpath_search)), &it.impl.find_data)
+	it.impl.find_handle = win32.FindFirstFileW(wpath_search, &it.impl.find_data)
 	if it.impl.find_handle == win32.INVALID_HANDLE_VALUE {
 		read_directory_iterator_set_error(it, impl.name, _get_platform_error())
 		return

@@ -1,5 +1,7 @@
+#+test
 package tests_core_os
 
+import "core:fmt"
 import "core:os"
 import "core:log"
 import "core:slice"
@@ -114,3 +116,62 @@ test_walker_internal :: proc(t: ^testing.T, w: ^os.Walker) {
 		delete(expectation.path)
 	}
 } 
+
+// DUMBAI: Windows directory spelling is a native Win32 contract.
+when ODIN_OS == .Windows {
+	// DUMBAI: Enumeration must resolve the same long names that open already accepts, without manifest changes.
+	@(test)
+	test_directory_windows_long_path_spellings :: proc(t: ^testing.T) {
+		current := os.get_working_directory(context.temp_allocator) or_else panic("could not read the fixture directory")
+		root := os.make_directory_temp(current, "directory-long-*", context.temp_allocator) or_else
+			panic("could not create directory fixture")
+		defer { _ = os.remove(root) }
+		component := strings.repeat("directory", 9, context.temp_allocator)
+		first := os.join_path({root, component}, context.temp_allocator) or_else panic("could not join directory")
+		second := os.join_path({first, component}, context.temp_allocator) or_else panic("could not join directory")
+		third := os.join_path({second, component}, context.temp_allocator) or_else panic("could not join directory")
+		short := os.join_path({root, "short"}, context.temp_allocator) or_else panic("could not join directory")
+		directories := [4]string{short, first, second, third}
+		created := 0
+		defer {
+			for created > 0 {
+				created -= 1
+				_ = os.remove(fmt.tprintf(`\\?\%s`, directories[created]))
+			}
+		}
+		for directory in directories {
+			native := fmt.tprintf(`\\?\%s`, directory)
+			error := os.make_directory(native)
+			testing.expect_value(t, error, nil)
+			if error != nil do return
+			created += 1
+		}
+		for directory in ([2]string{short, third}) {
+			name := "advertisement-租约.record"
+			path := os.join_path({directory, name}, context.temp_allocator) or_else panic("could not join entry")
+			native_path := fmt.tprintf(`\\?\%s`, path)
+			testing.expect_value(t, os.write_entire_file(native_path, transmute([]byte)string("complete advertisement")), nil)
+			defer { _ = os.remove(native_path) }
+			relative := os.get_relative_path(current, directory, context.temp_allocator) or_else
+				panic("could not resolve relative directory")
+			if directory == third {
+				testing.expect(t, len(directory) > 260 && len(relative) >= 248)
+			}
+			for alias in ([3]string{directory, relative, fmt.tprintf(`\\?\%s`, directory)}) {
+				entries, error := os.read_all_directory_by_path(alias, context.allocator)
+				defer os.file_info_slice_delete(entries, context.allocator)
+				testing.expect_value(t, error, nil)
+				testing.expect_value(t, len(entries), 1)
+				if error != nil || len(entries) != 1 do continue
+				entry := entries[0]
+				testing.expect_value(t, entry.name, name)
+				testing.expect_value(t, entry.type, .Regular)
+				expected_path := native_path if strings.has_prefix(alias, `\\?\`) else path
+				testing.expect_value(t, entry.fullpath, expected_path)
+				bytes, read_error := os.read_entire_file(entry.fullpath, context.temp_allocator)
+				testing.expect_value(t, read_error, nil)
+				testing.expect_value(t, string(bytes), "complete advertisement")
+			}
+		}
+	}
+}
