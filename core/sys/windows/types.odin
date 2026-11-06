@@ -2952,8 +2952,33 @@ FILE_INFO_BY_HANDLE_CLASS :: enum c_int {
 	FileIdInfo                     = 18, // 0x12
 	FileIdExtdDirectoryInfo        = 19, // 0x13
 	FileIdExtdDirectoryRestartInfo = 20, // 0x14
+	FileDispositionInfoEx          = 21,
+	FileRenameInfoEx               = 22,
+	FileCaseSensitiveInfo          = 23,
+	FileNormalizedNameInfo         = 24,
 	MaximumFileInfoByHandlesClass,
 }
+
+FILE_RENAME_FLAG_REPLACE_IF_EXISTS :: DWORD(0x00000001)
+FILE_RENAME_FLAG_POSIX_SEMANTICS   :: DWORD(0x00000002)
+
+// DUMBAI: Keep the SDK union and variable UTF-16 tail layout for both FileRenameInfo and FileRenameInfoEx.
+FILE_RENAME_INFO :: struct {
+	using _: struct #raw_union {
+		ReplaceIfExists: BOOLEAN,
+		Flags: DWORD,
+	},
+	RootDirectory: HANDLE,
+	FileNameLength: DWORD,
+	FileName: [1]WCHAR,
+}
+
+#assert(offset_of(FILE_RENAME_INFO, RootDirectory) == size_of(uintptr))
+#assert(offset_of(FILE_RENAME_INFO, FileNameLength) == 2*size_of(uintptr))
+#assert(offset_of(FILE_RENAME_INFO, FileName) == 2*size_of(uintptr)+size_of(DWORD))
+#assert(size_of(FILE_RENAME_INFO) == (3*size_of(uintptr) if size_of(uintptr) == 8 else 4*size_of(uintptr)))
+#assert(align_of(FILE_RENAME_INFO) == align_of(HANDLE))
+#assert(int(FILE_INFO_BY_HANDLE_CLASS.MaximumFileInfoByHandlesClass) == 25)
 
 FILE_BASIC_INFO :: struct {
 	CreationTime:   LARGE_INTEGER,

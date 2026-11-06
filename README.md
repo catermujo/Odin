@@ -24,3 +24,7 @@ try out ideas that work well for math-heavy code while getting as much safety as
 - Policy-driven scope exits (replaces `@(deferred_*)`): `.explicit` needs to create a scope with either `if`, `for` or
   `with` (new). `.implicit` keeps current behavior.
 - Many fixes, see tree from `upstream/master..origin/master`.
+- `core:os.rename_atomic` replaces a same-volume pathname while existing DELETE-sharing Windows readers retain
+  the old file. Windows uses `FileRenameInfoEx` POSIX replacement; unsupported OS/filesystem operations return errors
+  without a retry or classic-rename fallback. This does not flush data. Native coverage currently verifies Windows
+  with NTFS, including open readers, rejected non-DELETE-sharing readers, Unicode relative names, and long paths.

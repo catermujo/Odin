@@ -378,6 +378,9 @@ glob_tests := []Glob_Test{
 			ODIN_ROOT + "tests/core/os/file.odin",
 			ODIN_ROOT + "tests/core/os/path.odin",
 			ODIN_ROOT + "tests/core/os/process.odin",
+			// DUMBAI: The glob fixture enumerates the physical test sources, including the atomic replacement regressions.
+			ODIN_ROOT + "tests/core/os/rename_atomic.odin",
+			ODIN_ROOT + "tests/core/os/rename_atomic_windows.odin",
 		},
 		err     = {},
 	},

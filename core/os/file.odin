@@ -385,6 +385,19 @@ rename :: proc(old_path, new_path: string) -> Error {
 }
 
 /*
+	DUMBAI: Atomically replace a same-volume pathname without invalidating existing readers of its previous file.
+	On Windows, existing readers must share delete access and the filesystem must support POSIX rename semantics.
+	Unsupported operations return an error; this does not retry, copy across volumes, or flush file contents.
+*/
+rename_atomic :: proc(old_path, new_path: string) -> Error {
+	when ODIN_OS == .Windows {
+		return _rename_atomic(old_path, new_path)
+	} else {
+		return _rename(old_path, new_path)
+	}
+}
+
+/*
 	`link` creates a `new_name` as a hard link to the `old_name` file.
 */
 link :: proc(old_name, new_name: string) -> Error {

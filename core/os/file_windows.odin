@@ -5,6 +5,7 @@ import "base:runtime"
 
 import "core:io"
 import "core:mem"
+import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf16"
@@ -614,6 +615,42 @@ _rename :: proc(old_path, new_path: string) -> Error {
 	}
 	return _get_platform_error()
 
+}
+
+// DUMBAI: POSIX replacement preserves open readers' old file while new pathname opens observe the committed file.
+_rename_atomic :: proc(old_path, new_path: string) -> Error {
+	if len(old_path) == 0 || len(new_path) == 0 {
+		return .Invalid_Path
+	}
+	temp_allocator := TEMP_ALLOCATOR_GUARD({})
+	from := _fix_long_path(old_path, temp_allocator) or_return
+	// DUMBAI: FileRenameInfoEx needs a full destination even for short relative paths; native namespaces retain spelling.
+	absolute := new_path
+	if !strings.has_prefix(new_path, `\\?\`) && !strings.has_prefix(new_path, `\\.\`) {
+		absolute = _get_absolute_path(new_path, temp_allocator) or_return
+	}
+	to := _fix_long_path_slice(absolute, temp_allocator) or_return
+	buffer_size := max(size_of(win32.FILE_RENAME_INFO), int(offset_of(win32.FILE_RENAME_INFO, FileName))+(len(to)+1)*size_of(u16))
+	// DUMBAI: The variable UTF-16 tail shares an allocation aligned for the SDK's HANDLE field, including on x86.
+	storage := make([]u64, (buffer_size+size_of(u64)-1)/size_of(u64), temp_allocator) or_return
+	info := (^win32.FILE_RENAME_INFO)(raw_data(storage))
+	info.Flags = win32.FILE_RENAME_FLAG_REPLACE_IF_EXISTS | win32.FILE_RENAME_FLAG_POSIX_SEMANTICS
+	info.FileNameLength = win32.DWORD(len(to)*size_of(u16))
+	name := ([^]u16)(&info.FileName[0])
+	copy(name[:len(to)], to)
+	handle := win32.CreateFileW(from, win32.DELETE,
+		win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
+		nil, win32.OPEN_EXISTING, win32.FILE_ATTRIBUTE_NORMAL, nil)
+	if handle == win32.INVALID_HANDLE_VALUE {
+		return _get_platform_error()
+	}
+	defer win32.CloseHandle(handle)
+	if !win32.SetFileInformationByHandle(handle, .FileRenameInfoEx, info, win32.DWORD(buffer_size)) {
+		// DUMBAI: Map the native failure before CloseHandle can overwrite the thread's last-error value.
+		err := _get_platform_error()
+		return err
+	}
+	return nil
 }
 
 _link :: proc(old_name, new_name: string) -> Error {
