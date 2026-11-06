@@ -386,7 +386,9 @@ rename :: proc(old_path, new_path: string) -> Error {
 
 /*
 	DUMBAI: Atomically replace a same-volume pathname without invalidating existing readers of its previous file.
-	On Windows, existing readers must share delete access and the filesystem must support POSIX rename semantics.
+	The final source entry is renamed without following a symbolic link. Directory moves retain native restrictions;
+	an existing directory destination is not promised replaceable. On Windows, existing readers must share delete
+	access and the filesystem must support POSIX rename semantics.
 	Unsupported operations return an error; this does not retry, copy across volumes, or flush file contents.
 */
 rename_atomic :: proc(old_path, new_path: string) -> Error {

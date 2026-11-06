@@ -640,7 +640,8 @@ _rename_atomic :: proc(old_path, new_path: string) -> Error {
 	copy(name[:len(to)], to)
 	handle := win32.CreateFileW(from, win32.DELETE,
 		win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE | win32.FILE_SHARE_DELETE,
-		nil, win32.OPEN_EXISTING, win32.FILE_ATTRIBUTE_NORMAL, nil)
+		// DUMBAI: Rename the final source entry itself, including directory links and dangling reparse points.
+		nil, win32.OPEN_EXISTING, win32.FILE_FLAG_OPEN_REPARSE_POINT | win32.FILE_FLAG_BACKUP_SEMANTICS, nil)
 	if handle == win32.INVALID_HANDLE_VALUE {
 		return _get_platform_error()
 	}

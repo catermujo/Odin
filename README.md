@@ -28,3 +28,7 @@ try out ideas that work well for math-heavy code while getting as much safety as
   the old file. Windows uses `FileRenameInfoEx` POSIX replacement; unsupported OS/filesystem operations return errors
   without a retry or classic-rename fallback. This does not flush data. Native coverage currently verifies Windows
   with NTFS, including open readers, rejected non-DELETE-sharing readers, Unicode relative names, and long paths.
+  The final source entry is opened without following reparse points; directory moves retain native restrictions.
+  Native entry coverage verifies nonempty directory moves and file, dangling and directory symlinks with unchanged referents.
+  Optional native symlink regression coverage requires existing symlink-creation privileges and is requested with
+  `-define:TEST_WINDOWS_SYMLINK_RENAME=true`; unavailable privilege is a reported failure, never a skipped pass.
