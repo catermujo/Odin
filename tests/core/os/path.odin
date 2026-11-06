@@ -375,6 +375,7 @@ glob_tests := []Glob_Test{
 		pattern = ODIN_ROOT + "tests/core/os/*.odin",
 		matches = {
 			ODIN_ROOT + "tests/core/os/dir.odin",
+			ODIN_ROOT + "tests/core/os/dir_atomic_windows.odin",
 			ODIN_ROOT + "tests/core/os/file.odin",
 			ODIN_ROOT + "tests/core/os/path.odin",
 			ODIN_ROOT + "tests/core/os/process.odin",

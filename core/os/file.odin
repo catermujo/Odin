@@ -69,6 +69,8 @@ File_Flag :: enum {
 	Inheritable,
 	Non_Blocking,
 	Unbuffered_IO,
+	// DUMBAI: Windows metadata snapshots may allow pathname replacement without changing ordinary handle protection.
+	Share_Delete,
 }
 
 O_RDONLY  :: File_Flags{.Read}

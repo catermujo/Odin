@@ -25,7 +25,8 @@ find_data_to_file_info :: proc(base_path: string, d: ^win32.WIN32_FIND_DATAW, al
 		pieces = {base_path, Path_Separator_String, filename}
 	}
 	path   := concatenate(pieces, allocator) or_return
-	handle := win32.HANDLE(_open_internal(path, {.Read}, Permissions_Read_Write_All) or_else 0)
+	// DUMBAI: Entry metadata must not block another worker's atomic replacement or temporary-file cleanup.
+	handle := win32.HANDLE(_open_internal(path, {.Read, .Share_Delete}, Permissions_Read_Write_All) or_else 0)
 	defer win32.CloseHandle(handle)
 
 	fi.fullpath = path

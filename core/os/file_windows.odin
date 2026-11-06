@@ -103,6 +103,9 @@ _open_internal :: proc(name: string, flags: File_Flags, perm: Permissions) -> (h
 		access |= win32.FILE_APPEND_DATA
 	}
 	share_mode := u32(win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE)
+	if .Share_Delete in flags {
+		share_mode |= win32.FILE_SHARE_DELETE
+	}
 	sa := win32.SECURITY_ATTRIBUTES {
 		nLength = size_of(win32.SECURITY_ATTRIBUTES),
 		bInheritHandle = .Inheritable in flags,
