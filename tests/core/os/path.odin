@@ -1,3 +1,4 @@
+#+test
 package tests_core_os
 
 import "core:fmt"
@@ -586,4 +587,77 @@ delete_split :: proc(s: []string) {
 		delete(part)
 	}
 	delete(s)
+}
+
+// DUMBAI: Exercise native long file operations without relying on the test executable manifest or registry policy.
+when ODIN_OS == .Windows {
+	@(test)
+	test_windows_long_paths_ignore_manifest_policy :: proc(t: ^testing.T) {
+		current, current_error := os.get_working_directory(context.temp_allocator)
+		testing.expect_value(t, current_error, nil)
+		if current_error != nil do return
+		root, root_error := os.make_directory_temp(current, "odin-long-path-*", context.temp_allocator)
+		testing.expect_value(t, root_error, nil)
+		if root_error != nil do return
+		defer { _ = os.remove(root) }
+
+		component := strings.repeat("directory", 9, context.temp_allocator)
+		first, first_error := os.join_path({root, component}, context.temp_allocator)
+		testing.expect_value(t, first_error, nil)
+		if first_error != nil do return
+		second, second_error := os.join_path({first, component}, context.temp_allocator)
+		testing.expect_value(t, second_error, nil)
+		if second_error != nil do return
+		// DUMBAI: Build the fixture with explicit native paths so the regression reaches ordinary file API handling.
+		first_native := fmt.tprintf(`\\?\%s`, first)
+		second_native := fmt.tprintf(`\\?\%s`, second)
+		first_created := os.make_directory(first_native)
+		testing.expect_value(t, first_created, nil)
+		if first_created != nil do return
+		defer { _ = os.remove(first_native) }
+		second_created := os.make_directory(second_native)
+		testing.expect_value(t, second_created, nil)
+		if second_created != nil do return
+		defer { _ = os.remove(second_native) }
+
+		stem := strings.repeat("file", 20, context.temp_allocator)
+		path, path_error := os.join_path({second, fmt.tprintf("%s-租约.txt", stem)}, context.temp_allocator)
+		testing.expect_value(t, path_error, nil)
+		if path_error != nil do return
+		renamed, renamed_error := os.join_path({second, fmt.tprintf("%s-renamed-租约.txt", stem)}, context.temp_allocator)
+		testing.expect_value(t, renamed_error, nil)
+		if renamed_error != nil do return
+		testing.expect(t, len(path) > 260)
+		defer { _ = os.remove(fmt.tprintf(`\\?\%s`, path)) }
+		defer { _ = os.remove(fmt.tprintf(`\\?\%s`, renamed)) }
+
+		file, create_error := os.create(path)
+		testing.expect_value(t, create_error, nil)
+		if create_error != nil do return
+		closed := false
+		defer if !closed { _ = os.close(file) }
+		payload := "native long path data"
+		written, write_error := os.write_string(file, payload)
+		testing.expect_value(t, write_error, nil)
+		testing.expect_value(t, written, len(payload))
+		close_error := os.close(file)
+		closed = true
+		testing.expect_value(t, close_error, nil)
+		rename_error := os.rename(path, renamed)
+		testing.expect_value(t, rename_error, nil)
+		if rename_error != nil do return
+		data, read_error := os.read_entire_file(renamed, context.temp_allocator)
+		testing.expect_value(t, read_error, nil)
+		testing.expect_value(t, string(data), payload)
+		relative, relative_error := os.get_relative_path(current, renamed, context.temp_allocator)
+		testing.expect_value(t, relative_error, nil)
+		if relative_error != nil do return
+		testing.expect(t, len(relative) >= 248)
+		// DUMBAI: These names must read the same file without losing the current drive or parent components.
+		for alias in ([2]string{renamed[len(os.volume_name(renamed)):], relative}) {
+			alias_data, alias_error := os.read_entire_file(alias, context.temp_allocator)
+			testing.expect_value(t, alias_error, nil)
+			testing.expect_value(t, string(alias_data), payload)
+		}
+	}
 }

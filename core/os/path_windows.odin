@@ -1,7 +1,6 @@
 #+private
 package os
 
-import "base:intrinsics"
 import "base:runtime"
 import "core:strings"
 import win32 "core:sys/windows"
@@ -166,119 +165,41 @@ _get_executable_path :: proc(allocator: runtime.Allocator) -> (path: string, err
 
 
 @(require_results)
-has_long_path_support :: proc "contextless" () -> bool {
-	@(static)
-	can_use_long_paths_lock: win32.SRWLOCK
-	@(static)
-	can_use_long_paths_checked: bool // atomic
-	@(static)
-	can_use_long_paths: bool
-
-	if intrinsics.atomic_load_explicit(&can_use_long_paths_checked, .Acquire) == true {
-		return can_use_long_paths
-	}
-	win32.AcquireSRWLockExclusive(&can_use_long_paths_lock)
-	defer win32.ReleaseSRWLockExclusive(&can_use_long_paths_lock)
-	defer intrinsics.atomic_store_explicit(&can_use_long_paths_checked, true, .Release)
-
-	can_use_long_paths = false
-
-	key: win32.HKEY
-	res := win32.RegOpenKeyExW(win32.HKEY_LOCAL_MACHINE, win32.L(`SYSTEM\CurrentControlSet\Control\FileSystem`), 0, win32.KEY_READ, &key)
-	defer win32.RegCloseKey(key)
-	if res != 0 {
-		return can_use_long_paths
-	}
-
-	value: u32
-	size := u32(size_of(value))
-	res = win32.RegGetValueW(
-		key,
-		nil,
-		win32.L("LongPathsEnabled"),
-		win32.RRF_RT_ANY,
-		nil,
-		&value,
-		&size,
-	)
-	if res != 0 {
-		return can_use_long_paths
-	}
-	if value == 1 {
-		can_use_long_paths = true
-	}
-
-	return can_use_long_paths
-}
-
-@(require_results)
-_fix_long_path_slice :: proc(path: string, allocator: runtime.Allocator) -> ([]u16, runtime.Allocator_Error) {
+_fix_long_path_slice :: proc(path: string, allocator: runtime.Allocator) -> (converted: []u16, err: Error) {
 	temp_allocator := TEMP_ALLOCATOR_GUARD({allocator})
-	return win32_utf8_to_utf16(_fix_long_path_internal(path, temp_allocator), allocator)
+	native_path := _fix_long_path_internal(path, temp_allocator) or_return
+	result, allocation_error := win32_utf8_to_utf16(native_path, allocator)
+	return result, allocation_error
 }
 
 @(require_results)
-_fix_long_path :: proc(path: string, allocator: runtime.Allocator) -> (win32.wstring, runtime.Allocator_Error) {
+_fix_long_path :: proc(path: string, allocator: runtime.Allocator) -> (converted: win32.wstring, err: Error) {
 	temp_allocator := TEMP_ALLOCATOR_GUARD({allocator})
-	return win32_utf8_to_wstring(_fix_long_path_internal(path, temp_allocator), allocator)
+	native_path := _fix_long_path_internal(path, temp_allocator) or_return
+	result, allocation_error := win32_utf8_to_wstring(native_path, allocator)
+	return result, allocation_error
 }
 
 @(require_results)
-_fix_long_path_internal :: proc(path: string, allocator: runtime.Allocator) -> string {
-	if has_long_path_support() {
-		return path
-	}
-
-
-	// When using win32 to create a directory, the path
-	// cannot be too long that you cannot append an 8.3
-	// file name, because MAX_PATH is 260, 260-12 = 248
+_fix_long_path_internal :: proc(path: string, allocator: runtime.Allocator) -> (converted: string, err: Error) {
+	// DUMBAI: Registry policy alone does not make this executable long-path aware; use explicit native paths.
+	// When creating directories, MAX_PATH also reserves twelve characters for an 8.3 child name.
 	if len(path) < 248 {
-		return path
+		return path, nil
 	}
-
-	// UNC paths do not need to be modified
-	if len(path) >= 2 && path[:2] == `\\` {
-		return path
+	// DUMBAI: Explicit device paths already carry their native namespace and retain the caller's spelling.
+	if strings.has_prefix(path, `\\?\`) || strings.has_prefix(path, `\\.\`) {
+		return path, nil
 	}
-
-	if !_is_absolute_path(path) { // relative path
-		return path
+	// DUMBAI: Relative and current-drive-rooted names need their drive and dot segments resolved before prefixing.
+	absolute := _get_absolute_path(path, allocator) or_return
+	defer delete(absolute, allocator)
+	prefix, tail := `\\?\`, absolute
+	if len(absolute) >= 2 && is_path_separator(absolute[0]) && is_path_separator(absolute[1]) {
+		prefix, tail = `\\?\UNC\`, absolute[2:]
 	}
-
-	PREFIX :: `\\?`
-	path_buf := make([]byte, len(PREFIX)+len(path)+1, allocator)
-	copy(path_buf, PREFIX)
-	n := len(path)
-	r, w := 0, len(PREFIX)
-	for r < n {
-		switch {
-		case is_path_separator(path[r]):
-			r += 1
-		case path[r] == '.' && (r+1 == n || is_path_separator(path[r+1])):
-			// \.\
-			r += 1
-		case r+1 < n && path[r] == '.' && path[r+1] == '.' && (r+2 == n || is_path_separator(path[r+2])):
-			// Skip \..\ paths
-			return path
-		case:
-			path_buf[w] = '\\'
-			w += 1
-			for r < n && !is_path_separator(path[r]) {
-				path_buf[w] = path[r]
-				r += 1
-				w += 1
-			}
-		}
-	}
-
-	// Root directories require a trailing \
-	if w == len(`\\?\c:`) {
-		path_buf[w] = '\\'
-		w += 1
-	}
-
-	return string(path_buf[:w])
+	result, allocation_error := strings.concatenate({prefix, tail}, allocator)
+	return result, allocation_error
 }
 
 _are_paths_identical :: strings.equal_fold
