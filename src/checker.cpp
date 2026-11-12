@@ -8885,6 +8885,25 @@ gb_internal void check_test_procedures(Checker *c) {
 
 gb_global std::atomic<isize> total_bodies_checked;
 
+// DUMBAI: Anonymous parents have no entity, but their bodies must finish before nested procedures resolve aliases.
+gb_internal ProcDeclInfo *parent_proc_to_wait_for(DeclInfo *decl) {
+	DeclInfo *parent = decl->parent;
+	if (parent == nullptr || parent->proc == nullptr) {
+		return nullptr;
+	}
+	Entity *entity = parent->entity;
+	if (entity != nullptr) {
+		if (entity->kind != Entity_Procedure) {
+			return nullptr;
+		}
+		Type *pt = base_type(entity->type);
+		if (pt->Proc.is_polymorphic && !pt->Proc.is_poly_specialized) {
+			return nullptr;
+		}
+	}
+	return parent->proc;
+}
+
 gb_internal bool consume_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *untyped) {
 	GB_ASSERT(pi->decl != nullptr);
 	switch (pi->decl->proc->proc_checked_state.load()) {
@@ -8894,18 +8913,10 @@ gb_internal bool consume_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap 
 		return true;
 	}
 
-	if (pi->decl->parent && pi->decl->parent->entity) {
-		Entity *parent = pi->decl->parent->entity;
-		// NOTE(bill): Only check a nested procedure if its parent's body has been checked first
-		// This is prevent any possible race conditions in evaluation when multithreaded
-		// NOTE(bill): In single threaded mode, this should never happen
-		if (parent->kind == Entity_Procedure && (parent->flags & EntityFlag_ProcBodyChecked) == 0) {
-			Type *pt = base_type(parent->type);
-			if (!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized) {
-				check_procedure_later(c, pi);
-				return false;
-			}
-		}
+	ProcDeclInfo *parent = parent_proc_to_wait_for(pi->decl);
+	if (parent != nullptr && parent->proc_checked_state.load() != ProcCheckedState_Checked) {
+		check_procedure_later(c, pi);
+		return false;
 	}
 	if (untyped) {
 		map_clear(untyped);
@@ -8932,27 +8943,16 @@ gb_internal WORKER_TASK_PROC(check_proc_info_worker_proc) {
 	ProcInfo *pi = cast(ProcInfo *)data;
 
 	GB_ASSERT(pi->decl != nullptr);
-	if (pi->decl->parent && pi->decl->parent->entity) {
-		Entity *parent = pi->decl->parent->entity;
-		// NOTE(bill): Only check a nested procedure if its parent's body has been checked first
-		// This is prevent any possible race conditions in evaluation when multithreaded
-		// NOTE(bill): In single threaded mode, this should never happen
-		if (parent->kind == Entity_Procedure && (parent->flags & EntityFlag_ProcBodyChecked) == 0) {
-			Type *pt = base_type(parent->type);
-			if (!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized) {
-				// NOTE(bill): waits for the parent's body to be checked, which then adds it again,
-				// rather than adding itself again and again until then
-				DeclInfo *pd = pi->decl->parent;
-				mutex_lock(&pd->proc->next_mutex);
-				bool waiting = (parent->flags & EntityFlag_ProcBodyChecked) == 0;
-				if (waiting) {
-					array_add(&pd->proc->nested_to_check, pi);
-				}
-				mutex_unlock(&pd->proc->next_mutex);
-				if (waiting) {
-					return 1;
-				}
-			}
+	ProcDeclInfo *parent = parent_proc_to_wait_for(pi->decl);
+	if (parent != nullptr && parent->proc_checked_state.load() != ProcCheckedState_Checked) {
+		mutex_lock(&parent->next_mutex);
+		bool waiting = parent->proc_checked_state.load() != ProcCheckedState_Checked;
+		if (waiting) {
+			array_add(&parent->nested_to_check, pi);
+		}
+		mutex_unlock(&parent->next_mutex);
+		if (waiting) {
+			return 1;
 		}
 	}
 	map_clear(untyped);
