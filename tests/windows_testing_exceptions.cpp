@@ -6,7 +6,7 @@ static DWORD const PREDECESSOR_CODE = 0xe0425142;
 static LPTOP_LEVEL_EXCEPTION_FILTER old_filter;
 static bool predecessor_installed;
 
-// DUMBAI: This predecessor recovers only the fixture's continuable helper-thread exception.
+// This predecessor recovers only the fixture's continuable helper-thread exception.
 static LONG WINAPI predecessor(EXCEPTION_POINTERS *info) {
 	if (info->ExceptionRecord->ExceptionCode == static_cast<DWORD>(PREDECESSOR_CODE)) {
 		return EXCEPTION_CONTINUE_EXECUTION;
@@ -19,7 +19,7 @@ extern "C" __declspec(dllexport) void probe_install_predecessor() {
 	predecessor_installed = true;
 }
 
-// DUMBAI: No exception crosses this export's C ABI; the DLL must finish its own catch normally.
+// No exception crosses this export's C ABI; the DLL must finish its own catch normally.
 extern "C" __declspec(dllexport) int probe_caught_cpp() {
 	try {
 		throw std::runtime_error("internally caught C++ exception");
@@ -84,7 +84,7 @@ extern "C" __declspec(dllexport) void probe_unhandled_low_code() {
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
 	if (reason == DLL_PROCESS_DETACH && predecessor_installed) {
-		// DUMBAI: Odin test entry exits directly, so verify restoration at DLL detach after worker shutdown.
+		// Odin test entry exits directly, so verify restoration at DLL detach after worker shutdown.
 		auto current = SetUnhandledExceptionFilter(predecessor);
 		SetUnhandledExceptionFilter(current);
 		char const good[] = "predecessor-restored=yes\n";

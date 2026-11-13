@@ -27,7 +27,7 @@ main :: proc() {
 }
 """
 
-# DUMBAI: Real startup exercises the argv union and page-size lookup before application code executes.
+# Real startup exercises the argv union and page-size lookup before application code executes.
 with tempfile.TemporaryDirectory(prefix="odin-linux-auxv-") as temporary:
     directory = Path(temporary)
     program = directory / "main.odin"

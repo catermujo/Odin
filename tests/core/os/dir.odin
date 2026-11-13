@@ -117,9 +117,9 @@ test_walker_internal :: proc(t: ^testing.T, w: ^os.Walker) {
 	}
 } 
 
-// DUMBAI: Windows directory spelling is a native Win32 contract.
+// Windows directory spelling is a native Win32 contract.
 when ODIN_OS == .Windows {
-	// DUMBAI: Enumeration must resolve the same long names that open already accepts, without manifest changes.
+	// Enumeration must resolve the same long names that open already accepts, without manifest changes.
 	@(test)
 	test_directory_windows_long_path_spellings :: proc(t: ^testing.T) {
 		current := os.get_working_directory(context.temp_allocator) or_else panic("could not read the fixture directory")

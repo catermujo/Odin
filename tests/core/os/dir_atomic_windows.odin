@@ -29,7 +29,7 @@ directory_atomic_reader :: proc(worker: ^thread.Thread) {
 	}
 }
 
-// DUMBAI: Real metadata enumeration must coexist with complete-file publication without locking its temporary.
+// Real metadata enumeration must coexist with complete-file publication without locking its temporary.
 @(test)
 test_directory_inventory_allows_atomic_publication :: proc(t: ^testing.T) {
 	root, root_error := os.make_directory_temp("", "directory-atomic-*", context.temp_allocator)
@@ -71,7 +71,7 @@ test_directory_inventory_allows_atomic_publication :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(contents), "complete")
 }
 
-// DUMBAI: Opt-in snapshot readers keep old bytes, while ordinary readers retain their pathname protection.
+// Opt-in snapshot readers keep old bytes, while ordinary readers retain their pathname protection.
 @(test)
 test_share_delete_reader_preserves_atomic_snapshot :: proc(t: ^testing.T) {
 	root, root_error := os.make_directory_temp("", "shared-snapshot-*", context.temp_allocator)

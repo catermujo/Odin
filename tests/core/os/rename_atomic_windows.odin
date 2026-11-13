@@ -9,7 +9,7 @@ import "core:strings"
 import "core:testing"
 import win32 "core:sys/windows"
 
-// DUMBAI: Keep an actual native reader open across two commits and distinguish DELETE sharing from a blocked reader.
+// Keep an actual native reader open across two commits and distinguish DELETE sharing from a blocked reader.
 @(test)
 test_rename_atomic_windows_open_readers :: proc(t: ^testing.T) {
 	root, root_error := os.make_directory_temp("", "odin-rename-readers-*", context.temp_allocator)
@@ -31,7 +31,7 @@ test_rename_atomic_windows_open_readers :: proc(t: ^testing.T) {
 			defer win32.CloseHandle(reader)
 			for value, index in ([2]string{"new-complete-1", "new-complete-2"}) {
 				testing.expect_value(t, os.write_entire_file(source, value), nil)
-				// DUMBAI: The default API retains classic replacement semantics, even for a DELETE-sharing reader.
+				// The default API retains classic replacement semantics, even for a DELETE-sharing reader.
 				if index == 0 do testing.expect(t, os.rename(source, target) != nil)
 				result := os.rename_atomic(source, target)
 				if share_delete {
@@ -56,7 +56,7 @@ test_rename_atomic_windows_open_readers :: proc(t: ^testing.T) {
 	}
 }
 
-// DUMBAI: Relative destinations must be fully resolved before the native rename, including UTF-16 and long paths.
+// Relative destinations must be fully resolved before the native rename, including UTF-16 and long paths.
 @(test)
 test_rename_atomic_windows_relative_long_paths :: proc(t: ^testing.T) {
 	current, current_error := os.get_working_directory(context.temp_allocator)
@@ -80,7 +80,7 @@ test_rename_atomic_windows_relative_long_paths :: proc(t: ^testing.T) {
 		contents, read_error := os.read_entire_file(target, context.temp_allocator)
 		testing.expect_value(t, read_error, nil)
 		testing.expect_value(t, string(contents), "unicode-complete")
-		// DUMBAI: Already native-prefixed paths keep their drive namespace through the replacement path too.
+		// Already native-prefixed paths keep their drive namespace through the replacement path too.
 		testing.expect_value(t, os.write_entire_file(source, "prefixed-complete"), nil)
 		testing.expect_value(t, os.rename_atomic(fmt.tprintf(`\\?\%s`, source), fmt.tprintf(`\\?\%s`, target)), nil)
 		contents, read_error = os.read_entire_file(target, context.temp_allocator)
@@ -90,7 +90,7 @@ test_rename_atomic_windows_relative_long_paths :: proc(t: ^testing.T) {
 }
 
 
-// DUMBAI: Observe the entry itself, including a dangling reparse point, without following its referent.
+// Observe the entry itself, including a dangling reparse point, without following its referent.
 @(private)
 rename_atomic_entry_id :: proc(t: ^testing.T, path: string) -> win32.FILE_ID_INFO {
 	name := win32.utf8_to_utf16(path, context.temp_allocator)
@@ -104,7 +104,7 @@ rename_atomic_entry_id :: proc(t: ^testing.T, path: string) -> win32.FILE_ID_INF
 	return info
 }
 
-// DUMBAI: A directory source moves as one entry with its children; an existing directory destination stays rejected.
+// A directory source moves as one entry with its children; an existing directory destination stays rejected.
 @(test)
 test_rename_atomic_windows_directory_entry :: proc(t: ^testing.T) {
 	root := os.make_directory_temp("", "odin-atomic-directory-*", context.temp_allocator) or_else
@@ -130,7 +130,7 @@ test_rename_atomic_windows_directory_entry :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(contents), "destination-child")
 }
 
-// DUMBAI: Symlink creation is opt-in because it needs existing privilege or Developer Mode; absence must not fake a pass.
+// Symlink creation is opt-in because it needs existing privilege or Developer Mode; absence must not fake a pass.
 when #config(TEST_WINDOWS_SYMLINK_RENAME, false) {
 	@(test)
 	test_rename_atomic_windows_symlink_entries :: proc(t: ^testing.T) {

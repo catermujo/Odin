@@ -54,10 +54,10 @@ when LIBC_AUXV {
 // init needs to run before the virtual memory init.
 @(init)
 init_auxv :: proc "contextless" () {
-	// DUMBAI: Shared libraries have no initial argv stack, so libc supplies their auxiliary vector.
+	// Shared libraries have no initial argv stack, so libc supplies their auxiliary vector.
 	when LIBC_AUXV do return
 	// This is similar to how we get the environment on Linux.
-	// DUMBAI: Unix entry points store byte-string argv in the platform command-line union.
+	// Unix entry points store byte-string argv in the platform command-line union.
 	args := args__.([]cstring)
 	#no_bounds_check auxv := cast([^]rawptr)&args[len(args) + 1]
 	for auxv[0] != nil {
@@ -69,7 +69,7 @@ init_auxv :: proc "contextless" () {
 // Get a value from the auxiliary vector.
 _get_auxiliary :: proc "contextless" (at: Auxiliary_Vector_Type) -> (value: auxv_t, found: bool) {
 	when LIBC_AUXV {
-		// DUMBAI: Zero can be a valid value. Use errno to detect a missing tag and preserve host errno.
+		// Zero can be a valid value. Use errno to detect a missing tag and preserve host errno.
 		errno := _libc_auxiliary_errno()
 		saved_errno := errno^
 		errno^ = 0

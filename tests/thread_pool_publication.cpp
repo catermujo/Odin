@@ -17,7 +17,7 @@ struct CompletingConsumer {
 
 	void store(std::ptrdiff_t next, std::memory_order order) {
 		value.store(next, order);
-		// DUMBAI: A thief may finish immediately after publication, before the producer executes another instruction.
+		// A thief may finish immediately after publication, before the producer executes another instruction.
 		accounted_before_visible = tasks_left.load(std::memory_order_acquire) == 1;
 		tasks_left.fetch_sub(1, std::memory_order_acq_rel);
 	}

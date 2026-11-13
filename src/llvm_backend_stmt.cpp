@@ -1663,7 +1663,7 @@ gb_internal void lb_build_range_stmt(lbProcedure *p, AstRangeStmt *rs, Scope *sc
 	if (p->debug_info != nullptr) {
 		LLVMSetCurrentDebugLocation2(p->builder, lb_debug_end_location_from_ast(p, rs->body));
 	}
-	// DUMBAI: Let LLVM cost ordinary range loops; forced unrolling multiplies nested search loops and SCEV work.
+	// Let LLVM cost ordinary range loops; forced unrolling multiplies nested search loops and SCEV work.
 	lb_emit_jump(p, loop);
 	lb_start_block(p, done);
 }
@@ -2324,7 +2324,7 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 	if (is_addressed && !is_type_pointer(type_of_expr(as->rhs[0]))) {
 		lbAddr addr = lb_build_addr(p, as->rhs[0]);
 		parent = lb_addr_load(p, addr);
-		// DUMBAI: Reference cases borrow the original union, even when an under-aligned load is scalarized.
+		// Reference cases borrow the original union, even when an under-aligned load is scalarized.
 		parent_ptr = addr.kind == lbAddr_Default ? addr.addr : lb_address_from_load_or_generate_local(p, parent);
 	} else {
 		parent = lb_build_expr(p, as->rhs[0]);
@@ -4648,7 +4648,7 @@ gb_internal void lb_build_defer_stmt(lbProcedure *p, lbDefer const &d) {
 	for_array(i, prev_context_stack) {
 		prev_context_stack[i] = p->context_stack[i];
 	}
-	// DUMBAI: Deferred context assignments can overwrite entries used by return paths emitted afterward.
+	// Deferred context assignments can overwrite entries used by return paths emitted afterward.
 	defer ({
 		p->context_stack.count = prev_context_stack.count;
 		for_array(i, prev_context_stack) {

@@ -663,7 +663,7 @@ gb_internal void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr
 			if (callee != nullptr && callee->state == EntityState_Unresolved) {
 				check_entity_decl(ctx, callee, decl_info_of_entity(callee), nullptr);
 			}
-			// DUMBAI: Publish the type alias before its constructor arguments can refer back to it.
+			// Publish the type alias before its constructor arguments can refer back to it.
 			if (callee != nullptr && callee->kind == Entity_TypeName && base_type(callee->type) != nullptr &&
 			    is_type_polymorphic_record_unspecialized(callee->type)) {
 				entity = callee;

@@ -919,7 +919,7 @@ runner :: proc(internal_tests: []Internal_Test) -> bool {
 	// At the time of writing, the thread library is undergoing a rewrite that
 	// should solve this problem; it is not an issue with the test runner itself.
 	thread.pool_join(&pool)
-	// DUMBAI: A process-wide Windows exception filter cannot be restored until every worker is quiescent.
+	// A process-wide Windows exception filter cannot be restored until every worker is quiescent.
 	when ODIN_OS == .Windows do _teardown_signal_handler()
 
 	finished_in := time.since(start_time)
@@ -1049,7 +1049,7 @@ To partly mitigate this, redirect STDERR to a file or use the -define:ODIN_TEST_
 		json_report.success  = total_success_count
 		json_report.duration = finished_in
 
-		// DUMBAI: Optional test reports use the JSON writer's value options, just like its other callers.
+		// Optional test reports use the JSON writer's value options, just like its other callers.
 		json_err := json.marshal_to_writer(os.to_stream(json_fd), json_report, { pretty = true })
 		fmt.assertf(json_err == nil, "Error writing JSON report: %v", json_err)
 	}

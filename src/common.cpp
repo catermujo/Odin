@@ -836,7 +836,7 @@ gb_internal wchar_t **command_line_to_wargv(wchar_t *cmd_line, int *_argc, isize
 		if (a == 0) {
 			break;
 		}
-		// DUMBAI: Windows launchers escape quotes with backslashes; only pairs before a quote remain backslashes.
+		// Windows launchers escape quotes with backslashes; only pairs before a quote remain backslashes.
 		if (a == '\\') {
 			in_text = true;
 			if (in_space) {

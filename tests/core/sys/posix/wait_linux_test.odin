@@ -5,7 +5,7 @@ package tests_core_posix
 import "core:sys/posix"
 import "core:testing"
 
-// DUMBAI: A successful child must stay successful when a watchdog forwards its termination status.
+// A successful child must stay successful when a watchdog forwards its termination status.
 @(test)
 test_linux_wait_signal_status :: proc(t: ^testing.T) {
 	cases := [?]struct {

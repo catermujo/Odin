@@ -31,7 +31,7 @@ import win32 "core:sys/windows"
 @(private="file") stop_test_passed: bool
 @(private="file") stop_test_alert:  int
 
-// DUMBAI: The runner owns one process-wide filter until all test workers have joined.
+// The runner owns one process-wide filter until all test workers have joined.
 @(private="file") previous_exception_filter: win32.LPTOP_LEVEL_EXCEPTION_FILTER
 
 
@@ -63,7 +63,7 @@ stop_runner_callback :: proc "system" (ctrl_type: win32.DWORD) -> win32.BOOL  {
 @(private)
 stop_test_callback :: proc "system" (info: ^win32.EXCEPTION_POINTERS) -> win32.LONG {
 	if !local_test_index_set {
-		// DUMBAI: Unregistered helper threads retain the process filter that preceded the test runner.
+		// Unregistered helper threads retain the process filter that preceded the test runner.
 		if previous_exception_filter != nil do return previous_exception_filter(info)
 		return win32.EXCEPTION_CONTINUE_SEARCH
 	}
@@ -169,13 +169,13 @@ _setup_signal_handler :: proc() {
 	// Catch user interrupt / CTRL-C.
 	win32.SetConsoleCtrlHandler(stop_runner_callback, win32.TRUE)
 
-	// DUMBAI: First-chance vectored interception steals exceptions from foreign C++/SEH catches.
+	// First-chance vectored interception steals exceptions from foreign C++/SEH catches.
 	// Publish only faults that reach the last-chance filter, after ordinary frame handlers declined them.
 	previous_exception_filter = win32.SetUnhandledExceptionFilter(stop_test_callback)
 }
 
 _teardown_signal_handler :: proc() {
-	// DUMBAI: Restore once after pool_join, never from individual tasks that finish in parallel.
+	// Restore once after pool_join, never from individual tasks that finish in parallel.
 	// Keep the saved pointer available to an unregistered callback already in flight during restoration.
 	win32.SetUnhandledExceptionFilter(previous_exception_filter)
 }

@@ -4,11 +4,11 @@
 #include <cstdio>
 #define GB_STATIC
 #define GB_IMPLEMENTATION
-// DUMBAI: The standalone header includes varargs helpers that GCC cannot always-inline under AddressSanitizer.
+// The standalone header includes varargs helpers that GCC cannot always-inline under AddressSanitizer.
 #define gb_inline inline
 #include "gb/gb.h"
 
-// DUMBAI: The monolithic header requires this provider; string length never allocates through it.
+// The monolithic header requires this provider; string length never allocates through it.
 gb_internal gbAllocator heap_allocator(void) { std::abort(); }
 gb_internal void print_all_errors(void) {}
 gb_internal bool any_errors(void) { return false; }

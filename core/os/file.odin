@@ -69,7 +69,7 @@ File_Flag :: enum {
 	Inheritable,
 	Non_Blocking,
 	Unbuffered_IO,
-	// DUMBAI: Windows metadata snapshots may allow pathname replacement without changing ordinary handle protection.
+	// Windows metadata snapshots may allow pathname replacement without changing ordinary handle protection.
 	Share_Delete,
 }
 
@@ -387,7 +387,7 @@ rename :: proc(old_path, new_path: string) -> Error {
 }
 
 /*
-	DUMBAI: Atomically replace a same-volume pathname without invalidating existing readers of its previous file.
+	Atomically replace a same-volume pathname without invalidating existing readers of its previous file.
 	The final source entry is renamed without following a symbolic link. Directory moves retain native restrictions;
 	an existing directory destination is not promised replaceable. On Windows, existing readers must share delete
 	access and the filesystem must support POSIX rename semantics.

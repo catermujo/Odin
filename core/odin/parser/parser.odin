@@ -1459,7 +1459,7 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 parse_with_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	tok := expect_token(p, .With)
 	if p.curr_proc == nil {
-		// DUMBAI: Consume the rejected keyword so file-scope recovery cannot append bad statements forever.
+		// Consume the rejected keyword so file-scope recovery cannot append bad statements forever.
 		error(p, tok.pos, "you cannot use a with statement in the file scope")
 		return ast.new(ast.Bad_Stmt, tok.pos, end_pos(tok))
 	}
@@ -3476,7 +3476,7 @@ is_literal_missing_open_brace :: proc(p: ^Parser, type: ^ast.Expr) -> bool {
 		return false
 	}
 
-	// DUMBAI: a block or case body opened earlier on the line, as in `proc() { x := f()` or `case 1: x := f()`, is what
+	// a block or case body opened earlier on the line, as in `proc() { x := f()` or `case 1: x := f()`, is what
 	// indents the next line
 	t: tokenizer.Tokenizer
 	tokenizer.init(&t, p.tok.src[line_start:int(type.pos.offset)], "", nil)

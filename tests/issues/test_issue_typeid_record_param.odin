@@ -1,4 +1,4 @@
-// DUMBAI: A record or map instantiated with the type `typeid` itself is specialized, not polymorphic. The checker
+// A record or map instantiated with the type `typeid` itself is specialized, not polymorphic. The checker
 // used to treat it as an unbound `$T: typeid`, never published the record's fields, and hung the build.
 package main
 

@@ -619,7 +619,7 @@ gb_internal bool check_record_poly_operand_specialization(CheckerContext *ctx, T
 			// NOTE(bill): ANNOYING EDGE CASE FOR `where` clauses
 			// TODO(bill, 2021-03-27): Is this even a valid HACK?!
 			Entity *entity = entity_of_node(o.expr);
-			// DUMBAI: A parameter bound to `typeid` itself (`map[typeid]V` keys) is specialized; only an unbound
+			// A parameter bound to `typeid` itself (`map[typeid]V` keys) is specialized; only an unbound
 			// `$T: typeid` makes the record polymorphic.
 			if (entity != nullptr &&
 			    entity->kind == Entity_TypeName &&
@@ -872,7 +872,7 @@ gb_internal void check_struct_type(CheckerContext *ctx, Type *struct_type, Ast *
 		struct_type->Struct.has_errors.store(error_thread_count() != errors_before);
 	}
 
-	// DUMBAI: Publish even when the record stays polymorphic, as unions do. An instantiation whose operands failed
+	// Publish even when the record stays polymorphic, as unions do. An instantiation whose operands failed
 	// stays polymorphic, and its waiters in wait_for_struct_fields would otherwise block forever and hide the error.
 	wait_signal_set(&struct_type->Struct.fields_wait_signal);
 }
@@ -3601,7 +3601,7 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 				INTERNAL_ENTITY_INIT(param, Entity_TypeName, scope, name->Ident.token, param_type);
 				param->state = EntityState_Resolved;
 				param->flags |= EntityFlag_PolyConst;
-				// DUMBAI: Without operands an unspecialized `$T: typeid` keeps type `typeid`, which a parameter bound
+				// Without operands an unspecialized `$T: typeid` keeps type `typeid`, which a parameter bound
 				// to the type `typeid` also has. Only this flag tells record instantiations the parameter is unbound.
 				if (operands == nullptr && type == t_typeid) {
 					param->flags |= EntityFlag_PolyTypeUnbound;

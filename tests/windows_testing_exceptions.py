@@ -40,7 +40,7 @@ def msvc_environment(output):
     if not installation:
         raise RuntimeError("Native x64 MSVC is required")
     devcmd = Path(installation) / "Common7/Tools/VsDevCmd.bat"
-    # DUMBAI: Keep the toolchain environment in memory; never record credentials from inherited variables.
+    # Keep the toolchain environment in memory; never record credentials from inherited variables.
     batch = output / "msvc-environment.cmd"
     batch.write_text(
         f'@echo off\ncall "{devcmd}" -arch=x64 -host_arch=x64 >nul\nif errorlevel 1 exit /b 1\nset\n'
@@ -97,7 +97,7 @@ def debug_run(command, output, env):
                 status = 0x10002
                 exited = event.code == 5
                 if event.code in (3, 6):
-                    # DUMBAI: Close image handles only; Windows closes event process/thread handles on continued exit.
+                    # Close image handles only; Windows closes event process/thread handles on continued exit.
                     # https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-waitfordebugevent
                     image_handle = ctypes.c_void_p.from_address(address).value
                     if image_handle:
@@ -108,7 +108,7 @@ def debug_run(command, output, env):
                     if code == 0x80000003 and not answer["initial_breakpoint_handled"]:
                         answer["initial_breakpoint_handled"] = True
                     else:
-                        # DUMBAI: The debugger never handles a real fixture exception or bypasses a test handler.
+                        # The debugger never handles a real fixture exception or bypasses a test handler.
                         status = 0x80010001
                         answer["exceptions"].append(
                             {"code": hex(code), "first_chance": first}
@@ -275,7 +275,7 @@ main :: proc() {
         for name, body in fault_functions.items():
             name = f"fault_{name}_{repetition}"
             expected_negative[name] = False
-            # DUMBAI: Statically diverging fail_now forbids defers; foreign native faults exercise abandonment.
+            # Statically diverging fail_now forbids defers; foreign native faults exercise abandonment.
             defer_line = (
                 ""
                 if "fail_now" in name

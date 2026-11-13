@@ -48,7 +48,7 @@ _locations_destroy :: proc(locations: []Location, allocator: runtime.Allocator) 
 
 @(private="package")
 _resolve :: proc(bt: Capture, allocator, temp_allocator: runtime.Allocator) -> ([]Location, Resolve_Error) {
-	// DUMBAI: Clean partial results after resolution returns so callers never receive an already-freed slice.
+	// Clean partial results after resolution returns so callers never receive an already-freed slice.
 	locations, err := resolve_linux(bt, allocator, temp_allocator)
 	if err != nil {
 		_locations_destroy(locations, allocator)

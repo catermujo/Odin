@@ -2023,7 +2023,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 							GB_ASSERT(value.kind == ExactValue_String);
 							if (str_eq_ignore_case(value.value_string, str_lit("thin"))) {
 								build_context.lto_kind = LTO_Thin;
-								// DUMBAI: ld64 links thin LTO itself; Homebrew lld cannot parse macOS 27 SDK stubs and drops libSystem.
+								// ld64 links thin LTO itself; Homebrew lld cannot parse macOS 27 SDK stubs and drops libSystem.
 #if !defined(GB_SYSTEM_OSX)
 								if (build_context.linker_choice <= Linker_Default) {
 									build_context.linker_choice = Linker_lld;
@@ -2038,7 +2038,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 								}
 							} else if (str_eq_ignore_case(value.value_string, str_lit("thin-files"))) {
 								build_context.lto_kind = LTO_Thin_Files;
-								// DUMBAI: ld64 links thin LTO itself; Homebrew lld cannot parse macOS 27 SDK stubs and drops libSystem.
+								// ld64 links thin LTO itself; Homebrew lld cannot parse macOS 27 SDK stubs and drops libSystem.
 #if !defined(GB_SYSTEM_OSX)
 								if (build_context.linker_choice <= Linker_Default) {
 									build_context.linker_choice = Linker_lld;

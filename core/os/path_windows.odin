@@ -182,16 +182,16 @@ _fix_long_path :: proc(path: string, allocator: runtime.Allocator) -> (converted
 
 @(require_results)
 _fix_long_path_internal :: proc(path: string, allocator: runtime.Allocator) -> (converted: string, err: Error) {
-	// DUMBAI: Registry policy alone does not make this executable long-path aware; use explicit native paths.
+	// Registry policy alone does not make this executable long-path aware; use explicit native paths.
 	// When creating directories, MAX_PATH also reserves twelve characters for an 8.3 child name.
 	if len(path) < 248 {
 		return path, nil
 	}
-	// DUMBAI: Explicit device paths already carry their native namespace and retain the caller's spelling.
+	// Explicit device paths already carry their native namespace and retain the caller's spelling.
 	if strings.has_prefix(path, `\\?\`) || strings.has_prefix(path, `\\.\`) {
 		return path, nil
 	}
-	// DUMBAI: Relative and current-drive-rooted names need their drive and dot segments resolved before prefixing.
+	// Relative and current-drive-rooted names need their drive and dot segments resolved before prefixing.
 	absolute := _get_absolute_path(path, allocator) or_return
 	defer delete(absolute, allocator)
 	prefix, tail := `\\?\`, absolute

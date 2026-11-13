@@ -50,7 +50,7 @@ main :: proc() {
     )
     ir_files = list(ir_directory.glob("*.ll"))
     assert ir_files, "No frontend IR emitted"
-    # DUMBAI: The regression is the frontend's forced hint, which bypasses LLVM's ordinary loop cost budget.
+    # The regression is the frontend's forced hint, which bypasses LLVM's ordinary loop cost budget.
     for ir in ir_files:
         assert "llvm.loop.unroll.full" not in ir.read_text(), ir
     executable = directory / (

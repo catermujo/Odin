@@ -731,7 +731,7 @@ test_cross_thread_free_at_thread_exit :: proc(rounds: int) {
 	log.info("Cross-thread free at thread exit test succeeded.")
 }
 
-// DUMBAI: Concurrent consumers must not read a segment after another consumer adopts and releases it.
+// Concurrent consumers must not read a segment after another consumer adopts and releases it.
 test_parallel_orphan_adoption :: proc(rounds: int) {
 	context.allocator = runtime.heap_allocator()
 	Output :: struct {
@@ -788,7 +788,7 @@ test_adopted_huge_segment_freed_before_larger_request :: proc() {
 	thread.join(worker)
 	thread.destroy(worker)
 
-	// DUMBAI: Adopt the live orphan before freeing it, then request more space than its slab could provide.
+	// Adopt the live orphan before freeing it, then request more space than its slab could provide.
 	large := make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 4, runtime.heap_allocator())
 	delete(bytes, runtime.heap_allocator())
 	larger := make([]byte, runtime.ODIN_HEAP_MAX_BIN_SIZE * 8, runtime.heap_allocator())

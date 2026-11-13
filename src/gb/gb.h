@@ -3611,7 +3611,7 @@ gb_inline void gb_str_to_upper(char *str) {
 
 
 isize gb_strlen(char const *str) {
-	// DUMBAI: The CRT length routine respects string objects without a sanitizer exemption for word overreads.
+	// The CRT length routine respects string objects without a sanitizer exemption for word overreads.
 	if (str == NULL)  {
 		return 0;
 	}

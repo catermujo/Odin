@@ -2,7 +2,7 @@ package test_issues
 
 import "core:testing"
 
-// DUMBAI: Checking the constructor argument reaches its own alias through a pointer cycle.
+// Checking the constructor argument reaches its own alias through a pointer cycle.
 Worker_Deque :: Deque(Job, 4)
 Deque :: struct($T: typeid, $N: u64) where N > 0 {
 	buf: [N]T,

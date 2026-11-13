@@ -10,7 +10,7 @@ Token :: struct {
 	pos:  Pos,
 }
 
-// DUMBAI: Every AST node stores two positions. An interned id keeps the file without a string per position.
+// Every AST node stores two positions. An interned id keeps the file without a string per position.
 File_Id :: distinct u32
 
 Pos :: struct {
@@ -27,7 +27,7 @@ file_table: struct {
 	paths: [dynamic]string,
 }
 
-// DUMBAI: The table owns heap copies of the paths, so ids stay valid after the caller frees its source buffers.
+// The table owns heap copies of the paths, so ids stay valid after the caller frees its source buffers.
 file_id :: proc(path: string) -> File_Id {
 	if path == "" {
 		return 0

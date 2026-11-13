@@ -8118,7 +8118,7 @@ gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> cons
 	}
 	thread_pool_wait();
 	check_prepare_new_packages(c, first_package_index);
-	// DUMBAI: Deferred tags may depend on constants from packages added by these imports.
+	// Deferred tags may depend on constants from packages added by these imports.
 	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
 		check_export_entities_in_pkg(ctx, c->parser->packages[i], untyped);
 	}
@@ -8137,7 +8137,7 @@ gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> cons
 			check_export_entities_in_pkg(ctx, f->pkg, untyped);
 		}
 	}
-	// DUMBAI: Files activate while global 'when's resolve, and their constants may name their own imports.
+	// Files activate while global 'when's resolve, and their constants may name their own imports.
 	for (AstFile *f : files) {
 		if (!ast_file_is_excluded_by_build_tags(f)) {
 			check_add_imports_worker_proc(f);
@@ -8885,7 +8885,7 @@ gb_internal void check_test_procedures(Checker *c) {
 
 gb_global std::atomic<isize> total_bodies_checked;
 
-// DUMBAI: Anonymous parents have no entity, but their bodies must finish before nested procedures resolve aliases.
+// Anonymous parents have no entity, but their bodies must finish before nested procedures resolve aliases.
 gb_internal ProcDeclInfo *parent_proc_to_wait_for(DeclInfo *decl) {
 	DeclInfo *parent = decl->parent;
 	if (parent == nullptr || parent->proc == nullptr) {

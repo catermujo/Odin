@@ -8333,7 +8333,7 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 		}
 
 		ExactValue when_val = {};
-		// DUMBAI: Identifiers stay unknown here; a package constant must win over a define of the same name, and only the
+		// Identifiers stay unknown here; a package constant must win over a define of the same name, and only the
 		// checker can see package constants.
 		BuildTagConditionValue result = evaluate_when_tag_expr(expr, nullptr, nullptr, &when_val);
 		if (result == BuildTagCondition_False) {

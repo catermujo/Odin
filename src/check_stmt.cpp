@@ -144,7 +144,7 @@ gb_internal void check_stmt_list(CheckerContext *ctx, Slice<Ast *> const &stmts,
 			}
 		} else if (i+1 == max_non_constant_declaration) {
 			if (is_diverging_stmt(n) && is_straight_line_stmt(n)) {
-				// DUMBAI: Only a straight-line suffix proves that no earlier scope exit can execute the defer.
+				// Only a straight-line suffix proves that no earlier scope exit can execute the defer.
 				for (isize j = i-1; j >= 0; j--) {
 					Ast *stmt = stmts[j];
 					if (!is_straight_line_stmt(stmt)) {

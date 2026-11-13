@@ -704,7 +704,7 @@ gb_internal LLVMMetadataRef lb_debug_bitset(lbModule *m, Type *type, String name
 	}
 
 	LLVMMetadataRef bit_set_field_type = lb_debug_type(m, t_bool);
-	// DUMBAI: Anonymous flag records let union members overlap without forcing a sequential bit-field layout.
+	// Anonymous flag records let union members overlap without forcing a sequential bit-field layout.
 	auto create_flag = [&](char const *field_name, size_t field_name_len, u64 offset_in_bits) {
 		LLVMMetadataRef flag = LLVMDIBuilderCreateBitFieldMemberType(
 			m->debug_builder, scope, field_name, field_name_len, file, line,

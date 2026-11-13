@@ -25,7 +25,7 @@ find_data_to_file_info :: proc(base_path: string, d: ^win32.WIN32_FIND_DATAW, al
 		pieces = {base_path, Path_Separator_String, filename}
 	}
 	path   := concatenate(pieces, allocator) or_return
-	// DUMBAI: Entry metadata must not block another worker's atomic replacement or temporary-file cleanup.
+	// Entry metadata must not block another worker's atomic replacement or temporary-file cleanup.
 	handle := win32.HANDLE(_open_internal(path, {.Read, .Share_Delete}, Permissions_Read_Write_All) or_else 0)
 	defer win32.CloseHandle(handle)
 
@@ -117,7 +117,7 @@ _read_directory_iterator_init :: proc(it: ^Read_Directory_Iterator, f: ^File) {
 	}
 
 	temp_allocator := TEMP_ALLOCATOR_GUARD({})
-	// DUMBAI: Directory enumeration must use the same native long-path spelling as the successful open.
+	// Directory enumeration must use the same native long-path spelling as the successful open.
 	search_path, allocation_error := concatenate({impl.name, `\*`}, temp_allocator)
 	if allocation_error != nil {
 		read_directory_iterator_set_error(it, impl.name, allocation_error)

@@ -2962,7 +2962,7 @@ FILE_INFO_BY_HANDLE_CLASS :: enum c_int {
 FILE_RENAME_FLAG_REPLACE_IF_EXISTS :: DWORD(0x00000001)
 FILE_RENAME_FLAG_POSIX_SEMANTICS   :: DWORD(0x00000002)
 
-// DUMBAI: Keep the SDK union and variable UTF-16 tail layout for both FileRenameInfo and FileRenameInfoEx.
+// Keep the SDK union and variable UTF-16 tail layout for both FileRenameInfo and FileRenameInfoEx.
 FILE_RENAME_INFO :: struct {
 	using _: struct #raw_union {
 		ReplaceIfExists: BOOLEAN,

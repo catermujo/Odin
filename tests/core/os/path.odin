@@ -379,7 +379,7 @@ glob_tests := []Glob_Test{
 			ODIN_ROOT + "tests/core/os/file.odin",
 			ODIN_ROOT + "tests/core/os/path.odin",
 			ODIN_ROOT + "tests/core/os/process.odin",
-			// DUMBAI: The glob fixture enumerates the physical test sources, including the atomic replacement regressions.
+			// The glob fixture enumerates the physical test sources, including the atomic replacement regressions.
 			ODIN_ROOT + "tests/core/os/rename_atomic.odin",
 			ODIN_ROOT + "tests/core/os/rename_atomic_windows.odin",
 		},
@@ -593,7 +593,7 @@ delete_split :: proc(s: []string) {
 	delete(s)
 }
 
-// DUMBAI: Exercise native long file operations without relying on the test executable manifest or registry policy.
+// Exercise native long file operations without relying on the test executable manifest or registry policy.
 when ODIN_OS == .Windows {
 	@(test)
 	test_windows_long_paths_ignore_manifest_policy :: proc(t: ^testing.T) {
@@ -612,7 +612,7 @@ when ODIN_OS == .Windows {
 		second, second_error := os.join_path({first, component}, context.temp_allocator)
 		testing.expect_value(t, second_error, nil)
 		if second_error != nil do return
-		// DUMBAI: Build the fixture with explicit native paths so the regression reaches ordinary file API handling.
+		// Build the fixture with explicit native paths so the regression reaches ordinary file API handling.
 		first_native := fmt.tprintf(`\\?\%s`, first)
 		second_native := fmt.tprintf(`\\?\%s`, second)
 		first_created := os.make_directory(first_native)
@@ -657,7 +657,7 @@ when ODIN_OS == .Windows {
 		testing.expect_value(t, relative_error, nil)
 		if relative_error != nil do return
 		testing.expect(t, len(relative) >= 248)
-		// DUMBAI: These names must read the same file without losing the current drive or parent components.
+		// These names must read the same file without losing the current drive or parent components.
 		for alias in ([2]string{renamed[len(os.volume_name(renamed)):], relative}) {
 			alias_data, alias_error := os.read_entire_file(alias, context.temp_allocator)
 			testing.expect_value(t, alias_error, nil)

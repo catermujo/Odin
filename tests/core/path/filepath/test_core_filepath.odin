@@ -149,7 +149,7 @@ test_dir :: proc(t: ^testing.T) {
 		}
 	}
 
-	// DUMBAI: dir now borrows the input prefix and preserves its separators; it does not allocate a cleaned copy.
+	// dir now borrows the input prefix and preserves its separators; it does not allocate a cleaned copy.
 	for d in dirs {
 		parent := filepath.dir(d[0])
 		testing.expect_value(t, parent, d[1])

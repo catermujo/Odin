@@ -17,7 +17,7 @@ replace :: proc(config: Config, data: ^int) -> Config {
 main :: proc() {
     original, replacement: int = 456, 123
     commands := [2]Command{{Config{data = &original}}, {"before"}}
-    // DUMBAI: A reference range and union case must both write through to the same original element.
+    // A reference range and union case must both write through to the same original element.
     for &command in commands[:] {
         switch &config in command.data {
         case Config:
@@ -28,7 +28,7 @@ main :: proc() {
     }
     assert((cast(^int)commands[0].data.(Config).data)^ == 123)
     assert(commands[1].data.(string) == "after")
-    // DUMBAI: Value cases must still retain their copy when the source union changes during the case body.
+    // Value cases must still retain their copy when the source union changes during the case body.
     value: Value = Config{data = &original}
     switch config in value {
     case Config:

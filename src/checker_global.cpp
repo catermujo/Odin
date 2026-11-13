@@ -666,7 +666,7 @@ gb_internal bool resolve_global_decl_sources(Checker *c, Array<ImportGraphNode *
 	global_import_stage_end(GlobalImportStage_Placeholders, stage_start);
 
 	stage_start = global_import_stage_begin();
-	// DUMBAI: Evaluate deferred file tags before any 'when', so a 'when' sees the constants of files the tags activate.
+	// Evaluate deferred file tags before any 'when', so a 'when' sees the constants of files the tags activate.
 	// Placeholders are live here, so a tag still forces only the 'when' blocks that declare the names it reads.
 	bool deferred_changed = check_prepare_deferred_build_tag_files(c);
 	for (GlobalDeclSource *src : global_decl_sources) {

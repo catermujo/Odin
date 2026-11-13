@@ -4,7 +4,7 @@ package tests_core_os
 import "core:os"
 import "core:testing"
 
-// DUMBAI: Exercise the new API's real pathname commit and rejection semantics without changing ordinary rename.
+// Exercise the new API's real pathname commit and rejection semantics without changing ordinary rename.
 @(test)
 test_rename_atomic :: proc(t: ^testing.T) {
 	root, root_error := os.make_directory_temp("", "odin-rename-atomic-*", context.temp_allocator)

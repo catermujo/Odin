@@ -5,7 +5,7 @@ package runtime
 import "base:intrinsics"
 
 when ODIN_OS == .JS {
-	// DUMBAI: Bound without an import module so the linker resolves emscripten's libc sbrk, not a JS import.
+	// Bound without an import module so the linker resolves emscripten's libc sbrk, not a JS import.
 	foreign _ {
 		@(link_name="sbrk")
 		emscripten_sbrk :: proc "c" (increment: int) -> rawptr ---
@@ -491,7 +491,7 @@ claim_more_memory :: proc(a: ^WASM_Allocator, num_bytes: uint) -> bool {
 
 	page_alloc :: proc(page_count: int) -> []byte {
 		when ODIN_OS == .JS {
-			// DUMBAI: emscripten's sbrk treats every byte above its break as free, so pages grown behind its back
+			// emscripten's sbrk treats every byte above its break as free, so pages grown behind its back
 			// were later handed to dlmalloc as well. Taking pages through sbrk keeps the two heaps disjoint.
 			ptr := emscripten_sbrk(page_count * PAGE_SIZE)
 			if uintptr(ptr) == max(uintptr) { return nil }

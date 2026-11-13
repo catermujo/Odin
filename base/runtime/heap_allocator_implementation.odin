@@ -138,7 +138,7 @@ ODIN_HEAP_MIN_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MIN_BIN_SIZE)
 ODIN_HEAP_MAX_BIN_SHIFT :: intrinsics.constant_log2(ODIN_HEAP_MAX_BIN_SIZE)
 ODIN_HEAP_BIN_RANKS     :: 1 + ODIN_HEAP_MAX_BIN_SHIFT - ODIN_HEAP_MIN_BIN_SHIFT
 
-// DUMBAI: Keep segment allocation and address masking on one size when virtual-memory init is late.
+// Keep segment allocation and address masking on one size when virtual-memory init is late.
 @(private="file")
 heap_segment_size: uintptr
 
@@ -1196,7 +1196,7 @@ Tagged_Pointer :: bit_field u64 {
 	version: u8 | 7,
 }
 
-// DUMBAI: A versioned CAS prevents ABA but cannot keep a node mapped while a competing consumer reads its link.
+// A versioned CAS prevents ABA but cannot keep a node mapped while a competing consumer reads its link.
 @(no_sanitize_address)
 heap_orphanage_lock :: proc "contextless" (lock: ^u32) {
 	for intrinsics.atomic_exchange_explicit(lock, 1, .Acquire) != 0 {
@@ -1378,7 +1378,7 @@ heap_adopt_orphan :: proc "contextless" (bin_size: int, class: Heap_Slab_Class) 
 					heap_free_segment(segment)
 					segment = nil
 				} else {
-					// DUMBAI: Huge slabs have request-specific capacities and must be returned on their final free.
+					// Huge slabs have request-specific capacities and must be returned on their final free.
 					segment.may_return = true
 				}
 			}

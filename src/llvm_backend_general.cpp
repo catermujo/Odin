@@ -896,7 +896,7 @@ gb_internal lbModule *lb_module_of_entity_internal(lbGenerator *gen, Entity *e, 
 		if (mod) {
 			return mod;
 		}
-		// DUMBAI: A nested procedure is emitted with its enclosing procedure, so inherit its module owner.
+		// A nested procedure is emitted with its enclosing procedure, so inherit its module owner.
 		for (DeclInfo *parent = e->decl_info->parent; parent != nullptr; parent = parent->parent) {
 			if (parent->proc_lit == nullptr) {
 				continue;
@@ -5169,7 +5169,7 @@ gb_internal lbAddr lb_add_local_generated_temp(lbProcedure *p, Type *type, i64 m
 gb_internal void lb_set_linkage_from_entity_flags(lbModule *m, LLVMValueRef value, u64 flags) {
 	if (flags & EntityFlag_CustomLinkage_Internal) {
 		LLVMSetLinkage(value, LLVMInternalLinkage);
-		// DUMBAI: An explicit local-linkage override must also discard visibility from a former weak definition.
+		// An explicit local-linkage override must also discard visibility from a former weak definition.
 		LLVMSetVisibility(value, LLVMDefaultVisibility);
 	} else if (flags & EntityFlag_CustomLinkage_Strong) {
 		LLVMSetLinkage(value, LLVMExternalLinkage);

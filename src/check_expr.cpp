@@ -7516,7 +7516,7 @@ gb_internal bool check_identifier_exists(Scope *s, Ast *node, bool nested = fals
 		} else {
 			Entity *e = scope_lookup(s, i->interned, i->hash);
 			if (e != nullptr) {
-				// DUMBAI: Imported selectors belong to the package namespace, not the importing file's declaration scope.
+				// Imported selectors belong to the package namespace, not the importing file's declaration scope.
 				if (out_scope) *out_scope = e->kind == Entity_ImportName ? e->ImportName.scope : e->scope;
 				return true;
 			}
@@ -9702,7 +9702,7 @@ gb_internal bool check_index_set_expr_custom_overload(CheckerContext *c, Operand
 		return false;
 	}
 
-	// DUMBAI: Unrelated setters must not type-check a built-in index before its container supplies the hint.
+	// Unrelated setters must not type-check a built-in index before its container supplies the hint.
 	Operand index_operand = {};
 	Type *index_type_hint = get_custom_index_expr_type_hint(expr_operand.type);
 	if (index_type_hint != nullptr) {
@@ -13987,7 +13987,7 @@ gb_internal ExprKind check_compound_literal(CheckerContext *c, Operand *o, Ast *
 		Type *literal_index_hint = t->kind == Type_Struct ? t->Struct.soa_index : nullptr;
 		auto normalize_literal_index = [&](Operand *index) {
 			if (literal_index_hint != nullptr && are_types_identical(index->type, literal_index_hint)) {
-				// DUMBAI: SOA literal slots use storage offsets even when enum values start above or below zero.
+				// SOA literal slots use storage offsets even when enum values start above or below zero.
 				index->value = exact_value_sub(index->value, *base_type(literal_index_hint)->Enum.min_value);
 				index->type = t_int;
 				add_type_and_value(c, index->expr, index->mode, index->type, index->value);
@@ -15250,14 +15250,14 @@ gb_internal ExprKind check_index_expr(CheckerContext *c, Operand *o, Ast *node, 
 	Operand const *index_operand = nullptr;
 	bool slice_row = false;
 	if (soa_index_hint != nullptr) {
-		// DUMBAI: Enum indices select columns. Integers select rows only for enum-count SOA slices.
+		// Enum indices select columns. Integers select rows only for enum-count SOA slices.
 		check_expr_with_type_hint(c, &checked_index, ie->index, soa_index_hint);
 		index_operand = &checked_index;
 		bool integer_index = is_type_integer(checked_index.type);
 		index_type_hint = integer_index ? nullptr : soa_index_hint;
 		slice_row = integer_index && is_type_soa_struct(t) && is_type_slice(t->Struct.soa_elem);
 		if (slice_row) {
-			// DUMBAI: Each column's slice length is checked when the row is loaded or stored.
+			// Each column's slice length is checked when the row is loaded or stored.
 			max_count = -1;
 		}
 	}
@@ -15667,7 +15667,7 @@ gb_internal ExprKind check_expr_base_internal(CheckerContext *c, Operand *o, Ast
 
 	case_ast_node(bl, BasicLit, node);
 		Type *t = t_invalid;
-		// DUMBAI: Union promotion stores a variant wrapper in the literal's checked value. Rechecking
+		// Union promotion stores a variant wrapper in the literal's checked value. Rechecking
 		// a surrounding compound literal still needs the scalar payload to infer this literal's type.
 		ExactValue value = node->tav.value();
 		while (value.kind == ExactValue_Variant) {

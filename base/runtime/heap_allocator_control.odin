@@ -54,7 +54,7 @@ heap_release_empty_orphans :: proc "contextless" () {
 	segment: ^Heap_Segment
 
 	{
-		// DUMBAI: Wait for list readers before detaching nodes that will immediately be unmapped.
+		// Wait for list readers before detaching nodes that will immediately be unmapped.
 		heap_orphanage_lock(&heap_orphanage.empty_pop_lock)
 		defer intrinsics.atomic_store_explicit(&heap_orphanage.empty_pop_lock, 0, .Release)
 		// First, take control of the linked list by replacing it with a nil
