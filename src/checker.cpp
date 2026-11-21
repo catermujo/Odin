@@ -8118,9 +8118,13 @@ gb_internal void check_activate_deferred_files(Checker *c, Array<AstFile *> cons
 	}
 	thread_pool_wait();
 	check_prepare_new_packages(c, first_package_index);
-	// Deferred tags may depend on constants from packages added by these imports.
+	// Newly reached packages can use their own imports in constants that gate deferred files.
 	for (isize i = first_package_index; i < c->parser->packages.count; i++) {
-		check_export_entities_in_pkg(ctx, c->parser->packages[i], untyped);
+		for (AstFile *f : c->parser->packages[i]->files) {
+			if (!ast_file_is_excluded_by_build_tags(f) && !ast_file_has_deferred_build_tags(f)) {
+				check_add_imports_worker_proc(f);
+			}
+		}
 	}
 
 	for (AstFile *f : files) {

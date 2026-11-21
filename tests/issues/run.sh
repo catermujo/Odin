@@ -184,6 +184,8 @@ $ODIN run ../test_issue_map_no_instrumentation.odin -file $COMMON
 $ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point $COMMON_NO_FILE
 $ODIN check ../test_issue_deferred_build_tag_imported_constant/entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false $COMMON_NO_FILE
+$ODIN check ../test_issue_deferred_build_tag_imported_constant/deferred_entry -no-entry-point $COMMON_NO_FILE
+$ODIN check ../test_issue_deferred_build_tag_imported_constant/deferred_entry -no-entry-point -define:ODIN_TEST_IMPORTED_TAG=false $COMMON_NO_FILE
 if [[ $($ODIN check ../test_issue_build_tag_define_pkg_order -no-entry-point $COMMON_NO_FILE -define:ODIN_TEST_BUILD_TAG_DEFINE_PKG=false 2>&1 >/dev/null | grep -c "Error:") -eq 1 ]]; then
 	echo "SUCCESSFUL 1/1"
 else
