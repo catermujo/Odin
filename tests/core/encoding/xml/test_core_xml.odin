@@ -251,6 +251,68 @@ xml_test_cdata_edge_cases :: proc(t: ^testing.T) {
 	}
 }
 
+@(test)
+xml_test_many_attributes :: proc(t: ^testing.T) {
+	// An element's attributes grow in the strings arena, whose blocks are a quarter of the input
+	// (256 bytes at least): every attribute is kept, whatever the document's size.
+	ATTRIBUTES :: 32
+
+	for padding in ([?]int{0, 1_000, 2_000, 4_000, 30_000}) {
+		sb := strings.builder_make()
+		defer strings.builder_destroy(&sb)
+
+		strings.write_string(&sb, "<r><e")
+		for i in 0..<ATTRIBUTES {
+			fmt.sbprintf(&sb, ` a%v="%v"`, i, i)
+		}
+		strings.write_string(&sb, "/><!--")
+		for _ in 0..<padding {
+			strings.write_byte(&sb, ' ')
+		}
+		strings.write_string(&sb, "--></r>")
+		src := strings.to_string(sb)
+
+		doc, err := xml.parse_string(src, error_handler = Silent)
+		defer xml.destroy(doc)
+
+		testing.expectf(t, err == .None, "%v bytes: expected no error, got %v", len(src), err)
+		if err != .None {
+			continue
+		}
+		attribs := doc.elements[1].attribs
+		testing.expectf(t, len(attribs) == ATTRIBUTES, "%v bytes: expected %v attributes, got %v", len(src), ATTRIBUTES, len(attribs))
+		for a, i in attribs {
+			key, val := fmt.tprintf("a%v", i), fmt.tprintf("%v", i)
+			testing.expectf(t, a.key == key && a.val == val, "%v bytes: attribute %v: expected %v=%q, got %v=%q", len(src), i, key, val, a.key, a.val)
+		}
+	}
+}
+
+@(test)
+xml_test_long_values :: proc(t: ^testing.T) {
+	// Attribute values and decoded bodies are built in the strings arena too: one longer than a block
+	// is kept whole, even when the document is barely longer than the value.
+	for length in ([?]int{300, 1_000, 6_000}) {
+		value := strings.repeat("v", length, context.temp_allocator)
+		src   := fmt.tprintf(`<a k="%v">%v</a>`, value, value)
+
+		doc, err := xml.parse_string(src, {flags = {.Decode_SGML_Entities}}, error_handler = Silent)
+		defer xml.destroy(doc)
+
+		testing.expectf(t, err == .None, "%v bytes: expected no error, got %v", length, err)
+		if err != .None {
+			continue
+		}
+		attribs := doc.elements[0].attribs
+		testing.expectf(t, len(attribs) == 1 && attribs[0].val == value, "%v bytes: expected the attribute value whole", length)
+		body: string
+		if values := doc.elements[0].value; len(values) == 1 {
+			body, _ = values[0].(string)
+		}
+		testing.expectf(t, body == value, "%v bytes: expected the body whole", length)
+	}
+}
+
 @(private)
 run_test :: proc(t: ^testing.T, test: TEST, loc := #caller_location) {
 	path := strings.concatenate({TEST_SUITE_PATH, test.filename})
