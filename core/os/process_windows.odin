@@ -422,6 +422,7 @@ _current_process_info :: proc(selection: Process_Info_Fields, allocator: runtime
 
 @(private="package")
 _process_open :: proc(pid: int, flags: Process_Open_Flags) -> (process: Process, err: Error) {
+	if pid <= 0 || u64(pid) > u64(max(u32)) do return {}, .Invalid_Argument
 	// Note(flysand): The handle will be used for querying information so we
 	// take the necessary permissions right away.
 	dwDesiredAccess := win32.PROCESS_QUERY_LIMITED_INFORMATION | win32.SYNCHRONIZE
@@ -436,7 +437,9 @@ _process_open :: proc(pid: int, flags: Process_Open_Flags) -> (process: Process,
 		false,
 		u32(pid),
 	)
-	if handle == win32.INVALID_HANDLE_VALUE {
+	if handle == nil {
+		// OpenProcess uses ERROR_INVALID_PARAMETER for a PID that no longer exists.
+		if win32.GetLastError() == win32.ERROR_INVALID_PARAMETER do return {}, .Not_Exist
 		err = _get_platform_error()
 	} else {
 		process = {pid = pid, handle = uintptr(handle)}
