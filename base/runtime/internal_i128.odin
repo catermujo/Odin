@@ -197,6 +197,20 @@ fixdfdi :: proc "c" (a: f64) -> i64 {
 	return fixint(i64, a)
 }
 
+when ODIN_OS == .Windows {
+	// LLVM's Windows backend lowers f32 conversions directly to these builtins.
+	// Every f32 widens exactly to f64, including values that need saturation.
+	@(link_name="__fixunssfti", linkage=RUNTIME_LINKAGE, require=RUNTIME_REQUIRE)
+	fixunssfti :: proc "c" (a: f32) -> u128 {
+		return fixuint(u128, f64(a))
+	}
+
+	@(link_name="__fixsfti", linkage=RUNTIME_LINKAGE, require=RUNTIME_REQUIRE)
+	fixsfti :: proc "c" (a: f32) -> i128 {
+		return fixint(i128, f64(a))
+	}
+}
+
 
 @(link_name="__umodti3", linkage=RUNTIME_LINKAGE, require=RUNTIME_REQUIRE)
 umodti3 :: proc "c" (a, b: u128) -> u128 {
