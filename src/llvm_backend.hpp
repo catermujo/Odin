@@ -158,6 +158,7 @@ struct lbModule {
 	AstPackage * pkg;  // possibly associated
 	AstFile *    file; // possibly associated
 	char const * module_name;
+	String       object_path; // where object generation put its object file, see lb_object_cache_emit
 
 	NamedMetaDataKind metadata_kinds[4];
 	isize metadata_kind_count;

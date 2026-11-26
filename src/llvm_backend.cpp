@@ -2866,6 +2866,120 @@ gb_internal bool lb_is_module_empty(lbModule *m) {
 	return true;
 }
 
+
+// Object files kept across builds. A module whose IR matches the IR of a module in the previous build of the same
+// output reuses that build's object file instead of generating machine code again. The key is a hash of the
+// module's bitcode and of everything else that shapes the machine code (target, CPU, features, code generation
+// level, relocation and code model, LLVM and compiler build), so any change to the module, the compiler or the
+// target misses. Objects live in <output folder>/.odin-objects/<output name>/; after each build the folder keeps
+// only the objects that build used. Enabled with ODIN_OBJECT_CACHE=1 for builds with separate modules.
+#if !defined(GB_SYSTEM_WINDOWS)
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
+
+struct lbObjectCache {
+	bool               enabled;
+	String             dir; // ends with a separator
+	u64                config_hash;
+	BlockingMutex      mutex;
+	StringSet          used; // file names in dir that this build used
+	std::atomic<isize> hits;
+	std::atomic<isize> misses;
+};
+gb_global lbObjectCache lb_object_cache;
+
+gb_internal void lb_object_cache_init(char const *target_triple, String llvm_cpu, char const *llvm_features,
+                                      LLVMCodeGenOptLevel code_gen_level, LLVMCodeModel code_mode) {
+#if defined(GB_SYSTEM_WINDOWS)
+	// Not yet: Windows needs its own lock (LockFileEx) and a rename that replaces (MoveFileEx).
+#else
+	if (!lb_environment_flag_enabled("ODIN_OBJECT_CACHE")) {
+		return;
+	}
+	if (!USE_SEPARATE_MODULES || build_context.lto_kind != LTO_None || build_context.keep_object_files) {
+		return;
+	}
+	switch (build_context.build_mode) {
+	case BuildMode_Executable:
+	case BuildMode_StaticLibrary:
+	case BuildMode_DynamicLibrary:
+		break;
+	default:
+		return;
+	}
+	String basename = build_context.build_paths[BuildPath_Output].basename;
+	String name = build_context.build_paths[BuildPath_Output].name;
+	String root = concatenate_strings(permanent_allocator(), basename, str_lit("/.odin-objects"));
+	(void)check_if_exists_directory_otherwise_create(root);
+	String dir = concatenate3_strings(permanent_allocator(), root, str_lit("/"), name);
+	(void)check_if_exists_directory_otherwise_create(dir);
+	if (!path_is_directory(dir)) {
+		return;
+	}
+	// Two builds of the same output may run at once; one could remove objects the other is about to link. The
+	// build that holds the lock uses the cache, and the lock ends with the process; any other builds the usual way.
+	char const *lock_path = alloc_cstring(permanent_allocator(), concatenate_strings(permanent_allocator(), dir, str_lit("/.lock")));
+	int lock = open(lock_path, O_CREAT | O_RDWR, 0644);
+	if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0) {
+		if (lock >= 0) {
+			close(lock);
+		}
+		return;
+	}
+
+	TEMPORARY_ALLOCATOR_GUARD();
+	gbString config = gb_string_make(temporary_allocator(), "");
+	config = gb_string_append_fmt(config, "%s|%.*s|%s|%d|%d|%d|%d|%s|%s %s",
+		target_triple, LIT(llvm_cpu), llvm_features,
+		cast(int)code_gen_level, cast(int)get_reloc_mode(), cast(int)code_mode, cast(int)build_context.fast_isel,
+		LLVM_VERSION_STRING, __DATE__, __TIME__);
+
+	lb_object_cache.dir = concatenate_strings(permanent_allocator(), dir, str_lit("/"));
+	lb_object_cache.config_hash = gb_murmur64(config, gb_string_length(config));
+	string_set_init(&lb_object_cache.used, 1024);
+	lb_object_cache.enabled = true;
+#endif
+}
+
+// The cache path of module m's object file, keyed by its bitcode; records the name as used by this build.
+gb_internal String lb_object_cache_path(lbModule *m) {
+	LLVMMemoryBufferRef bitcode = LLVMWriteBitcodeToMemoryBuffer(m->mod);
+	void const *data = LLVMGetBufferStart(bitcode);
+	isize size = cast(isize)LLVMGetBufferSize(bitcode);
+	u64 seed = lb_object_cache.config_hash;
+	u64 h0 = gb_murmur64_seed(data, size, seed);
+	u64 h1 = gb_murmur64_seed(data, size, ~seed ^ 0x9e3779b97f4a7c15ull);
+	LLVMDisposeMemoryBuffer(bitcode);
+
+	char name[40] = {};
+	gb_snprintf(name, gb_size_of(name), "%016llx%016llx.o", cast(unsigned long long)h0, cast(unsigned long long)h1);
+	String file_name = copy_string(permanent_allocator(), make_string_c(name));
+	{
+		MUTEX_GUARD(&lb_object_cache.mutex);
+		string_set_add(&lb_object_cache.used, file_name);
+	}
+	return concatenate_strings(permanent_allocator(), lb_object_cache.dir, file_name);
+}
+
+// Leaves the cache with only the objects this build used, and reports what the cache saved.
+gb_internal void lb_object_cache_finish(void) {
+	if (!lb_object_cache.enabled) {
+		return;
+	}
+	Array<FileInfo> files = {};
+	array_init(&files, heap_allocator());
+	defer (array_free(&files));
+	if (read_directory(substring(lb_object_cache.dir, 0, lb_object_cache.dir.len-1), &files) == ReadDirectory_None) {
+		for (FileInfo const &file : files) {
+			if (!file.is_dir && file.name != ".lock" && !string_set_exists(&lb_object_cache.used, file.name)) {
+				gb_file_remove(alloc_cstring(temporary_allocator(), file.fullpath));
+			}
+		}
+	}
+	gb_printf_err("object cache: %td reused, %td generated\n", lb_object_cache.hits.load(), lb_object_cache.misses.load());
+}
+
 struct lbLLVMEmitWorker {
 	LLVMTargetMachineRef target_machine;
 	LLVMCodeGenFileType code_gen_file_type;
@@ -2905,6 +3019,29 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 			lb_record_worker_failure();
 			return 1;
 		}
+	} else if (lb_object_cache.enabled && wd->code_gen_file_type == LLVMObjectFile) {
+		String cached = lb_object_cache_path(wd->m);
+		char const *cached_c = alloc_cstring(permanent_allocator(), cached);
+		if (gb_file_exists(cached_c)) {
+			lb_object_cache.hits.fetch_add(1);
+		} else {
+			// Generate under a temporary name and move it in place, so an interrupted build never leaves a partial
+			// object under a valid key.
+			String temporary = concatenate_strings(permanent_allocator(), cached, str_lit(".tmp"));
+			char const *temporary_c = alloc_cstring(permanent_allocator(), temporary);
+			if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)temporary_c, wd->code_gen_file_type, &llvm_error)) {
+				gb_printf_err("LLVM Error: %s\n", llvm_error);
+				lb_record_worker_failure();
+				return 1;
+			}
+			if (!gb_file_move(temporary_c, cached_c)) {
+				gb_printf_err("Failed to move %.*s into the object cache\n", LIT(temporary));
+				lb_record_worker_failure();
+				return 1;
+			}
+			lb_object_cache.misses.fetch_add(1);
+		}
+		wd->m->object_path = cached;
 	} else if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
 		gb_printf_err("LLVM Error: %s\n", llvm_error);
 		lb_record_worker_failure();
@@ -3788,14 +3925,6 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 			array_init(&profile_workers, heap_allocator());
 		}
 		defer (array_free(&profile_workers));
-		for (auto const &entry : gen->modules) {
-			lbModule *m = entry.value;
-			if (lb_is_module_empty(m)) {
-				continue;
-			}
-			array_add(&gen->output_object_paths, lb_filepath_obj_for_module(m));
-			array_add(&gen->output_temp_paths, lb_filepath_ll_for_module(m));
-		}
 		for (lbModule *m : lb_modules_by_cost(gen)) {
 			if (lb_is_module_empty(m)) {
 				continue;
@@ -3814,6 +3943,17 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 		thread_pool_wait(&global_thread_pool);
 		lb_exit_if_worker_failed();
+		// In module order, as before the object cache: a worker leaves its object either at the usual path or in
+		// the cache (object_path).
+		for (auto const &entry : gen->modules) {
+			lbModule *m = entry.value;
+			if (lb_is_module_empty(m)) {
+				continue;
+			}
+			array_add(&gen->output_object_paths, m->object_path.len != 0 ? m->object_path : lb_filepath_obj_for_module(m));
+			array_add(&gen->output_temp_paths, lb_filepath_ll_for_module(m));
+		}
+		lb_object_cache_finish();
 		if (profile_enabled) {
 			array_sort(profile_workers, lb_llvm_emit_worker_profile_cmp);
 			f64 milliseconds_per_tick = 1000.0/cast(f64)time_stamp__freq();
@@ -4244,6 +4384,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen, CodeGenGlobalPlan const &pla
 	case 2: code_gen_level = LLVMCodeGenLevelDefault;    break;
 	case 3: code_gen_level = LLVMCodeGenLevelAggressive; break;
 	}
+	lb_object_cache_init(target_triple, llvm_cpu, llvm_features, code_gen_level, code_mode);
 
 	// NOTE(bill): Target Machine Creation
 	// NOTE(bill, 2021-05-04): Target machines must be unique to each module because they are not thread safe

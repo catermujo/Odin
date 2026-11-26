@@ -2958,6 +2958,10 @@ gb_internal void remove_temp_files(lbGenerator *gen) {
 		case BuildMode_StaticLibrary:
 		case BuildMode_DynamicLibrary:
 			for (String const &path : gen->output_object_paths) {
+				// Objects in the object cache stay for the next build, see lb_object_cache_init
+				if (lb_object_cache.enabled && string_starts_with(path, lb_object_cache.dir)) {
+					continue;
+				}
 				gb_file_remove(cast(char const *)path.text);
 			}
 			break;
