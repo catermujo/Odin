@@ -1,3 +1,5 @@
+gb_internal i32 lb_entity_type_cmp(Entity *x, Entity *y);
+
 gb_internal GB_COMPARE_PROC(codegen_global_entity_cmp) {
 	Entity *x = *cast(Entity **)a;
 	Entity *y = *cast(Entity **)b;
@@ -7,7 +9,13 @@ gb_internal GB_COMPARE_PROC(codegen_global_entity_cmp) {
 	if (x->kind != y->kind) {
 		return cast(i32)(x->kind - y->kind);
 	}
-	return token_pos_cmp(x->token.pos, y->token.pos);
+	i32 cmp = token_pos_cmp(x->token.pos, y->token.pos);
+	if (cmp) {
+		return cmp;
+	}
+	// Polymorphic instances share their declaration's token; without their type they keep the order the parallel
+	// checker found them in, and every module's procedures, declarations and types follow that order.
+	return lb_entity_type_cmp(x, y);
 }
 
 gb_internal GB_COMPARE_PROC(codegen_procedure_import_cmp) {
