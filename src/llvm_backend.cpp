@@ -115,6 +115,11 @@ gb_internal String get_default_microarchitecture() {
 		//
 		// `arm1176jzf-s` is what clang picks by default for this same triple.
 		default_march = str_lit("arm1176jzf-s");
+	} else if (build_context.metrics.arch == TargetArch_arm64 && build_context.metrics.os == TargetOs_darwin &&
+	           selected_subtarget == Subtarget_Default) {
+		// Every arm64 Mac has an M1 or newer, and clang picks `apple-m1` for this triple. `generic` leaves out
+		// LSE atomics and the Apple scheduling model. iOS devices can be older than M1, so they keep `generic`.
+		default_march = str_lit("apple-m1");
 	}
 
 	return default_march;

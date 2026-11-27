@@ -23,6 +23,9 @@ try out ideas that work well for math-heavy code while getting as much safety as
 - Generic `#+when` for gating an entire file.
 - Policy-driven scope exits (replaces `@(deferred_*)`): `.explicit` needs to create a scope with either `if`, `for` or
   `with` (new). `.implicit` keeps current behavior.
+- macOS arm64 builds default to `-microarch:apple-m1`, as clang does: every arm64 Mac has an M1 or newer. iOS keeps
+  `generic`. Darwin LTO links pass the final microarchitecture to the linker (`-Wl,-mcpu,<cpu>`). Without it, ld64 and
+  ld64.lld generate the code for their own default CPU (`cyclone` on arm64), and `-microarch` has no effect on it.
 - Many fixes, see tree from `upstream/master..origin/master`.
 - `core:os.rename_atomic` replaces a same-volume pathname while existing DELETE-sharing Windows readers retain
   the old file. Windows uses `FileRenameInfoEx` POSIX replacement; unsupported OS/filesystem operations return errors

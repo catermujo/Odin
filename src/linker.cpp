@@ -1352,6 +1352,13 @@ try_cross_linking:;
 				if (is_osx && !build_context.minimum_os_version_string_given) {
 					link_command_line = gb_string_appendc(link_command_line, " -Wno-override-module ");
 				}
+
+				if (is_osx) {
+					// The bitcode carries no per-procedure `target-cpu`, so ld64 and ld64.lld generate code for their
+					// own default CPU (`cyclone` on arm64, `core2` on x86-64) unless the link names the build's CPU.
+					String cpu = get_final_microarchitecture();
+					link_command_line = gb_string_append_fmt(link_command_line, " -Wl,-mcpu,%.*s ", LIT(cpu));
+				}
 			}
 
 			link_command_line = gb_string_appendc(link_command_line, object_files);
